@@ -76,6 +76,35 @@ reviewCommand
   });
 
 reviewCommand
+  .command("approve-all")
+  .description("Approve all pending chapters for a book")
+  .argument("<book-id>", "Book ID")
+  .action(async (bookId: string) => {
+    try {
+      const root = findProjectRoot();
+      const state = new StateManager(root);
+
+      const index = [...(await state.loadChapterIndex(bookId))];
+      let count = 0;
+      const now = new Date().toISOString();
+
+      const updated = index.map((ch) => {
+        if (ch.status === "ready-for-review" || ch.status === "audit-failed") {
+          count++;
+          return { ...ch, status: "approved" as const, updatedAt: now };
+        }
+        return ch;
+      });
+
+      await state.saveChapterIndex(bookId, updated);
+      log(`${count} chapter(s) approved.`);
+    } catch (e) {
+      logError(`Failed to approve: ${e}`);
+      process.exit(1);
+    }
+  });
+
+reviewCommand
   .command("reject")
   .description("Reject a chapter")
   .argument("<book-id>", "Book ID")

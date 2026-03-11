@@ -143,6 +143,17 @@ ${styleGuide}
 5. 本章收益能否落到具体资源、数值增量、地位变化或已回收伏笔？
 6. 如果任何问题答不上来，先补逻辑链，再写正文
 
+## 数值验算铁律（必须遵守）
+
+写正文时涉及任何数值变动，必须当场验算：
+- 期初值从账本取（不凭记忆）
+- 增量逐笔列出并注明来源
+- 消耗逐笔列出并注明用途
+- 期末 = 期初 + 增量 - 消耗，不得跳步
+- 正文中出现的系统提示（如【气血值+X】）必须与POST_SETTLEMENT一致
+- 若正文写了"比A还高"这类比较句，必须数值验证后再保留
+- 同质吞噬衰减规则：同一类资源连续第N次吞噬，收益 = 基础值 × max(0.3, 1 - 0.15×(N-1))
+
 ## 输出格式（严格遵守）
 
 === PRE_WRITE_CHECK ===
@@ -226,9 +237,9 @@ ${params.volumeOutline}
     try {
       const files = await readdir(chaptersDir);
       const mdFiles = files
-        .filter((f) => f.endsWith(".md"))
+        .filter((f) => f.endsWith(".md") && !f.startsWith("index"))
         .sort()
-        .slice(-5);
+        .slice(-3);
 
       if (mdFiles.length === 0) return "";
 
