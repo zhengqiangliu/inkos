@@ -114,15 +114,47 @@ inkos export 吞天魔帝 --format epub  # 导出 EPUB（手机/Kindle 阅读）
 
 ---
 
-## 为什么需要 InkOS？
+## 核心特性
 
-用 AI 写小说不是简单的"提示词 + 复制粘贴"。长篇小说很快就会崩：角色记忆混乱、物品凭空出现、同样的形容词每段都在重复、伏笔悄无声息地断掉。InkOS 把这些当工程问题来解决。
+### 33 维度审计 + 去 AI 味
 
-- **长期记忆** — 追踪世界的真实状态，而非 LLM 的幻觉
-- **反信息泄漏** — 确保角色只知道他们亲眼见证过的事
-- **资源衰减** — 物资会消耗、物品会损坏，没有无限背包
-- **词汇疲劳检测** — 在读者发现之前就捕捉过度使用的词语
-- **自动修订** — 在人工审核之前修复数值错误和连续性断裂
+连续性审计员从 33 个维度检查每一章草稿：角色记忆、物资连续性、伏笔回收、大纲偏离、叙事节奏、情感弧线等。内置 AI 痕迹检测维度，自动识别"LLM 味"表达（高频词、句式单调、过度总结），审计不通过自动进入修订循环。
+
+去 AI 味铁律内置于写手 agent 的 prompt 层——词汇疲劳词表、禁用句式、文风指纹注入，从源头减少 AI 生成痕迹。`revise --mode anti-detect` 可对已有章节做专门的反检测改写。
+
+### 文风仿写
+
+`inkos style analyze` 分析参考文本，提取统计指纹（句长分布、词频特征、节奏模式）和 LLM 风格指南。`inkos style import` 将指纹注入指定书籍，后续所有章节自动采用该风格，修订者也会用风格标准做审计。
+
+### 创作简报
+
+`inkos book create --brief my-ideas.md` 传入你的脑洞、世界观设定、人设文档。建筑师 agent 会基于简报生成故事设定（story_bible.md）和创作规则（book_rules.md），而非凭空创作。
+
+### 续写已有作品
+
+`inkos import chapters` 从已有小说文本导入章节，自动逆向工程 7 个真相文件（世界状态、角色矩阵、资源账本、伏笔钩子等），支持 `第X章` 和自定义分割模式、断点续导。导入后 `inkos write next` 无缝接续创作。
+
+### 同人创作
+
+`inkos fanfic init --from source.txt --mode canon` 从原作素材创建同人书。支持四种模式：canon（正典延续）、au（架空世界）、ooc（性格重塑）、cp（CP 向）。内置正典导入器、同人专属审计维度和信息边界管控——确保设定不矛盾。
+
+### 多模型路由
+
+不同 Agent 可以走不同模型和 Provider。写手用 Claude（创意强），审计用 GPT-4o（便宜快速），雷达用本地模型（零成本）。`inkos config set-model` 按 agent 粒度配置，未配置的自动回退全局模型。
+
+### 守护进程 + 通知推送
+
+`inkos up` 启动后台循环自动写章。管线对非关键问题全自动运行，关键问题暂停等人工审核。通知推送支持 Telegram、飞书、企业微信、Webhook（HMAC-SHA256 签名 + 事件过滤）。日志写入 `inkos.log`（JSON Lines），`-q` 静默模式。
+
+### 本地模型兼容
+
+支持任何 OpenAI 兼容接口（`--provider custom`）。Stream 自动降级——中转站不支持 SSE 时自动回退 sync。Fallback 解析器处理小模型不规范输出，流中断时自动恢复部分内容。
+
+### 可靠性保障
+
+每章自动创建状态快照，`inkos write rewrite` 可回滚任意章节。写手动笔前输出自检表（上下文、资源、伏笔、风险），写完输出结算表，审计员交叉验证。文件锁防止并发写入。写后验证器 11 条硬规则自动 spot-fix。
+
+---
 
 ## 工作原理
 
@@ -136,8 +168,8 @@ inkos export 吞天魔帝 --format epub  # 导出 EPUB（手机/Kindle 阅读）
 |-------|------|
 | **雷达 Radar** | 扫描平台趋势和读者偏好，指导故事方向（可插拔，可跳过） |
 | **建筑师 Architect** | 规划章节结构：大纲、场景节拍、节奏控制 |
-| **写手 Writer** | 根据大纲 + 当前世界状态生成正文 |
-| **连续性审计员 Auditor** | 对照长期记忆验证草稿 |
+| **写手 Writer** | 根据大纲 + 当前世界状态生成正文（两阶段：创意写作 → 状态结算） |
+| **连续性审计员 Auditor** | 对照 7 个真相文件验证草稿，33 维度检查 |
 | **修订者 Reviser** | 修复审计发现的问题 — 关键问题自动修复，其他标记给人工审核 |
 
 如果审计不通过，管线自动进入"修订 → 再审计"循环，直到所有关键问题清零。
@@ -156,7 +188,7 @@ inkos export 吞天魔帝 --format epub  # 导出 EPUB（手机/Kindle 阅读）
 | `emotional_arcs.md` | 情感弧线：按角色追踪情绪变化和成长 |
 | `character_matrix.md` | 角色交互矩阵：相遇记录、信息边界 |
 
-连续性审计员对照这些文件检查每一章草稿。如果角色"记起"了从未亲眼见过的事，或者拿出了两章前已经丢失的武器，审计员会捕捉到。旧书无新真相文件时自动兼容。
+连续性审计员对照这些文件检查每一章草稿。如果角色"记起"了从未亲眼见过的事，或者拿出了两章前已经丢失的武器，审计员会捕捉到。
 
 <p align="center">
   <img src="assets/screenshot-state.png" width="800" alt="长期记忆快照">
@@ -168,9 +200,7 @@ inkos export 吞天魔帝 --format epub  # 导出 EPUB（手机/Kindle 阅读）
 
 在此基础上，每个题材有专属规则（禁忌、语言铁律、节奏、审计维度），每本书有独立的 `book_rules.md`（主角人设、数值上限、自定义禁令）和 `story_bible.md`（世界观设定），由建筑师 agent 创建书籍时自动生成。
 
-详见 [CHANGELOG](CHANGELOG.md)。
-
-## 三种使用模式
+## 使用模式
 
 InkOS 提供三种交互方式，底层共享同一组原子操作：
 
@@ -201,6 +231,24 @@ inkos agent "先扫描市场趋势，然后根据结果创建一本新书"
 
 内置 13 个工具（write_draft、audit_chapter、revise_chapter、scan_market、create_book、get_book_status、read_truth_files、list_books、write_full_pipeline、web_fetch、import_style、import_canon、import_chapters），LLM 通过 tool-use 决定调用顺序。
 
+## 实测数据
+
+用 InkOS 全自动跑了一本玄幻题材的《吞天魔帝》：
+
+<p align="center">
+  <img src="assets/screenshot-chapters.png" width="800" alt="生产数据">
+</p>
+
+| 指标 | 数据 |
+|------|------|
+| 已完成章节 | 31 章 |
+| 总字数 | 452,191 字 |
+| 平均章字数 | ~14,500 字 |
+| 审计通过率 | 100% |
+| 资源追踪项 | 48 个 |
+| 活跃伏笔 | 20 条 |
+| 已回收伏笔 | 10 条 |
+
 ## 命令参考
 
 | 命令 | 说明 |
@@ -221,6 +269,7 @@ inkos agent "先扫描市场趋势，然后根据结果创建一本新书"
 | `inkos status [id]` | 项目状态 |
 | `inkos export [id]` | 导出书籍（`--format txt/md/epub`、`--output <path>`、`--approved-only`） |
 | `inkos radar scan` | 扫描平台趋势 |
+| `inkos fanfic init` | 从原作素材创建同人书（`--from`、`--mode canon/au/ooc/cp`） |
 | `inkos config set-global` | 设置全局 LLM 配置（~/.inkos/.env） |
 | `inkos config show-global` | 查看全局配置 |
 | `inkos config set/show` | 查看/更新项目配置 |
@@ -239,108 +288,10 @@ inkos agent "先扫描市场趋势，然后根据结果创建一本新书"
 
 `[id]` 参数在项目只有一本书时可省略，自动检测。所有命令支持 `--json` 输出结构化数据。`draft`/`write next` 支持 `--context` 传入创作指导，`--words` 覆盖每章字数。`book create` 支持 `--brief <file>` 传入创作简报（你的脑洞/设定文档），Architect 会基于此生成设定而非凭空创作。
 
-## 实测数据
-
-用 InkOS 全自动跑了一本玄幻题材的《吞天魔帝》：
-
-<p align="center">
-  <img src="assets/screenshot-chapters.png" width="800" alt="生产数据">
-</p>
-
-| 指标 | 数据 |
-|------|------|
-| 已完成章节 | 31 章 |
-| 总字数 | 452,191 字 |
-| 平均章字数 | ~14,500 字 |
-| 审计通过率 | 100% |
-| 资源追踪项 | 48 个 |
-| 活跃伏笔 | 20 条 |
-| 已回收伏笔 | 10 条 |
-
-## 核心特性
-
-### 状态快照 + 章节重写
-
-每章自动创建状态快照。使用 `inkos write rewrite <id> <n>` 可以回滚并重新生成任意章节 — 世界状态、资源账本、伏笔钩子全部恢复到该章写入前的状态。
-
-### 写入锁
-
-基于文件的锁机制防止对同一本书的并发写入。
-
-### 写前自检 + 写后结算
-
-写手 agent 在动笔前必须输出自检表（上下文范围、当前资源、待回收伏笔、冲突概述、风险扫描），写完后输出结算表（资源变动、伏笔变动）。审计员对照结算表和正文内容做交叉验证。
-
-### 可插拔雷达
-
-雷达数据源通过 `RadarSource` 接口实现可插拔。内置番茄小说和起点中文网两个数据源，也可以传入自定义数据源或直接跳过雷达。用户自己提供题材时，agent 模式会自动跳过市场扫描。
-
-### 守护进程模式
-
-`inkos up` 启动后台循环，按计划写章。管线对非关键问题全自动运行，当审计员标记无法自动修复的问题时暂停等待人工审核。所有日志自动写入项目根目录 `inkos.log`（JSON Lines 格式），`-q` 静默模式关闭 stderr 只保留文件日志。
-
-### 通知推送
-
-支持 Telegram、飞书、企业微信、Webhook。守护进程模式下，写完一章或审计不通过都会推通知到手机。Webhook 支持 HMAC-SHA256 签名和事件过滤。
-
-### 外部 Agent 集成
-
-原子命令 + `--json` 输出让 InkOS 可以被外部 AI Agent（如 OpenClaw、Claude Code 等）调用。Agent 通过 `exec` 执行 `inkos draft`/`audit`/`revise`，读取 JSON 结果决定下一步操作。
-
-## 项目结构
-
-```
-inkos/
-├── packages/
-│   ├── core/              # Agent 运行时、管线、状态管理
-│   │   ├── agents/        # architect, writer, continuity, reviser, radar, ai-tells, post-write-validator, sensitive-words, detector, style-analyzer
-│   │   ├── pipeline/      # runner, agent (tool-use), scheduler, detection-runner
-│   │   ├── state/         # 基于文件的状态管理器（7+ 真相文件 + 快照）
-│   │   ├── llm/           # OpenAI + Anthropic 双 SDK 接口 (流式)
-│   │   ├── notify/        # Telegram, 飞书, 企业微信, Webhook
-│   │   └── models/        # Zod schema 校验
-│   └── cli/               # Commander.js 命令行 (22 条命令)
-│       └── commands/      # init, book, write, draft, audit, revise, agent, review, detect, style...
-└── (规划中) studio/        # 网页审阅编辑界面
-```
-
-TypeScript 单仓库，pnpm workspaces 管理。
-
 ## 路线图
 
-- [x] 完整管线（雷达 → 建筑师 → 写手 → 审计 → 修订）
-- [x] 长期记忆 + 连续性审计
-- [x] 内置创作规则体系
-- [x] CLI 全套命令（20 条）
-- [x] 状态快照 + 章节重写
-- [x] 守护进程模式
-- [x] 通知推送（Telegram / 飞书 / 企微）
-- [x] 原子命令 + JSON 输出（draft / audit / revise）
-- [x] 自然语言 Agent 模式（tool-use 编排）
-- [x] 可插拔雷达（RadarSource 接口）
-- [x] 外部 Agent 集成（OpenClaw 等）
-- [x] 题材自定义 + 单本书规则（genre CLI + book_rules.md）
-- [x] 33 维度连续性审计（含 AI 痕迹检测 + 番外维度 + 大纲偏离检测）
-- [x] 去 AI 味铁律 + 文风指纹注入
-- [x] 多 LLM provider（OpenAI + Anthropic + 兼容接口）
-- [x] AIGC 检测 + 反检测改写管线
-- [x] Webhook 通知 + 智能调度（质量门控）
-- [x] 跨章节连贯性（章节摘要 + 支线/情感/角色矩阵）
-- [x] 番外写作（正典导入 + 4 维度审计 + 信息边界管控）
-- [x] 文风仿写（统计指纹 + LLM 风格指南 + 写手注入）
-- [x] 写后验证器（11 条硬规则 + 自动 spot-fix）
-- [x] 审计-修订闭环加固（AI 标记守卫 + 温度锁）
-- [x] 续写已有作品（import chapters + 自动逆向真相文件 + 断点续导）
-- [x] 多 Provider 路由（不同 agent 走不同 API 地址和 Key，`inkos config set-model --base-url --provider`）
-- [x] 数据分析（`inkos analytics`：审计通过率、高频问题、章节排名、token 用量统计）
-- [x] EPUB 导出（`inkos export --format epub`，手机/Kindle 阅读）
-- [x] 结构化日志系统（ANSI 颜色、JSON Lines 文件日志、静默模式、LLM 流式心跳）
-- [x] Stream 自动降级（中转站不支持 SSE 时自动回退 sync，兼容智谱/Gemini 等）
-- [x] 本地小模型兼容（fallback 解析 + 流中断部分内容恢复）
-- [x] 创作简报（`book create --brief` 传入你的脑洞，基于此生成设定）
 - [ ] `packages/studio` Web UI 审阅编辑界面（Vite + React + Hono）
 - [ ] 局部干预（重写半章 + 级联更新后续 truth 文件）
-- [ ] 英文小说全面适配（English genre profiles, prompts, audit rules, post-write validator）
 - [ ] 自定义 agent 插件系统
 - [ ] 平台格式导出（起点、番茄等）
 
