@@ -39,6 +39,7 @@ export interface InkTuiDashboardProps {
   readonly lastError?: string;
   readonly slashSuggestions?: ReadonlyArray<string>;
   readonly selectedSlashIndex?: number;
+  readonly showComposerCursor?: boolean;
   readonly onInputChange?: (value: string) => void;
   readonly onSubmit?: (value: string) => void;
 }
@@ -73,7 +74,7 @@ export function InkTuiDashboard(props: InkTuiDashboardProps): React.JSX.Element 
     sinceTimestamp: props.sinceTimestamp,
   });
   const activeAccent = props.isSubmitting ? WARM_ACCENT : statusColor(model.executionStatus);
-  const composer = renderComposerDisplay(props.inputValue, model.composerPlaceholder);
+  const composer = renderComposerDisplay(props.inputValue, model.composerPlaceholder, props.showComposerCursor ?? false);
 
   return (
     <Box flexDirection="column" width="100%" paddingX={2}>
@@ -112,6 +113,11 @@ export function InkTuiDashboard(props: InkTuiDashboardProps): React.JSX.Element 
             <Text color={composer.isPlaceholder ? WARM_MUTED : WARM_REPLY}>
               {composer.text}
             </Text>
+            {composer.cursor ? (
+              <Text color={props.isSubmitting ? WARM_ACCENT : WARM_ACCENT}>
+                {composer.cursor}
+              </Text>
+            ) : null}
           </Box>
           <Text color={props.isSubmitting ? WARM_ACCENT : WARM_MUTED}>
             {model.composerStatus} • {model.composerHelper}
@@ -151,6 +157,7 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
   const [activityIntent, setActivityIntent] = useState<InteractionIntentType | "unknown">("unknown");
   const [activityFrameIndex, setActivityFrameIndex] = useState(0);
   const [chatDepth, setChatDepth] = useState<ChatDepth>("normal");
+  const [showComposerCursor, setShowComposerCursor] = useState(true);
   const assistantDraftTimestampRef = useRef<number | null>(null);
   const submitLockRef = useRef(false);
   const slashSuggestions = getSlashSuggestions(inputValue, SLASH_COMMANDS);
@@ -169,6 +176,19 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
     }, activity.intervalMs);
     return () => clearInterval(timer);
   }, [activity.frames.length, activity.intervalMs, isSubmitting]);
+
+  useEffect(() => {
+    if (isSubmitting) {
+      setShowComposerCursor(false);
+      return;
+    }
+
+    setShowComposerCursor(true);
+    const timer = setInterval(() => {
+      setShowComposerCursor((current) => !current);
+    }, 700);
+    return () => clearInterval(timer);
+  }, [isSubmitting]);
 
   if (props.chatStreamBridge) {
     props.chatStreamBridge.getChatRequestOptions = () => ({
@@ -371,6 +391,7 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
       lastError={lastError}
       slashSuggestions={slashSuggestions}
       selectedSlashIndex={selectedSlashIndex}
+      showComposerCursor={showComposerCursor}
       onInputChange={(value) => {
         setInputValue(value);
         setSelectedSlashIndex(0);

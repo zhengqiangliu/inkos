@@ -115,6 +115,26 @@ describe("ink dashboard", () => {
     expect(frame.indexOf("/clear")).toBeGreaterThan(frame.indexOf("› /c"));
   });
 
+  it("renders a low-frequency bar cursor in the active composer", async () => {
+    const mod = await import("../tui/dashboard.js");
+
+    const { lastFrame } = render(
+      <mod.InkTuiDashboard
+        locale="en"
+        projectName="inkos-demo"
+        activeBookTitle="Night Harbor Echo"
+        modelLabel="gpt-5.4 (openai)"
+        session={createSession()}
+        inputValue="continue"
+        isSubmitting={false}
+        showComposerCursor
+      />,
+    );
+
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("continue│");
+  });
+
   it("defaults dashboard chrome to Chinese when locale is zh-CN", async () => {
     const mod = await import("../tui/dashboard.js");
 
