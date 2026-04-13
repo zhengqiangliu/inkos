@@ -254,11 +254,19 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
       return;
     }
 
+    // Page Up / Page Down for conversation scrolling
+    // Raw sequences: Page Up = \x1b[5~ , Page Down = \x1b[6~
+    if (_input === "\x1b[5~") {
+      const maxOffset = Math.max(0, session.messages.length - 4);
+      setScrollOffset((cur) => Math.min(maxOffset, cur + 3));
+      return;
+    }
+    if (_input === "\x1b[6~") {
+      setScrollOffset((cur) => Math.max(0, cur - 3));
+      return;
+    }
+
     if (key.downArrow) {
-      if (key.shift) {
-        setScrollOffset((cur) => Math.max(0, cur - 3));
-        return;
-      }
       const next = moveHistoryCursor(inputHistory, historyState, inputValue, "down");
       setHistoryState(next.state);
       setInputValue(next.value);
@@ -266,11 +274,6 @@ export function InkTuiApp(props: InkTuiAppProps): React.JSX.Element {
     }
 
     if (key.upArrow) {
-      if (key.shift) {
-        const maxOffset = Math.max(0, session.messages.length - 4);
-        setScrollOffset((cur) => Math.min(maxOffset, cur + 3));
-        return;
-      }
       const next = moveHistoryCursor(inputHistory, historyState, inputValue, "up");
       setHistoryState(next.state);
       setInputValue(next.value);
