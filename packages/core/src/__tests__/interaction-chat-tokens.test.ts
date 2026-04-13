@@ -74,6 +74,22 @@ describe("chat tool – maxTokens forwarding", () => {
     const options = mockChatCompletion.mock.calls[0]?.[3] as Record<string, unknown> | undefined;
     expect(options).toHaveProperty("maxTokens", 512);
   });
+
+  it("rethrows real chatCompletion errors instead of silently falling back", async () => {
+    mockChatCompletion.mockRejectedValueOnce(new Error("provider down"));
+
+    const tools = createInteractionToolsFromDeps(
+      fakePipeline as never,
+      fakeState as never,
+      {
+        getChatRequestOptions: () => ({ temperature: 0.7 }),
+      },
+    );
+
+    await expect(
+      tools.chat?.("你好", { bookId: "test-book", automationMode: "manual" }),
+    ).rejects.toThrow("provider down");
+  });
 });
 
 describe("developBookDraft – maxTokens not capped", () => {
