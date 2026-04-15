@@ -31,33 +31,36 @@ export async function resolveServiceModel(
   const preset = resolveServicePreset(baseService);
   const piProvider = SERVICE_TO_PI_PROVIDER[baseService] ?? "openai";
 
-  // Get pi-ai Model — may return undefined for model IDs not in the built-in registry
-  let model = getModel(piProvider as any, modelId as any) as Model<Api> | undefined;
+  // Resolve baseUrl: prefer custom/configured URL, then preset, then pi-ai's built-in
+  const apiType = service.startsWith("custom:")
+    ? (customApiFormat === "responses" ? "openai-responses" : "openai-completions")
+    : (preset?.api ?? "openai-completions");
+  const baseUrl = customBaseUrl ?? preset?.baseUrl ?? "";
 
-  if (!model) {
-    // Construct a Model object from service preset for models not in pi-ai's registry
-    const apiType = service.startsWith("custom:")
-      ? (customApiFormat === "responses" ? "openai-responses" : "openai-completions")
-      : (preset?.api ?? "openai-completions");
-    const baseUrl = customBaseUrl ?? preset?.baseUrl ?? "";
-    if (!baseUrl) {
-      throw new Error(
-        `Cannot resolve model "${modelId}" for service "${service}": no baseUrl available.`,
-      );
-    }
-    model = {
-      id: modelId,
-      name: modelId,
-      api: apiType as Api,
-      provider: piProvider,
-      baseUrl,
-      reasoning: false,
-      input: ["text"] as ("text" | "image")[],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 0,
-      maxTokens: 16384,
-    };
+  // Get pi-ai Model — may return undefined for model IDs not in the built-in registry
+  const piModel = getModel(piProvider as any, modelId as any) as Model<Api> | undefined;
+
+  // Always construct our own model object to ensure baseUrl and api format match our presets.
+  // pi-ai's built-in model may have a different baseUrl (e.g. international endpoint)
+  // or api format (e.g. anthropic-messages) than what we configure.
+  const effectiveBaseUrl = baseUrl || piModel?.baseUrl || "";
+  if (!effectiveBaseUrl) {
+    throw new Error(
+      `Cannot resolve model "${modelId}" for service "${service}": no baseUrl available.`,
+    );
   }
+  const model: Model<Api> = {
+    id: modelId,
+    name: piModel?.name ?? modelId,
+    api: apiType as Api,
+    provider: piProvider,
+    baseUrl: effectiveBaseUrl,
+    reasoning: piModel?.reasoning ?? false,
+    input: piModel?.input ?? ["text"] as ("text" | "image")[],
+    cost: piModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: piModel?.contextWindow ?? 0,
+    maxTokens: piModel?.maxTokens ?? 16384,
+  };
 
   return {
     model,
