@@ -61,6 +61,20 @@ const SubAgentParams = Type.Object({
   bookId: Type.Optional(Type.String({ description: "Book ID — required for all agents except architect" })),
   title: Type.Optional(Type.String({ description: "Architect only: explicit book title. Required when creating a book." })),
   chapterNumber: Type.Optional(Type.Number({ description: "Target chapter number for auditor/reviser. Omit to use the latest chapter." })),
+  chapterWordCount: Type.Optional(Type.Number({ description: "Writer only: explicit chapterWordCount override." })),
+  mode: Type.Optional(Type.Union([
+    Type.Literal("spot-fix"),
+    Type.Literal("polish"),
+    Type.Literal("rewrite"),
+    Type.Literal("rework"),
+    Type.Literal("anti-detect"),
+  ])),
+  format: Type.Optional(Type.Union([
+    Type.Literal("txt"),
+    Type.Literal("md"),
+    Type.Literal("epub"),
+  ])),
+  approvedOnly: Type.Optional(Type.Boolean({ description: "Exporter only: export approved chapters only." })),
 });
 
 function deriveBookIdFromTitle(title: string): string {
@@ -91,7 +105,7 @@ export function createSubAgentTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<undefined>> {
-      const { agent, instruction, bookId, title, chapterNumber } = params;
+      const { agent, instruction, bookId, title, chapterNumber, chapterWordCount, mode, format, approvedOnly } = params;
 
       const progress = (msg: string) => {
         onUpdate?.(textResult(msg));
@@ -121,7 +135,7 @@ export function createSubAgentTool(
           case "writer": {
             if (!bookId) return textResult("Error: bookId is required for the writer agent.");
             progress(`Writing next chapter for "${bookId}"...`);
-            const result = await pipeline.writeNextChapter(bookId);
+            const result = await pipeline.writeNextChapter(bookId, chapterWordCount);
             progress(`Writer finished chapter for "${bookId}".`);
             return textResult(
               `Chapter written for "${bookId}". ` +
@@ -143,33 +157,32 @@ export function createSubAgentTool(
 
           case "reviser": {
             if (!bookId) return textResult("Error: bookId is required for the reviser agent.");
-            // Detect revision mode from instruction keywords
-            const mode: ReviseMode = /rewrite|改写|重写/.test(instruction)
+            const resolvedMode: ReviseMode = mode ?? (/rewrite|改写|重写/.test(instruction)
               ? "rewrite"
               : /polish|润色/.test(instruction)
                 ? "polish"
                 : /rework|返工/.test(instruction)
                   ? "rework"
-                  : "spot-fix";
-            progress(`Revising "${bookId}" chapter ${chapterNumber ?? "latest"} in ${mode} mode...`);
-            await pipeline.reviseDraft(bookId, chapterNumber, mode);
+                  : "spot-fix");
+            progress(`Revising "${bookId}" chapter ${chapterNumber ?? "latest"} in ${resolvedMode} mode...`);
+            await pipeline.reviseDraft(bookId, chapterNumber, resolvedMode);
             progress(`Revision complete for "${bookId}".`);
-            return textResult(`Revision (${mode}) complete for "${bookId}" chapter ${chapterNumber ?? "latest"}.`);
+            return textResult(`Revision (${resolvedMode}) complete for "${bookId}" chapter ${chapterNumber ?? "latest"}.`);
           }
 
           case "exporter": {
             if (!bookId) return textResult("Error: bookId is required for the exporter agent.");
             if (!projectRoot) return textResult("Error: exporter requires projectRoot.");
-            const inferredFormat = /epub/i.test(instruction)
+            const inferredFormat = format ?? (/epub/i.test(instruction)
               ? "epub"
               : /markdown|\bmd\b/i.test(instruction)
                 ? "md"
-                : "txt";
-            const approvedOnly = /approved|已通过|通过章节/.test(instruction);
+                : "txt");
+            const exportApprovedOnly = approvedOnly ?? /approved|已通过|通过章节/.test(instruction);
             const state = new StateManager(projectRoot);
             const result = await writeExportArtifact(state, bookId, {
               format: inferredFormat,
-              approvedOnly,
+              approvedOnly: exportApprovedOnly,
             });
             return textResult(
               `Exported "${bookId}": ${result.chaptersExported} chapters, ${result.totalWords} words → ${result.outputPath}`,

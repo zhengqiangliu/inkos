@@ -160,4 +160,64 @@ describe("agent deterministic writing tools", () => {
       }),
     );
   });
+
+  it("passes chapterWordCount through the writer sub-agent", async () => {
+    const pipeline = {
+      writeNextChapter: vi.fn(async () => ({
+        chapterNumber: 4,
+        wordCount: 2600,
+      })),
+    };
+    const tool = createSubAgentTool(pipeline as never, "harbor");
+
+    await tool.execute("tool-7", {
+      agent: "writer",
+      bookId: "harbor",
+      chapterWordCount: 2600,
+      instruction: "继续写，控制在 2600 字",
+    } as any);
+
+    expect(pipeline.writeNextChapter).toHaveBeenCalledWith("harbor", 2600);
+  });
+
+  it("prefers explicit reviser mode over instruction guessing", async () => {
+    const pipeline = {
+      reviseDraft: vi.fn(async () => ({
+        chapterNumber: 3,
+        wordCount: 120,
+        fixedIssues: [],
+        applied: true,
+        status: "ready-for-review" as const,
+      })),
+    };
+    const tool = createSubAgentTool(pipeline as never, "harbor");
+
+    await tool.execute("tool-8", {
+      agent: "reviser",
+      bookId: "harbor",
+      chapterNumber: 3,
+      mode: "spot-fix",
+      instruction: "重写第3章",
+    } as any);
+
+    expect(pipeline.reviseDraft).toHaveBeenCalledWith("harbor", 3, "spot-fix");
+  });
+
+  it("uses explicit exporter params instead of guessing from instruction", async () => {
+    const pipeline = {};
+    const tool = createSubAgentTool(pipeline as never, "harbor", root);
+
+    const result = await tool.execute("tool-9", {
+      agent: "exporter",
+      bookId: "harbor",
+      format: "md",
+      approvedOnly: false,
+      instruction: "导出成 epub",
+    } as any);
+
+    expect(result.content[0]?.type).toBe("text");
+    if (result.content[0]?.type === "text") {
+      expect(result.content[0].text).toContain(".md");
+    }
+  });
 });

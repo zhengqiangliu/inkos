@@ -51,6 +51,9 @@ describe("buildAgentSystemPrompt", () => {
       expect(prompt).toContain("writer");
       expect(prompt).toContain("auditor");
       expect(prompt).toContain("reviser");
+      expect(prompt).toContain("chapterWordCount");
+      expect(prompt).toContain("mode");
+      expect(prompt).toContain("approvedOnly");
       expect(prompt).toContain("read");
       expect(prompt).toContain("revise_chapter");
       expect(prompt).toContain("write_truth_file");

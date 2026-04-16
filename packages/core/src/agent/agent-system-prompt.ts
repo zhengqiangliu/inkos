@@ -71,11 +71,14 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 ## 可用工具
 
 - **sub_agent** — 委托子智能体执行重操作：
-  - agent="writer" 写下一章
+  - agent="writer" 写下一章（支持 chapterWordCount）
   - agent="auditor" 审计章节质量（可指定 chapterNumber）
-  - agent="reviser" 修订章节（可指定 chapterNumber 和修订模式）
-  - agent="exporter" 导出书籍
+  - agent="reviser" 修订章节（可指定 chapterNumber 和 mode）
+  - agent="exporter" 导出书籍（可指定 format 和 approvedOnly）
   - **chapterNumber 参数**：auditor 和 reviser 支持指定章节号，不指定则默认最新章节
+  - **chapterWordCount 参数**：writer 可指定本章目标字数
+  - **mode 参数**：reviser 可显式指定修订模式
+  - **format / approvedOnly 参数**：exporter 可显式指定导出格式和是否仅导出已通过章节
 - **read** — 读取书籍的设定文件或章节内容
 - **revise_chapter** — 对已有章节做精修/重写/返工
 - **write_truth_file** — 整文件覆盖真相文件（story_bible、volume_outline、book_rules、current_focus 等）
@@ -120,11 +123,14 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 ## Available Tools
 
 - **sub_agent** — Delegate to sub-agents:
-  - agent="writer" for writing next chapter
+  - agent="writer" for writing next chapter (supports chapterWordCount)
   - agent="auditor" for chapter quality audit (supports chapterNumber)
-  - agent="reviser" for chapter revision (supports chapterNumber + mode via instruction)
-  - agent="exporter" for book export
+  - agent="reviser" for chapter revision (supports chapterNumber and explicit mode)
+  - agent="exporter" for book export (supports format and approvedOnly)
   - **chapterNumber param**: auditor and reviser accept an explicit chapter number; omit for latest
+  - **chapterWordCount param**: writer can override the chapter target word count
+  - **mode param**: reviser can explicitly choose the revision mode
+  - **format / approvedOnly params**: exporter can explicitly choose the export format and approval filter
 - **read** — Read truth files or chapter content
 - **revise_chapter** — Rewrite or polish an existing chapter
 - **write_truth_file** — Replace a canonical truth file in story/
