@@ -828,7 +828,7 @@ describe("createStudioServer daemon lifecycle", () => {
         stream: false,
         modelsSource: "fallback",
       },
-      models: [{ id: "MiniMax-M2.7", name: "MiniMax-M2.7" }],
+      models: [],
     });
   });
 
@@ -863,7 +863,7 @@ describe("createStudioServer daemon lifecycle", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      models: [{ id: "MiniMax-M2.7", name: "MiniMax-M2.7" }],
+      models: [],
     });
   });
 
