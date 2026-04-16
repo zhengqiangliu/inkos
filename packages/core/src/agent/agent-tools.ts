@@ -57,24 +57,39 @@ const SubAgentParams = Type.Object({
     Type.Literal("reviser"),
     Type.Literal("exporter"),
   ]),
-  instruction: Type.String({ description: "Natural language instruction from the main Agent" }),
+  instruction: Type.String({ description: "Natural language instruction for the sub-agent" }),
   bookId: Type.Optional(Type.String({ description: "Book ID — required for all agents except architect" })),
-  title: Type.Optional(Type.String({ description: "Architect only: explicit book title. Required when creating a book." })),
-  chapterNumber: Type.Optional(Type.Number({ description: "Target chapter number for auditor/reviser. Omit to use the latest chapter." })),
-  chapterWordCount: Type.Optional(Type.Number({ description: "Writer only: explicit chapterWordCount override." })),
+  chapterNumber: Type.Optional(Type.Number({ description: "auditor/reviser: target chapter number. Omit to use the latest chapter." })),
+  // -- architect params --
+  title: Type.Optional(Type.String({ description: "architect only: explicit book title. Required when creating a book." })),
+  genre: Type.Optional(Type.String({ description: "architect only: genre (xuanhuan, urban, mystery, romance, scifi, fantasy, wuxia, general, etc.)" })),
+  platform: Type.Optional(Type.Union([
+    Type.Literal("tomato"),
+    Type.Literal("qidian"),
+    Type.Literal("feilu"),
+    Type.Literal("other"),
+  ], { description: "architect only: target platform. Default: other" })),
+  language: Type.Optional(Type.Union([
+    Type.Literal("zh"),
+    Type.Literal("en"),
+  ], { description: "architect only: writing language. Default: zh" })),
+  targetChapters: Type.Optional(Type.Number({ description: "architect only: total chapter count. Default: 200" })),
+  chapterWordCount: Type.Optional(Type.Number({ description: "architect/writer: words per chapter. Default: 3000" })),
+  // -- reviser params --
   mode: Type.Optional(Type.Union([
     Type.Literal("spot-fix"),
     Type.Literal("polish"),
     Type.Literal("rewrite"),
     Type.Literal("rework"),
     Type.Literal("anti-detect"),
-  ])),
+  ], { description: "reviser only: revision mode. Default: spot-fix" })),
+  // -- exporter params --
   format: Type.Optional(Type.Union([
     Type.Literal("txt"),
     Type.Literal("md"),
     Type.Literal("epub"),
-  ])),
-  approvedOnly: Type.Optional(Type.Boolean({ description: "Exporter only: export approved chapters only." })),
+  ], { description: "exporter only: export format. Default: txt" })),
+  approvedOnly: Type.Optional(Type.Boolean({ description: "exporter only: export only approved chapters. Default: false" })),
 });
 
 function deriveBookIdFromTitle(title: string): string {
@@ -105,7 +120,7 @@ export function createSubAgentTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<undefined>> {
-      const { agent, instruction, bookId, title, chapterNumber, chapterWordCount, mode, format, approvedOnly } = params;
+      const { agent, instruction, bookId, title, chapterNumber, genre, platform, language, targetChapters, chapterWordCount, mode, format, approvedOnly } = params;
 
       const progress = (msg: string) => {
         onUpdate?.(textResult(msg));
@@ -114,7 +129,6 @@ export function createSubAgentTool(
       try {
         switch (agent) {
           case "architect": {
-            // architect 只在没有书的时候可用（建书流程）
             if (activeBookId) {
               return textResult("当前已有书籍，不需要建书。如果你想创建新书，请先回到首页。");
             }
@@ -123,9 +137,21 @@ export function createSubAgentTool(
               return textResult('Error: title is required for the architect agent.');
             }
             const id = bookId || deriveBookIdFromTitle(resolvedTitle) || `book-${Date.now().toString(36)}`;
+            const now = new Date().toISOString();
             progress(`Starting architect for book "${id}"...`);
             await pipeline.initBook(
-              { id, genre: "general", title: resolvedTitle, language: "zh" } as any,
+              {
+                id,
+                title: resolvedTitle,
+                genre: genre ?? "general",
+                platform: (platform ?? "other") as any,
+                language: (language ?? "zh") as any,
+                status: "outlining" as any,
+                targetChapters: targetChapters ?? 200,
+                chapterWordCount: chapterWordCount ?? 3000,
+                createdAt: now,
+                updatedAt: now,
+              },
               { externalContext: instruction },
             );
             progress(`Architect finished — book "${id}" foundation created.`);
@@ -148,22 +174,18 @@ export function createSubAgentTool(
             progress(`Auditing chapter ${chapterNumber ?? "latest"} for "${bookId}"...`);
             const audit = await pipeline.auditDraft(bookId, chapterNumber);
             progress(`Audit complete for "${bookId}".`);
-            const issueCount = audit.issues?.length ?? 0;
+            const issueLines = (audit.issues ?? [])
+              .map((i: any) => `[${i.severity}] ${i.description}`)
+              .join("\n");
             return textResult(
-              `Audit complete for "${bookId}": ${issueCount} issue(s) found. ` +
-              `Chapter ${audit.chapterNumber}.`,
+              `Audit chapter ${audit.chapterNumber}: ${audit.passed ? "PASSED" : "FAILED"}, ${(audit.issues ?? []).length} issue(s).` +
+              (issueLines ? `\n${issueLines}` : ""),
             );
           }
 
           case "reviser": {
             if (!bookId) return textResult("Error: bookId is required for the reviser agent.");
-            const resolvedMode: ReviseMode = mode ?? (/rewrite|改写|重写/.test(instruction)
-              ? "rewrite"
-              : /polish|润色/.test(instruction)
-                ? "polish"
-                : /rework|返工/.test(instruction)
-                  ? "rework"
-                  : "spot-fix");
+            const resolvedMode: ReviseMode = (mode as ReviseMode) ?? "spot-fix";
             progress(`Revising "${bookId}" chapter ${chapterNumber ?? "latest"} in ${resolvedMode} mode...`);
             await pipeline.reviseDraft(bookId, chapterNumber, resolvedMode);
             progress(`Revision complete for "${bookId}".`);

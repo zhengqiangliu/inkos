@@ -99,5 +99,15 @@ describe("buildAgentSystemPrompt", () => {
       // architect 不在可用工具列表里
       expect(prompt).not.toMatch(/agent="architect"/);
     });
+
+    it("book-mode prompt documents all sub_agent params", () => {
+      const prompt = buildAgentSystemPrompt("test-book", "zh");
+      expect(prompt).toContain("chapterWordCount");
+      expect(prompt).toContain("chapterNumber");
+      expect(prompt).toContain("mode");
+      expect(prompt).toContain("anti-detect");
+      expect(prompt).toContain("format");
+      expect(prompt).toContain("approvedOnly");
+    });
   });
 });

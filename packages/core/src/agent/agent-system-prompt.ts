@@ -17,6 +17,7 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 
 2. **确认建书**（调用阶段）— 当信息足够时，调用 sub_agent 工具委托 architect 子智能体建书：
    - 必须显式传入 "title" 参数，不能留空
+   - 同时传入结构化参数：genre（题材）、platform（平台）、language（语言）、targetChapters（章数）、chapterWordCount（每章字数）
    - instruction 中包含收集到的所有信息（题材、世界观、主角、冲突等）
    - architect 会生成完整的 foundation（世界观设定、卷纲规划、叙事规则等）
 
@@ -47,6 +48,7 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 
 2. **Create book** — When you have enough info, call the sub_agent tool with agent="architect":
    - Pass the explicit "title" parameter; do not leave it empty
+   - Pass structured params: genre, platform, language, targetChapters, chapterWordCount
    - Include all collected info in the instruction
    - The architect will generate the complete foundation
 
@@ -71,14 +73,10 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 ## 可用工具
 
 - **sub_agent** — 委托子智能体执行重操作：
-  - agent="writer" 写下一章（支持 chapterWordCount）
-  - agent="auditor" 审计章节质量（可指定 chapterNumber）
-  - agent="reviser" 修订章节（可指定 chapterNumber 和 mode）
-  - agent="exporter" 导出书籍（可指定 format 和 approvedOnly）
-  - **chapterNumber 参数**：auditor 和 reviser 支持指定章节号，不指定则默认最新章节
-  - **chapterWordCount 参数**：writer 可指定本章目标字数
-  - **mode 参数**：reviser 可显式指定修订模式
-  - **format / approvedOnly 参数**：exporter 可显式指定导出格式和是否仅导出已通过章节
+  - agent="writer" 写下一章（参数：chapterWordCount 覆盖字数）
+  - agent="auditor" 审计章节质量（参数：chapterNumber 指定章节）
+  - agent="reviser" 修订章节（参数：chapterNumber, mode: spot-fix/polish/rewrite/rework/anti-detect）
+  - agent="exporter" 导出书籍（参数：format: txt/md/epub, approvedOnly: true/false）
 - **read** — 读取书籍的设定文件或章节内容
 - **revise_chapter** — 对已有章节做精修/重写/返工
 - **write_truth_file** — 整文件覆盖真相文件（story_bible、volume_outline、book_rules、current_focus 等）
@@ -124,14 +122,10 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 ## Available Tools
 
 - **sub_agent** — Delegate to sub-agents:
-  - agent="writer" for writing next chapter (supports chapterWordCount)
-  - agent="auditor" for chapter quality audit (supports chapterNumber)
-  - agent="reviser" for chapter revision (supports chapterNumber and explicit mode)
-  - agent="exporter" for book export (supports format and approvedOnly)
-  - **chapterNumber param**: auditor and reviser accept an explicit chapter number; omit for latest
-  - **chapterWordCount param**: writer can override the chapter target word count
-  - **mode param**: reviser can explicitly choose the revision mode
-  - **format / approvedOnly params**: exporter can explicitly choose the export format and approval filter
+  - agent="writer" write next chapter (params: chapterWordCount for word count override)
+  - agent="auditor" audit chapter quality (params: chapterNumber to target specific chapter)
+  - agent="reviser" revise chapter (params: chapterNumber, mode: spot-fix/polish/rewrite/rework/anti-detect)
+  - agent="exporter" export book (params: format: txt/md/epub, approvedOnly: true/false)
 - **read** — Read truth files or chapter content
 - **revise_chapter** — Rewrite or polish an existing chapter
 - **write_truth_file** — Replace a canonical truth file in story/
