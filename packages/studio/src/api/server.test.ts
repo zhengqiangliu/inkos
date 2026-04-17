@@ -28,7 +28,6 @@ const loadBookSessionMock = vi.fn();
 const persistBookSessionMock = vi.fn();
 const appendBookSessionMessageMock = vi.fn();
 const renameBookSessionMock = vi.fn();
-const updateSessionTitleMock = vi.fn();
 const deleteBookSessionMock = vi.fn();
 const migrateBookSessionMock = vi.fn();
 const resolveServiceModelMock = vi.fn();
@@ -179,7 +178,6 @@ vi.mock("@actalk/inkos-core", () => {
     persistBookSession: persistBookSessionMock,
     appendBookSessionMessage: appendBookSessionMessageMock,
     renameBookSession: renameBookSessionMock,
-    updateSessionTitle: updateSessionTitleMock,
     deleteBookSession: deleteBookSessionMock,
     migrateBookSession: migrateBookSessionMock,
     SessionAlreadyMigratedError: MockSessionAlreadyMigratedError,
@@ -347,7 +345,6 @@ describe("createStudioServer daemon lifecycle", () => {
     persistBookSessionMock.mockReset();
     appendBookSessionMessageMock.mockReset();
     renameBookSessionMock.mockReset();
-    updateSessionTitleMock.mockReset();
     deleteBookSessionMock.mockReset();
     migrateBookSessionMock.mockReset();
     resolveServiceModelMock.mockReset();
@@ -376,10 +373,6 @@ describe("createStudioServer daemon lifecycle", () => {
       (session: unknown, _msg: unknown) => session,
     );
     renameBookSessionMock.mockResolvedValue(null);
-    updateSessionTitleMock.mockImplementation(async (_root: string, _sessionId: string, title: string) => ({
-      ...defaultBookSession,
-      title,
-    }));
     deleteBookSessionMock.mockResolvedValue(undefined);
     migrateBookSessionMock.mockImplementation(async (_root: string, _sessionId: string, bookId: string) => ({
       ...defaultBookSession,
