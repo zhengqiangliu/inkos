@@ -16,6 +16,23 @@ function textResult(text: string): AgentToolResult<undefined> {
   return { content: [{ type: "text", text }], details: undefined };
 }
 
+interface AuditIssueView {
+  severity: string;
+  category: string;
+  description: string;
+  suggestion: string;
+}
+
+interface AuditReportDetails {
+  kind: "audit_report";
+  bookId: string;
+  chapterNumber: number;
+  passed: boolean;
+  issueCount: number;
+  summary: string;
+  issues: AuditIssueView[];
+}
+
 /**
  * Tool paths are documented as relative to books/. Some prompts still include
  * examples with an extra `books/` prefix, so we normalize it away defensively.
@@ -130,7 +147,7 @@ export function createSubAgentTool(
       params: Static<typeof SubAgentParams>,
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
-    ): Promise<AgentToolResult<undefined>> {
+    ): Promise<AgentToolResult<AuditReportDetails | undefined>> {
       const { agent, instruction, bookId, title, chapterNumber, genre, platform, language, targetChapters, chapterWordCount, mode, format, approvedOnly } = params;
 
       const progress = (msg: string) => {
@@ -185,13 +202,40 @@ export function createSubAgentTool(
             progress(`Auditing chapter ${chapterNumber ?? "latest"} for "${bookId}"...`);
             const audit = await pipeline.auditDraft(bookId, chapterNumber);
             progress(`Audit complete for "${bookId}".`);
-            const issueLines = (audit.issues ?? [])
-              .map((i: any) => `[${i.severity}] ${i.description}`)
-              .join("\n");
-            return textResult(
-              `Audit chapter ${audit.chapterNumber}: ${audit.passed ? "PASSED" : "FAILED"}, ${(audit.issues ?? []).length} issue(s).` +
-              (issueLines ? `\n${issueLines}` : ""),
-            );
+            const issues: AuditIssueView[] = (audit.issues ?? []).map((issue: any) => ({
+              severity: typeof issue?.severity === "string" && issue.severity.trim().length > 0 ? issue.severity : "warning",
+              category: typeof issue?.category === "string" && issue.category.trim().length > 0 ? issue.category : "unknown",
+              description: typeof issue?.description === "string" ? issue.description : String(issue?.description ?? ""),
+              suggestion: typeof issue?.suggestion === "string" ? issue.suggestion : "",
+            }));
+            const details: AuditReportDetails = {
+              kind: "audit_report",
+              bookId,
+              chapterNumber: audit.chapterNumber,
+              passed: audit.passed,
+              issueCount: issues.length,
+              summary: typeof audit.summary === "string" ? audit.summary : "",
+              issues,
+            };
+            const issueLines = issues.length > 0
+              ? issues
+                .map((issue, index) =>
+                  `${index + 1}. [${issue.severity}] ${issue.description}`
+                  + (issue.category ? ` (category: ${issue.category})` : "")
+                  + (issue.suggestion ? `\n   suggestion: ${issue.suggestion}` : ""),
+                )
+                .join("\n")
+              : "No issues.";
+            const reportText = [
+              `Audit chapter ${details.chapterNumber}: ${details.passed ? "PASSED" : "FAILED"}, ${details.issueCount} issue(s).`,
+              details.summary ? `Summary: ${details.summary}` : "",
+              "Issues:",
+              issueLines,
+            ].filter((line) => line.length > 0).join("\n");
+            return {
+              content: [{ type: "text", text: reportText }],
+              details,
+            };
           }
 
           case "reviser": {

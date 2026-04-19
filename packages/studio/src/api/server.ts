@@ -102,6 +102,103 @@ function extractToolError(result: unknown): string {
   return String(result).slice(0, 500);
 }
 
+function parseExplicitAuditChapter(instruction: string): number | null {
+  const text = instruction.trim();
+  const patterns = [
+    /^\/audit\s+(\d+)\s*$/i,
+    /^audit\s+chapter\s+(\d+)\s*$/i,
+    /^审计第?\s*(\d+)\s*(?:章|章节)?\s*$/u,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const chapter = Number.parseInt(match[1], 10);
+    if (Number.isInteger(chapter) && chapter > 0) {
+      return chapter;
+    }
+  }
+
+  return null;
+}
+
+interface AuditIssueReport {
+  severity: string;
+  category: string;
+  description: string;
+  suggestion: string;
+}
+
+interface AuditToolReport {
+  bookId?: string;
+  chapterNumber: number;
+  passed: boolean;
+  issueCount: number;
+  summary: string;
+  issues: AuditIssueReport[];
+}
+
+function parseAuditToolReport(result: unknown): AuditToolReport | null {
+  if (!result || typeof result !== "object") return null;
+  const payload = result as {
+    details?: unknown;
+  };
+  if (!payload.details || typeof payload.details !== "object") return null;
+  const details = payload.details as {
+    kind?: unknown;
+    bookId?: unknown;
+    chapterNumber?: unknown;
+    passed?: unknown;
+    issueCount?: unknown;
+    summary?: unknown;
+    issues?: unknown;
+  };
+  if (details.kind !== "audit_report") return null;
+  if (typeof details.chapterNumber !== "number" || !Number.isInteger(details.chapterNumber) || details.chapterNumber < 1) {
+    return null;
+  }
+  if (typeof details.passed !== "boolean") return null;
+  const issuesInput = Array.isArray(details.issues) ? details.issues : [];
+  const issues: AuditIssueReport[] = issuesInput.map((issue) => {
+    const parsed = issue as { severity?: unknown; category?: unknown; description?: unknown; suggestion?: unknown };
+    return {
+      severity: typeof parsed.severity === "string" ? parsed.severity : "warning",
+      category: typeof parsed.category === "string" ? parsed.category : "unknown",
+      description: typeof parsed.description === "string" ? parsed.description : String(parsed.description ?? ""),
+      suggestion: typeof parsed.suggestion === "string" ? parsed.suggestion : "",
+    };
+  });
+  return {
+    ...(typeof details.bookId === "string" && details.bookId.trim().length > 0 ? { bookId: details.bookId } : {}),
+    chapterNumber: details.chapterNumber,
+    passed: details.passed,
+    issueCount: typeof details.issueCount === "number" ? details.issueCount : issues.length,
+    summary: typeof details.summary === "string" ? details.summary : "",
+    issues,
+  };
+}
+
+function buildAuditInstruction(originalInstruction: string, chapter: number): string {
+  return [
+    `请执行审计第${chapter}章。`,
+    "必须调用且仅调用一次 sub_agent 工具，agent=\"auditor\"，并传入 chapterNumber。",
+    "不要改写章节，不要调用 revise/rewrite 工具。",
+    "基于工具输出，最后用中文给出完整审计报告：是否通过、summary、问题总数、逐条问题（严重级别/类别/描述/建议）。",
+    `用户原始指令：${originalInstruction}`,
+  ].join("\n");
+}
+
+function formatAuditReportForChat(report: AuditToolReport): string {
+  const header = `第${report.chapterNumber}章审计${report.passed ? "通过" : "未通过"}（问题数：${report.issueCount}）`;
+  const summary = report.summary.trim().length > 0 ? `摘要：${report.summary.trim()}` : "摘要：无";
+  const issueLines = report.issues.length > 0
+    ? report.issues.map((issue, index) =>
+      `${index + 1}. [${issue.severity}] ${issue.category} - ${issue.description}`
+      + (issue.suggestion.trim().length > 0 ? `；建议：${issue.suggestion}` : ""))
+    : ["无问题。"];
+  return [header, summary, "审计明细：", ...issueLines].join("\n");
+}
+
 interface CollectedToolExec {
   id: string;
   tool: string;
@@ -611,6 +708,111 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       },
       externalContext: overrides?.externalContext,
     };
+  }
+
+  type AuditOutcome =
+    | {
+      ok: true;
+      result: unknown;
+      passed: boolean;
+      issueCount: number;
+      summary: string;
+    }
+    | {
+      ok: false;
+      status: 404 | 500;
+      error: string;
+    };
+
+  function formatAuditIssue(issue: unknown): string {
+    if (!issue || typeof issue !== "object") {
+      return "";
+    }
+    const parsed = issue as { severity?: unknown; description?: unknown };
+    const description = typeof parsed.description === "string" ? parsed.description.trim() : "";
+    if (!description) return "";
+    const severity = typeof parsed.severity === "string" ? parsed.severity.trim() : "";
+    return severity ? `[${severity}] ${description}` : description;
+  }
+
+  async function runChapterAudit(bookId: string, chapterNum: number): Promise<AuditOutcome> {
+    try {
+      const bookDir = state.bookDir(bookId);
+      const book = await state.loadBookConfig(bookId);
+      const chaptersDir = join(bookDir, "chapters");
+      const files = await readdir(chaptersDir);
+      const paddedNum = String(chapterNum).padStart(4, "0");
+      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+      if (!match) {
+        return { ok: false, status: 404, error: "Chapter not found" };
+      }
+
+      const content = await readFile(join(chaptersDir, match), "utf-8");
+      const currentConfig = await loadCurrentProjectConfig();
+      const { ContinuityAuditor } = await import("@actalk/inkos-core");
+      const auditor = new ContinuityAuditor({
+        client: createLLMClient(currentConfig.llm),
+        model: currentConfig.llm.model,
+        projectRoot: root,
+        bookId,
+      });
+      const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre) as {
+        passed?: unknown;
+        summary?: unknown;
+        issues?: unknown;
+      };
+
+      const passed = result.passed === true;
+      const rawIssues = Array.isArray(result.issues) ? result.issues : [];
+      const issueCount = rawIssues.length;
+      const issueMessages = rawIssues
+        .map((issue) => formatAuditIssue(issue))
+        .filter((entry) => entry.length > 0);
+      const summaryText = typeof result.summary === "string" ? result.summary.trim() : "";
+      const summary = summaryText.length > 0 ? summaryText : (!passed ? issueMessages[0] ?? "" : "");
+
+      const chapterIndex = await state.loadChapterIndex(bookId);
+      const updatedAt = new Date().toISOString();
+      const updatedIndex = chapterIndex.map((chapter) =>
+        chapter.number === chapterNum
+          ? {
+              ...chapter,
+              status: (passed ? "ready-for-review" : "audit-failed") as typeof chapter.status,
+              updatedAt,
+              auditIssues: issueMessages,
+            }
+          : chapter,
+      );
+      await state.saveChapterIndex(bookId, updatedIndex);
+
+      return {
+        ok: true,
+        result,
+        passed,
+        issueCount,
+        summary,
+      };
+    } catch (e) {
+      return { ok: false, status: 500, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  async function runChapterAuditWithEvents(bookId: string, chapterNum: number): Promise<AuditOutcome> {
+    broadcast("audit:start", { bookId, chapter: chapterNum });
+    const outcome = await runChapterAudit(bookId, chapterNum);
+    if (!outcome.ok) {
+      broadcast("audit:error", { bookId, chapter: chapterNum, error: outcome.error });
+      return outcome;
+    }
+
+    broadcast("audit:complete", {
+      bookId,
+      chapter: chapterNum,
+      passed: outcome.passed,
+      issueCount: outcome.issueCount,
+      summary: outcome.summary,
+    });
+    return outcome;
   }
 
   // --- Books ---
@@ -1380,6 +1582,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
+      const explicitAuditChapter = parseExplicitAuditChapter(instruction);
+      const targetBookId = activeBookId ?? bookSession.bookId ?? null;
+      if (explicitAuditChapter !== null && !targetBookId) {
+        return c.json({
+          error: "当前会话未绑定书籍，无法执行审计。请先打开一本书后再试。",
+          response: "当前会话未绑定书籍，无法执行审计。请先打开一本书后再试。",
+        }, 400);
+      }
+      const effectiveInstruction = explicitAuditChapter !== null
+        ? buildAuditInstruction(instruction, explicitAuditChapter)
+        : instruction;
+
       // Resolve model — multi-service resolution
       let resolvedModel: ResolvedModel["model"] | undefined;
       let resolvedApiKey: string | undefined;
@@ -1490,6 +1704,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       // Run pi-agent session
       const collectedToolExecs: CollectedToolExec[] = [];
+      let latestAuditReport: AuditToolReport | null = null;
+      let explicitAuditToolCalled = false;
       const result = await runAgentSession(
         {
           model,
@@ -1516,6 +1732,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               const args = event.args as Record<string, unknown> | undefined;
               const agent = event.toolName === "sub_agent" ? (args?.agent as string | undefined) : undefined;
               const stages = agent ? (PIPELINE_STAGES[agent] ?? []) : [];
+              if (event.toolName === "sub_agent" && agent === "auditor") {
+                const eventBookId = typeof args?.bookId === "string" && args.bookId.trim().length > 0
+                  ? args.bookId
+                  : targetBookId;
+                const eventChapter = typeof args?.chapterNumber === "number" && Number.isInteger(args.chapterNumber)
+                  ? args.chapterNumber
+                  : explicitAuditChapter;
+                if (eventBookId && typeof eventChapter === "number" && eventChapter > 0) {
+                  broadcast("audit:start", { bookId: eventBookId, chapter: eventChapter });
+                }
+              }
 
               collectedToolExecs.push({
                 id: event.toolCallId,
@@ -1547,12 +1774,45 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             }
             if (event.type === "tool_execution_end") {
               const exec = collectedToolExecs.find(t => t.id === event.toolCallId);
+              const execArgs = exec?.args;
+              const execAgent = exec?.agent;
               if (exec) {
                 exec.status = event.isError ? "error" : "completed";
                 exec.completedAt = Date.now();
                 exec.stages = exec.stages?.map(s => ({ ...s, status: "completed" as const }));
                 if (event.isError) exec.error = extractToolError(event.result);
                 else exec.result = summarizeResult(event.result);
+              }
+              if (event.toolName === "sub_agent" && execAgent === "auditor") {
+                explicitAuditToolCalled = explicitAuditToolCalled || explicitAuditChapter !== null;
+                const eventBookId = typeof execArgs?.bookId === "string" && execArgs.bookId.trim().length > 0
+                  ? execArgs.bookId
+                  : targetBookId;
+                const parsedReport = parseAuditToolReport(event.result);
+                if (parsedReport) {
+                  latestAuditReport = parsedReport;
+                }
+                const eventChapter = parsedReport?.chapterNumber
+                  ?? (typeof execArgs?.chapterNumber === "number" && Number.isInteger(execArgs.chapterNumber)
+                    ? execArgs.chapterNumber
+                    : explicitAuditChapter);
+                if (eventBookId && typeof eventChapter === "number" && eventChapter > 0) {
+                  if (event.isError) {
+                    broadcast("audit:error", {
+                      bookId: eventBookId,
+                      chapter: eventChapter,
+                      error: extractToolError(event.result),
+                    });
+                  } else if (parsedReport) {
+                    broadcast("audit:complete", {
+                      bookId: eventBookId,
+                      chapter: eventChapter,
+                      passed: parsedReport.passed,
+                      issueCount: parsedReport.issueCount,
+                      summary: parsedReport.summary,
+                    });
+                  }
+                }
               }
               broadcast("tool:end", {
                 sessionId: streamSessionId,
@@ -1564,7 +1824,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             }
           },
         },
-        instruction,
+        effectiveInstruction,
         initialMessages,
       );
 
@@ -1584,18 +1844,40 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           broadcast("session:title", { sessionId: bookSession.sessionId, title });
         }
       }
-      if (result.responseText) {
+      let responseText = result.responseText?.trim() ?? "";
+      if (explicitAuditChapter !== null) {
+        if (!explicitAuditToolCalled) {
+          responseText = `未检测到第${explicitAuditChapter}章审计执行。请重试「审计第${explicitAuditChapter}章」。`;
+        } else if (latestAuditReport) {
+          responseText = formatAuditReportForChat(latestAuditReport);
+        } else {
+          const auditExecError = collectedToolExecs.find(
+            (toolExec) => toolExec.tool === "sub_agent" && toolExec.agent === "auditor" && toolExec.status === "error",
+          )?.error;
+          responseText = auditExecError
+            ? `第${explicitAuditChapter}章审计失败：${auditExecError}`
+            : `第${explicitAuditChapter}章审计已执行，但未返回完整报告。请重试。`;
+        }
+      }
+      if (responseText) {
         const lastAssistant = result.messages?.filter((m: any) => m.role === "assistant").pop();
         const thinking = lastAssistant?.thinking;
         bookSession = appendBookSessionMessage(bookSession, {
           role: "assistant",
-          content: result.responseText,
+          content: responseText,
           ...(thinking ? { thinking } : {}),
           ...(collectedToolExecs.length > 0 ? { toolExecutions: collectedToolExecs } : {}),
           timestamp: Date.now() + 1,
         });
       }
-      if (!result.responseText) {
+      if (!responseText) {
+        if (explicitAuditChapter !== null) {
+          const emptyAuditMessage = `第${explicitAuditChapter}章审计未返回文本，请检查模型工具调用链路后重试。`;
+          return c.json({
+            error: { code: "AGENT_EMPTY_RESPONSE", message: emptyAuditMessage },
+            response: emptyAuditMessage,
+          }, 502);
+        }
         try {
           const fallbackClient = createLLMClient({
             ...config.llm,
@@ -1686,7 +1968,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
 
       return c.json({
-        response: result.responseText,
+        response: responseText,
         session: {
           sessionId: bookSession.sessionId,
           ...(bookSession.bookId ? { activeBookId: bookSession.bookId } : {}),
@@ -1740,58 +2022,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.post("/api/v1/books/:id/audit/:chapter", async (c) => {
     const id = c.req.param("id");
     const chapterNum = parseInt(c.req.param("chapter"), 10);
-    const bookDir = state.bookDir(id);
-
-    broadcast("audit:start", { bookId: id, chapter: chapterNum });
-    try {
-      const book = await state.loadBookConfig(id);
-      const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(chapterNum).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-      if (!match) {
-        const error = "Chapter not found";
-        broadcast("audit:error", { bookId: id, chapter: chapterNum, error });
-        return c.json({ error }, 404);
-      }
-
-      const content = await readFile(join(chaptersDir, match), "utf-8");
-      const currentConfig = await loadCurrentProjectConfig();
-      const { ContinuityAuditor } = await import("@actalk/inkos-core");
-      const auditor = new ContinuityAuditor({
-        client: createLLMClient(currentConfig.llm),
-        model: currentConfig.llm.model,
-        projectRoot: root,
-        bookId: id,
-      });
-      const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre);
-
-      // Keep chapter index status aligned with standalone audit outcome.
-      const chapterIndex = await state.loadChapterIndex(id);
-      const updatedAt = new Date().toISOString();
-      const updatedIndex = chapterIndex.map((chapter) =>
-        chapter.number === chapterNum
-          ? {
-              ...chapter,
-              status: (result.passed ? "ready-for-review" : "audit-failed") as typeof chapter.status,
-              updatedAt,
-              auditIssues: result.issues.map((issue) => `[${issue.severity}] ${issue.description}`),
-            }
-          : chapter,
-      );
-      await state.saveChapterIndex(id, updatedIndex);
-
-      broadcast("audit:complete", {
-        bookId: id,
-        chapter: chapterNum,
-        passed: result.passed,
-        issueCount: result.issues.length,
-      });
-      return c.json(result);
-    } catch (e) {
-      broadcast("audit:error", { bookId: id, chapter: chapterNum, error: String(e) });
-      return c.json({ error: String(e) }, 500);
+    const outcome = await runChapterAuditWithEvents(id, chapterNum);
+    if (!outcome.ok) {
+      return c.json({ error: outcome.error }, outcome.status);
     }
+    return c.json(outcome.result);
   });
 
   // --- Revise ---

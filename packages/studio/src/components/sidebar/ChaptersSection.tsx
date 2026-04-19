@@ -179,14 +179,21 @@ export function ChaptersSection({ bookId, t, sse }: ChaptersSectionProps) {
   );
 
   const pushAuditResultMessage = useCallback(
-    (chapterNum: number, passed: boolean, issueCount = 0) => {
+    (chapterNum: number, passed: boolean, issueCount = 0, summary = "") => {
       if (!activeSessionId) return;
       const template = passed
         ? t("sidebar.chapter.action.auditPassed")
         : t("sidebar.chapter.action.auditFailed");
       const base = applyTemplate(template, { chapter: chapterLabel(chapterNum) });
-      const suffix = !passed && issueCount > 0 ? ` (${issueCount})` : "";
-      appendAssistantMessage(activeSessionId, `${base}${suffix}`);
+      if (passed) {
+        appendAssistantMessage(activeSessionId, base);
+        return;
+      }
+
+      const suffixIssueCount = issueCount > 0 ? ` (${issueCount})` : "";
+      const summaryText = summary.trim();
+      const suffixSummary = summaryText.length > 0 ? ` - ${summaryText}` : "";
+      appendAssistantMessage(activeSessionId, `${base}${suffixIssueCount}${suffixSummary}`);
     },
     [activeSessionId, appendAssistantMessage, chapterLabel, t],
   );
@@ -307,7 +314,15 @@ export function ChaptersSection({ bookId, t, sse }: ChaptersSectionProps) {
   useEffect(() => {
     const recent = sse.messages.at(-1);
     if (!recent) return;
-    const data = recent.data as { bookId?: string; chapter?: number; chapterNumber?: number; error?: string } | null;
+    const data = recent.data as {
+      bookId?: string;
+      chapter?: number;
+      chapterNumber?: number;
+      error?: string;
+      passed?: boolean;
+      issueCount?: number;
+      summary?: string;
+    } | null;
     if (data?.bookId !== bookId) return;
 
     if (recent.event === "rewrite:complete") {
@@ -348,10 +363,10 @@ export function ChaptersSection({ bookId, t, sse }: ChaptersSectionProps) {
       setAuditingChapters((prev) => prev.filter((n) => n !== chapterNum));
       bumpBookDataVersion();
       refreshChapters();
-      const passed = typeof (data as { passed?: unknown } | null)?.passed === "boolean"
-        ? Boolean((data as { passed?: unknown } | null)?.passed)
-        : false;
-      pushAuditResultMessage(chapterNum, passed);
+      const passed = typeof data?.passed === "boolean" ? data.passed : false;
+      const issueCount = typeof data?.issueCount === "number" ? data.issueCount : 0;
+      const summary = typeof data?.summary === "string" ? data.summary : "";
+      pushAuditResultMessage(chapterNum, passed, issueCount, summary);
       return;
     }
 

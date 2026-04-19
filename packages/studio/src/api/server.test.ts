@@ -1465,6 +1465,74 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   });
 
+  it("keeps explicit chapter-audit commands on runAgentSession and renders full report", async () => {
+    runAgentSessionMock.mockImplementationOnce(async (config: any, userMessage: string) => {
+      expect(userMessage).toContain("请执行审计第4章");
+      config.onEvent?.({
+        type: "tool_execution_start",
+        toolName: "sub_agent",
+        toolCallId: "audit-1",
+        args: { agent: "auditor", bookId: "demo-book", chapterNumber: 4 },
+      });
+      config.onEvent?.({
+        type: "tool_execution_end",
+        toolName: "sub_agent",
+        toolCallId: "audit-1",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Audit chapter 4: FAILED, 1 issue(s)." }],
+          details: {
+            kind: "audit_report",
+            bookId: "demo-book",
+            chapterNumber: 4,
+            passed: false,
+            issueCount: 1,
+            summary: "时间线冲突",
+            issues: [
+              {
+                severity: "critical",
+                category: "continuity",
+                description: "时间线冲突",
+                suggestion: "统一时间线表述",
+              },
+            ],
+          },
+        },
+      });
+      return {
+        responseText: "tool done",
+        messages: [
+          { role: "user", content: "审计第4章" },
+          { role: "assistant", content: "tool done" },
+        ],
+      };
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "审计第4章",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-1",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload).toMatchObject({
+      response: expect.stringContaining("第4章审计未通过"),
+      session: { sessionId: "agent-session-1", activeBookId: "demo-book" },
+    });
+    expect(payload).toMatchObject({
+      response: expect.stringContaining("摘要：时间线冲突"),
+    });
+    expect(runAgentSessionMock).toHaveBeenCalledTimes(1);
+  });
+
   it("allows /api/agent to use explicit service+model when Studio config has no defaultModel", async () => {
     await writeFile(join(root, "inkos.json"), JSON.stringify({
       ...projectConfig,
