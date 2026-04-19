@@ -7,5 +7,7 @@ export const initialCreateState: CreateState = {
   sidebarView: "panel",
   artifactFile: null,
   artifactChapter: null,
+  artifactChapterMeta: null,
+  artifactEditMode: false,
   bookSummary: null,
 };

@@ -13,6 +13,10 @@ const BOOK_REFRESH_EVENTS = new Set([
   "revise:error",
   "audit:complete",
   "audit:error",
+  "approve:complete",
+  "approve:error",
+  "delete:complete",
+  "delete:error",
 ]);
 
 const BOOK_COLLECTION_REFRESH_EVENTS = new Set([
@@ -29,6 +33,10 @@ const BOOK_COLLECTION_REFRESH_EVENTS = new Set([
   "revise:error",
   "audit:complete",
   "audit:error",
+  "approve:complete",
+  "approve:error",
+  "delete:complete",
+  "delete:error",
 ]);
 
 const DAEMON_STATUS_REFRESH_EVENTS = new Set([

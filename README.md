@@ -438,3 +438,46 @@ pnpm typecheck    # 类型检查
 ## 许可证
 
 [AGPL-3.0](LICENSE)
+
+
+
+• 可以，已实现“仅本地发布升级”（不发布到 npm registry）。
+                                                                                               
+  新增：                                                                                       
+                                                                                               
+  - 脚本：/F:/InkOSv2/inkos/scripts/release-local.mjs                                          
+  - 命令别名：/F:/InkOSv2/inkos/package.json 里的 release:local                                
+                                                                                               
+  用法：                                                                                       
+                                                                                               
+  pnpm release:local -- 1.3.6                                                                  
+  # 或不改版本号                                                                               
+  pnpm release:local                                                                           
+                                                                                               
+  它会自动做：                                                                                 
+                                                                                               
+  1. （可选）同步版本号                                                                        
+  2. 校验 manifest                                                                             
+  3. build + test                                                                              
+  4. 本地打包 core/studio/cli 三个 tgz                                                         
+  5. 一次性全局安装这三个 tgz（本机升级）                                                      
+                                                                                               
+  补充：                                                                                       
+                                                                                               
+  - 这不走 npm 发布流程，但安装阶段若缺少第三方依赖且本机无缓存，npm 仍可能访问外网拉依赖。    
+  - 完成后可用 inkos --version 验证。    
+  这是脚本的保护机制在生效：你当前仓库有未提交改动。
+                                                                                               
+  直接用这条就能继续本地升级：                                                                 
+                                                                                               
+  pnpm release:local -- 1.3.6 --allow-dirty                                                    
+                                                                                               
+  如果你不想改版本号文件（只安装当前代码），用：                                               
+                                                                                               
+  pnpm release:local -- --allow-dirty                                                          
+                                                                                               
+  如果你想保持“干净发布”，先：                                                                 
+                                                                                               
+  git stash -u                                                                                 
+  pnpm release:local -- 1.3.6                                                                  
+  git stash pop     

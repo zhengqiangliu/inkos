@@ -770,6 +770,38 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   });
 
+  // --- Chapter Delete (rollback from chapter N to N-1) ---
+
+  app.delete("/api/v1/books/:id/chapters/:num", async (c) => {
+    const id = c.req.param("id");
+    const num = parseInt(c.req.param("num"), 10);
+    broadcast("delete:start", { bookId: id, chapter: num });
+
+    try {
+      const index = await state.loadChapterIndex(id);
+      const target = index.find((ch) => ch.number === num);
+      if (!target) return c.json({ error: "Chapter not found" }, 404);
+
+      const rollbackTarget = num - 1;
+      const discarded = await state.rollbackToChapter(id, rollbackTarget);
+      broadcast("delete:complete", {
+        bookId: id,
+        chapterNumber: num,
+        rolledBackTo: rollbackTarget,
+        discarded,
+      });
+      return c.json({
+        ok: true,
+        chapterNumber: num,
+        rolledBackTo: rollbackTarget,
+        discarded,
+      });
+    } catch (e) {
+      broadcast("delete:error", { bookId: id, chapter: num, error: String(e) });
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
   // --- Truth files ---
 
   const TRUTH_FILES = [
@@ -853,6 +885,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.post("/api/v1/books/:id/chapters/:num/approve", async (c) => {
     const id = c.req.param("id");
     const num = parseInt(c.req.param("num"), 10);
+    broadcast("approve:start", { bookId: id, chapter: num });
 
     try {
       const index = await state.loadChapterIndex(id);
@@ -860,8 +893,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ch.number === num ? { ...ch, status: "approved" as const } : ch,
       );
       await state.saveChapterIndex(id, updated);
+      broadcast("approve:complete", { bookId: id, chapterNumber: num, status: "approved" });
       return c.json({ ok: true, chapterNumber: num, status: "approved" });
     } catch (e) {
+      broadcast("approve:error", { bookId: id, chapter: num, error: String(e) });
       return c.json({ error: String(e) }, 500);
     }
   });
@@ -1714,7 +1749,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const files = await readdir(chaptersDir);
       const paddedNum = String(chapterNum).padStart(4, "0");
       const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-      if (!match) return c.json({ error: "Chapter not found" }, 404);
+      if (!match) {
+        const error = "Chapter not found";
+        broadcast("audit:error", { bookId: id, chapter: chapterNum, error });
+        return c.json({ error }, 404);
+      }
 
       const content = await readFile(join(chaptersDir, match), "utf-8");
       const currentConfig = await loadCurrentProjectConfig();
@@ -1726,10 +1765,31 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         bookId: id,
       });
       const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre);
-      broadcast("audit:complete", { bookId: id, chapter: chapterNum, passed: result.passed });
+
+      // Keep chapter index status aligned with standalone audit outcome.
+      const chapterIndex = await state.loadChapterIndex(id);
+      const updatedAt = new Date().toISOString();
+      const updatedIndex = chapterIndex.map((chapter) =>
+        chapter.number === chapterNum
+          ? {
+              ...chapter,
+              status: (result.passed ? "ready-for-review" : "audit-failed") as typeof chapter.status,
+              updatedAt,
+              auditIssues: result.issues.map((issue) => `[${issue.severity}] ${issue.description}`),
+            }
+          : chapter,
+      );
+      await state.saveChapterIndex(id, updatedIndex);
+
+      broadcast("audit:complete", {
+        bookId: id,
+        chapter: chapterNum,
+        passed: result.passed,
+        issueCount: result.issues.length,
+      });
       return c.json(result);
     } catch (e) {
-      broadcast("audit:error", { bookId: id, error: String(e) });
+      broadcast("audit:error", { bookId: id, chapter: chapterNum, error: String(e) });
       return c.json({ error: String(e) }, 500);
     }
   });

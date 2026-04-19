@@ -102,6 +102,13 @@ export interface BookSummary {
   cast: string;
 }
 
+export interface ArtifactChapterMeta {
+  readonly number: number;
+  readonly title: string;
+  readonly status: string;
+  readonly wordCount: number;
+}
+
 export interface SessionRuntime {
   readonly sessionId: string;
   readonly bookId: string | null;
@@ -131,6 +138,8 @@ export interface CreateState {
   sidebarView: "panel" | "artifact";
   artifactFile: string | null;         // foundation file name, e.g. "story_bible.md"
   artifactChapter: number | null;      // chapter number, e.g. 1
+  artifactChapterMeta: ArtifactChapterMeta | null;
+  artifactEditMode: boolean;
   bookSummary: BookSummary | null;
 }
 
@@ -142,6 +151,7 @@ export interface MessageActions {
   activateSession: (sessionId: string | null) => void;
   setInput: (text: string) => void;
   addUserMessage: (sessionId: string, content: string) => void;
+  appendAssistantMessage: (sessionId: string, content: string) => void;
   appendStreamChunk: (sessionId: string, text: string, streamTs: number) => void;
   finalizeStream: (sessionId: string, streamTs: number, content: string, toolCall?: ToolCall) => void;
   replaceStreamWithError: (sessionId: string, streamTs: number, errorMsg: string) => void;
@@ -164,7 +174,13 @@ export interface CreateActions {
   handleCreateBook: (sessionId: string, activeBookId?: string) => Promise<string | null>;
   bumpBookDataVersion: () => void;
   openArtifact: (file: string) => void;
-  openChapterArtifact: (chapterNum: number) => void;
+  openChapterArtifact: (
+    chapterNum: number,
+    options?: {
+      readonly edit?: boolean;
+      readonly meta?: ArtifactChapterMeta | null;
+    },
+  ) => void;
   closeArtifact: () => void;
   setBookSummary: (summary: BookSummary | null) => void;
 }

@@ -29,6 +29,7 @@ import { consolidateCommand } from "./commands/consolidate.js";
 import { createInteractCommand, type InteractCommandHooks } from "./commands/interact.js";
 import { createTuiCommand } from "./commands/tui.js";
 import { launchTui } from "./tui/app.js";
+import { findProjectRoot } from "./utils.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -48,7 +49,8 @@ export function createProgram(hooks: ProgramHooks = {}): Command {
     .description("InkOS — Multi-agent novel production system")
     .version(version)
     .action(async () => {
-      await launchStudioEntry(process.cwd(), "4567", { launchStudio: hooks.launchStudio });
+      const root = findProjectRoot();
+      await launchStudioEntry(root, "4567", { launchStudio: hooks.launchStudio });
     });
 
   program.addCommand(initCommand);

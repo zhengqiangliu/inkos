@@ -33,9 +33,31 @@ const FOUNDATION_LABELS: Record<string, string> = {
 
 const streamdownPlugins = { cjk };
 
-function ArtifactView({ bookId }: { readonly bookId: string }) {
+function chapterStatusLabel(status: string, t: TFunction): string {
+  const map: Record<string, Parameters<TFunction>[0]> = {
+    approved: "sidebar.chapter.status.approved",
+    "ready-for-review": "sidebar.chapter.status.readyForReview",
+    drafted: "sidebar.chapter.status.drafted",
+    "needs-revision": "sidebar.chapter.status.needsRevision",
+    "audit-failed": "sidebar.chapter.status.auditFailed",
+    imported: "sidebar.chapter.status.imported",
+  };
+  const hit = map[status];
+  return hit ? t(hit) : status;
+}
+
+function chapterWordCountFromContent(content: string): number {
+  const lines = content.split("\n");
+  const titleLineIndex = lines.findIndex((line) => line.startsWith("# "));
+  if (titleLineIndex >= 0) lines.splice(titleLineIndex, 1);
+  return lines.join("\n").trim().length;
+}
+
+function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFunction }) {
   const artifactFile = useChatStore((s) => s.artifactFile);
   const artifactChapter = useChatStore((s) => s.artifactChapter);
+  const artifactChapterMeta = useChatStore((s) => s.artifactChapterMeta);
+  const artifactEditMode = useChatStore((s) => s.artifactEditMode);
   const closeArtifact = useChatStore((s) => s.closeArtifact);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -45,15 +67,23 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
 
   const isChapter = artifactChapter !== null;
   const label = isChapter
-    ? `第 ${artifactChapter} 章`
+    ? t("chapter.label").replace("{n}", String(artifactChapter))
     : artifactFile ? FOUNDATION_LABELS[artifactFile] ?? artifactFile : "";
 
   useEffect(() => {
     setEditing(false);
+    setEditContent("");
     setLoading(true);
     if (isChapter) {
       fetchJson<{ content: string }>(`/books/${bookId}/chapters/${artifactChapter}`)
-        .then((data) => setContent(data.content ?? ""))
+        .then((data) => {
+          const nextContent = data.content ?? "";
+          setContent(nextContent);
+          if (artifactEditMode) {
+            setEditContent(nextContent);
+            setEditing(true);
+          }
+        })
         .catch(() => setContent(null))
         .finally(() => setLoading(false));
     } else if (artifactFile) {
@@ -62,7 +92,13 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
         .catch(() => setContent(null))
         .finally(() => setLoading(false));
     }
-  }, [bookId, artifactFile, artifactChapter, isChapter]);
+  }, [bookId, artifactFile, artifactChapter, artifactEditMode, isChapter]);
+
+  useEffect(() => {
+    if (!isChapter || !artifactEditMode || content === null) return;
+    setEditContent(content);
+    setEditing(true);
+  }, [artifactEditMode, content, isChapter]);
 
   const handleEdit = useCallback(() => {
     setEditContent(content ?? "");
@@ -94,6 +130,13 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
     }
   }, [bookId, artifactFile, artifactChapter, isChapter, editContent]);
 
+  const chapterStatus = artifactChapterMeta?.status ?? t("sidebar.chapter.statusUnknown");
+  const displayedWords = editing
+    ? chapterWordCountFromContent(editContent)
+    : content !== null
+      ? chapterWordCountFromContent(content)
+      : (artifactChapterMeta?.wordCount ?? 0);
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/20 shrink-0">
@@ -104,6 +147,16 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
           <ArrowLeft size={14} />
         </button>
         <span className="text-sm font-medium truncate flex-1">{label}</span>
+        {isChapter && (
+          <div className="flex items-center gap-1.5 mr-1">
+            <span className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-muted/50 text-muted-foreground">
+              {chapterStatusLabel(chapterStatus, t)}
+            </span>
+            <span className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-muted/50 text-muted-foreground tabular-nums">
+              {displayedWords.toLocaleString()} {t("book.words")}
+            </span>
+          </div>
+        )}
         {!loading && content !== null && !editing && (
           <button
             onClick={handleEdit}
@@ -136,7 +189,7 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
             <Loader2 size={16} className="text-muted-foreground animate-spin" />
           </div>
         ) : content === null ? (
-          <p className="text-xs text-muted-foreground/50 italic px-4 py-3">文件不存在</p>
+          <p className="text-xs text-muted-foreground/50 italic px-4 py-3">{t("sidebar.fileNotFound")}</p>
         ) : editing ? (
           <textarea
             value={editContent}
@@ -154,8 +207,6 @@ function ArtifactView({ bookId }: { readonly bookId: string }) {
 }
 
 function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
-  const isZh = t("nav.connected") === "\u5DF2\u8FDE\u63A5";
-
   // Show writing indicator only during pipeline operations (write/audit/revise)
   const [activeOp, setActiveOp] = useState<string | null>(null);
   useEffect(() => {
@@ -177,9 +228,9 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
   }, [sse.messages]);
 
   const OP_LABELS: Record<string, string> = {
-    write: isZh ? "正在写作中..." : "Writing...",
-    audit: isZh ? "正在审计中..." : "Auditing...",
-    revise: isZh ? "正在修订中..." : "Revising...",
+    write: t("sidebar.op.write"),
+    audit: t("sidebar.op.audit"),
+    revise: t("sidebar.op.revise"),
   };
 
   return (
@@ -193,7 +244,7 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
         </div>
       )}
       <ProgressSection sse={sse} />
-      <ChaptersSection bookId={bookId} isZh={isZh} />
+      <ChaptersSection bookId={bookId} t={t} sse={sse} />
       <CharacterSection bookId={bookId} />
       <FoundationSection bookId={bookId} />
       <SummarySection bookId={bookId} />
@@ -244,7 +295,7 @@ export function BookSidebar({ bookId, theme, t, sse }: BookSidebarProps) {
         className="absolute left-0 top-0 h-full w-1 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors z-10"
       />
       {sidebarView === "artifact" ? (
-        <ArtifactView bookId={bookId} />
+        <ArtifactView bookId={bookId} t={t} />
       ) : (
         <PanelView bookId={bookId} theme={theme} t={t} sse={sse} />
       )}
@@ -273,13 +324,13 @@ export function BookSidebarToggle({ bookId, theme, t, sse }: BookSidebarProps) {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-3 py-2 border-b border-border/20">
-              <span className="text-xs font-medium text-muted-foreground">书籍信息</span>
+              <span className="text-xs font-medium text-muted-foreground">{t("sidebar.bookInfo")}</span>
               <button onClick={() => setOpen(false)} className="text-muted-foreground hover:text-foreground">
                 <PanelRightClose size={14} />
               </button>
             </div>
             {sidebarView === "artifact" ? (
-              <ArtifactView bookId={bookId} />
+              <ArtifactView bookId={bookId} t={t} />
             ) : (
               <PanelView bookId={bookId} theme={theme} t={t} sse={sse} />
             )}

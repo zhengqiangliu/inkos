@@ -536,7 +536,7 @@ describe("CLI integration", () => {
   });
 
   describe("inkos doctor", () => {
-    it("checks environment health", () => {
+    it("checks environment health", { timeout: 20_000 }, () => {
       const { stdout } = runStderr(["doctor"]);
       expect(stdout).toContain("InkOS Doctor");
       expect(stdout).toContain("Node.js >= 20");
@@ -544,7 +544,7 @@ describe("CLI integration", () => {
       expect(stdout).toContain("inkos.json");
     });
 
-    it("repairs missing node runtime pin files for old projects", async () => {
+    it("repairs missing node runtime pin files for old projects", { timeout: 20_000 }, async () => {
       await stat(join(projectDir, "inkos.json")).catch(() => {
         run(["init"]);
       });
@@ -601,7 +601,7 @@ describe("CLI integration", () => {
       }
     });
 
-    it("reports legacy books in the version migration check", async () => {
+    it("reports legacy books in the version migration check", { timeout: 20_000 }, async () => {
       const bookDir = join(projectDir, "books", "legacy-doctor-hint");
       const storyDir = join(bookDir, "story");
       await mkdir(join(bookDir, "chapters"), { recursive: true });

@@ -37,23 +37,9 @@ async function loadWorkspacePackages(root) {
   return packages;
 }
 
-function rewriteDependencyVersions(pkg, workspacePackageNames, version) {
-  for (const field of ["dependencies", "optionalDependencies", "peerDependencies", "devDependencies"]) {
-    const deps = pkg[field];
-    if (!deps) continue;
-
-    for (const name of Object.keys(deps)) {
-      if (workspacePackageNames.has(name)) {
-        deps[name] = version;
-      }
-    }
-  }
-}
-
 async function main() {
   const { version, root } = parseArgs(process.argv.slice(2));
   const workspacePackages = await loadWorkspacePackages(root);
-  const workspacePackageNames = new Set(workspacePackages.map(({ pkg }) => pkg.name));
 
   const rootPackageJsonPath = join(root, "package.json");
   const rootPackageJson = JSON.parse(await readFile(rootPackageJsonPath, "utf-8"));
@@ -62,7 +48,6 @@ async function main() {
 
   for (const workspacePackage of workspacePackages) {
     workspacePackage.pkg.version = version;
-    rewriteDependencyVersions(workspacePackage.pkg, workspacePackageNames, version);
     await writeFile(
       workspacePackage.packageJsonPath,
       `${JSON.stringify(workspacePackage.pkg, null, 2)}\n`,

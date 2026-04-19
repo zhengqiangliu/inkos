@@ -15,6 +15,25 @@ const sourceCliPackageJsonPromise = readFile(resolve(cliDir, "package.json"), "u
 const sourceStudioPackageJsonPromise = readFile(resolve(studioDir, "package.json"), "utf-8").then((raw) =>
   JSON.parse(raw),
 );
+const tarSupportsForceLocalOnWindows = (() => {
+  if (process.platform !== "win32") return false;
+  try {
+    const help = execFileSync("tar", ["--help"], {
+      cwd: workspaceRoot,
+      encoding: "utf-8",
+    });
+    return help.includes("--force-local");
+  } catch {
+    return false;
+  }
+})();
+
+function buildTarArgs(operation: "-xOf" | "-tf") {
+  if (process.platform === "win32" && tarSupportsForceLocalOnWindows) {
+    return ["--force-local", operation];
+  }
+  return [operation];
+}
 
 async function packPackage(packageDir: string, packDir: string) {
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -35,15 +54,14 @@ async function packPackage(packageDir: string, packDir: string) {
 
 async function extractPackedPackageJson(packageDir: string, packDir: string) {
   const tarballPath = await packPackage(packageDir, packDir);
-  const tarArgs = process.platform === "win32" ? ["--force-local", "-xOf"] : ["-xOf"];
-  return execFileSync("tar", [...tarArgs, tarballPath, "package/package.json"], {
+  return execFileSync("tar", [...buildTarArgs("-xOf"), tarballPath, "package/package.json"], {
     cwd: workspaceRoot,
     encoding: "utf-8",
   });
 }
 
 describe.sequential("publish packaging", () => {
-  it("rewrites workspace package versions for canary publishing", async () => {
+  it("updates package versions for canary publishing without rewriting workspace protocol deps", async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), "inkos-version-script-"));
     const tempPackagesDir = join(tempRoot, "packages");
     const tempCoreDir = join(tempPackagesDir, "core");
@@ -94,7 +112,7 @@ describe.sequential("publish packaging", () => {
       expect(rootPackageJson.version).toBe("0.4.8-canary.7");
       expect(corePackageJson.version).toBe("0.4.8-canary.7");
       expect(cliPackageJson.version).toBe("0.4.8-canary.7");
-      expect(cliPackageJson.dependencies["@actalk/inkos-core"]).toBe("0.4.8-canary.7");
+      expect(cliPackageJson.dependencies["@actalk/inkos-core"]).toBe("workspace:*");
     } finally {
       await rm(tempRoot, { recursive: true, force: true });
     }
@@ -242,8 +260,7 @@ describe.sequential("publish packaging", () => {
 
     try {
       const tarballPath = await packPackage(studioDir, packDir);
-      const tarArgs = process.platform === "win32" ? ["--force-local", "-tf"] : ["-tf"];
-      const archiveListing = execFileSync("tar", [...tarArgs, tarballPath], {
+      const archiveListing = execFileSync("tar", [...buildTarArgs("-tf"), tarballPath], {
         cwd: workspaceRoot,
         encoding: "utf-8",
       });

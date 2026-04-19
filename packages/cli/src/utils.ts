@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { createLLMClient, StateManager, createLogger, createStderrSink, createJsonLineSink, loadProjectConfig, GLOBAL_CONFIG_DIR, GLOBAL_ENV_PATH, type ProjectConfig, type PipelineConfig, type LogSink } from "@actalk/inkos-core";
 import { formatSqliteMemorySupportWarning } from "./runtime-requirements.js";
 
@@ -27,8 +28,35 @@ export async function resolveContext(opts: {
   return undefined;
 }
 
+function detectProjectRootFromBooksSubdir(cwd: string): string | null {
+  let current = resolve(cwd);
+  while (true) {
+    if (basename(current).toLowerCase() === "books") {
+      const projectRoot = dirname(current);
+      if (existsSync(join(projectRoot, "inkos.json"))) {
+        return projectRoot;
+      }
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
 export function findProjectRoot(): string {
-  return process.cwd();
+  const cwd = process.cwd();
+  const projectRoot = detectProjectRootFromBooksSubdir(cwd);
+  if (projectRoot) {
+    throw new Error(
+      `Invalid startup directory: ${cwd}\n` +
+      `Do not start InkOS from inside "${join(projectRoot, "books")}".\n` +
+      `Please run commands from the project root: ${projectRoot}`,
+    );
+  }
+  return cwd;
 }
 
 export async function loadConfig(options?: { readonly requireApiKey?: boolean; readonly projectRoot?: string }): Promise<ProjectConfig> {

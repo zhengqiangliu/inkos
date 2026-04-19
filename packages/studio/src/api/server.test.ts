@@ -9,6 +9,7 @@ const runRadarMock = vi.fn();
 const reviseDraftMock = vi.fn();
 const resyncChapterArtifactsMock = vi.fn();
 const writeNextChapterMock = vi.fn();
+const auditChapterMock = vi.fn();
 const rollbackToChapterMock = vi.fn();
 const saveChapterIndexMock = vi.fn();
 const loadChapterIndexMock = vi.fn();
@@ -157,10 +158,17 @@ vi.mock("@actalk/inkos-core", () => {
     }
   }
 
+  class MockContinuityAuditor {
+    constructor(_config: unknown) {}
+
+    auditChapter = auditChapterMock;
+  }
+
   return {
     StateManager: MockStateManager,
     PipelineRunner: MockPipelineRunner,
     Scheduler: MockScheduler,
+    ContinuityAuditor: MockContinuityAuditor,
     createLLMClient: createLLMClientMock,
     createLogger: vi.fn(() => logger),
     computeAnalytics: vi.fn(() => ({})),
@@ -237,6 +245,7 @@ describe("createStudioServer daemon lifecycle", () => {
     reviseDraftMock.mockReset();
     resyncChapterArtifactsMock.mockReset();
     writeNextChapterMock.mockReset();
+    auditChapterMock.mockReset();
     rollbackToChapterMock.mockReset();
     saveChapterIndexMock.mockReset();
     loadChapterIndexMock.mockReset();
@@ -269,6 +278,11 @@ describe("createStudioServer daemon lifecycle", () => {
       revised: false,
       status: "ready-for-review",
       auditResult: { passed: true, issues: [], summary: "rewritten" },
+    });
+    auditChapterMock.mockResolvedValue({
+      passed: true,
+      issues: [],
+      summary: "ok",
     });
     createLLMClientMock.mockReset();
     createLLMClientMock.mockReturnValue({});
@@ -1171,6 +1185,46 @@ describe("createStudioServer daemon lifecycle", () => {
       status: "error",
       error: "INKOS_LLM_API_KEY not set",
     });
+  });
+
+  it("writes chapter status back to index after standalone audit", async () => {
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "Broken Chapter",
+        status: "audit-failed",
+        wordCount: 1800,
+        createdAt: "2026-04-07T00:00:00.000Z",
+        updatedAt: "2026-04-07T00:00:00.000Z",
+        auditIssues: ["[warning] old issue"],
+        lengthWarnings: [],
+      },
+    ]);
+    auditChapterMock.mockResolvedValue({
+      passed: true,
+      issues: [],
+      summary: "fixed",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/audit/3", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    expect(auditChapterMock).toHaveBeenCalledTimes(1);
+    expect(saveChapterIndexMock).toHaveBeenCalledWith(
+      "demo-book",
+      expect.arrayContaining([
+        expect.objectContaining({
+          number: 3,
+          status: "ready-for-review",
+          auditIssues: [],
+        }),
+      ]),
+    );
   });
 
   it("uses rollback semantics for chapter rejection instead of only flipping status", async () => {

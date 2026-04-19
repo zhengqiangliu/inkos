@@ -3,7 +3,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@mario
 import type { PipelineRunner } from "../pipeline/runner.js";
 import { type ReviseMode } from "../agents/reviser.js";
 import { readFile, writeFile, readdir, stat } from "node:fs/promises";
-import { join, normalize, resolve } from "node:path";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { StateManager } from "../state/manager.js";
 import { createInteractionToolsFromDeps } from "../interaction/project-tools.js";
 import { writeExportArtifact } from "../interaction/export-artifact.js";
@@ -17,12 +17,23 @@ function textResult(text: string): AgentToolResult<undefined> {
 }
 
 /**
+ * Tool paths are documented as relative to books/. Some prompts still include
+ * examples with an extra `books/` prefix, so we normalize it away defensively.
+ */
+function normalizeBooksRelativePath(relativePath: string): string {
+  const trimmed = relativePath.trim().replace(/^[\\/]+/, "");
+  return trimmed.replace(/^books(?:[\\/]|$)/i, "");
+}
+
+/**
  * Resolve a user-supplied relative path against the books root and guard
  * against path-traversal (../ etc.).
  */
 function safeBooksPath(booksRoot: string, relativePath: string): string {
-  const resolved = resolve(booksRoot, normalize(relativePath));
-  if (!resolved.startsWith(booksRoot)) {
+  const normalizedRelativePath = normalizeBooksRelativePath(relativePath);
+  const resolved = resolve(booksRoot, normalize(normalizedRelativePath));
+  const rel = relative(booksRoot, resolved);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new Error(`Path traversal blocked: ${relativePath}`);
   }
   return resolved;

@@ -212,4 +212,18 @@ describe("agent deterministic writing tools", () => {
     await expect(readFile(join(state.bookDir("harbor"), "story", "runtime", "notes.md"), "utf-8"))
       .resolves.toContain("Watch the harbor ledger");
   });
+
+  it("normalizes a legacy books/ prefix to avoid books/books nesting", async () => {
+    const tool = createWriteFileTool(root);
+
+    await tool.execute("tool-11", {
+      path: "books/harbor/chapters/0004_Bridge.md",
+      content: "# 第4章 过桥\n\n桥上起雾。\n",
+    });
+
+    await expect(readFile(join(state.bookDir("harbor"), "chapters", "0004_Bridge.md"), "utf-8"))
+      .resolves.toContain("桥上起雾");
+    await expect(readFile(join(root, "books", "books", "harbor", "chapters", "0004_Bridge.md"), "utf-8"))
+      .rejects.toThrow();
+  });
 });

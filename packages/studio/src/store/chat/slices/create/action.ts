@@ -21,9 +21,27 @@ export const createCreateSlice: StateCreator<ChatStore, [], [], CreateActions> =
   setCreateProgress: (progress) => set({ createProgress: progress }),
 
   bumpBookDataVersion: () => set((s) => ({ bookDataVersion: s.bookDataVersion + 1 })),
-  openArtifact: (file) => set({ sidebarView: "artifact", artifactFile: file, artifactChapter: null }),
-  openChapterArtifact: (chapterNum) => set({ sidebarView: "artifact", artifactFile: null, artifactChapter: chapterNum }),
-  closeArtifact: () => set({ sidebarView: "panel", artifactFile: null, artifactChapter: null }),
+  openArtifact: (file) => set({
+    sidebarView: "artifact",
+    artifactFile: file,
+    artifactChapter: null,
+    artifactChapterMeta: null,
+    artifactEditMode: false,
+  }),
+  openChapterArtifact: (chapterNum, options) => set({
+    sidebarView: "artifact",
+    artifactFile: null,
+    artifactChapter: chapterNum,
+    artifactChapterMeta: options?.meta ?? null,
+    artifactEditMode: Boolean(options?.edit),
+  }),
+  closeArtifact: () => set({
+    sidebarView: "panel",
+    artifactFile: null,
+    artifactChapter: null,
+    artifactChapterMeta: null,
+    artifactEditMode: false,
+  }),
   setBookSummary: (summary) => set({ bookSummary: summary }),
 
   handleCreateBook: async (sessionId, activeBookId) => {

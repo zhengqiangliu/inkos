@@ -32,6 +32,13 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       })),
     })),
 
+  appendAssistantMessage: (sessionId, content) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, (session) => ({
+        messages: [...session.messages, { role: "assistant", content, timestamp: Date.now() }],
+      })),
+    })),
+
   appendStreamChunk: (sessionId, text, streamTs) =>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (session) => {

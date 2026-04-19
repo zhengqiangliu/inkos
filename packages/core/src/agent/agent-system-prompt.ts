@@ -105,11 +105,11 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 
 ## 章节索引管理
 
-章节索引文件位于 \`books/${bookId}/chapters/index.json\`，记录所有章节的元信息（编号、标题、状态、字数等）。
-章节文件位于 \`books/${bookId}/chapters/\`，命名格式为 \`0001_标题.md\`。
+章节索引文件位于 \`${bookId}/chapters/index.json\`（注意：工具路径以 \`books/\` 为根），记录所有章节的元信息（编号、标题、状态、字数等）。
+章节文件位于 \`${bookId}/chapters/\`，命名格式为 \`0001_标题.md\`。
 
 如果你发现索引和磁盘文件不一致（例如侧边栏章节数和实际不符），请主动修复：
-1. 用 \`ls\` 列出 \`books/${bookId}/chapters/\` 下所有 \`.md\` 文件
+1. 用 \`ls\` 列出 \`${bookId}/chapters/\` 下所有 \`.md\` 文件
 2. 用 \`read\` 读取当前 \`index.json\`
 3. 对比两者，找出磁盘上有但索引中缺失的章节
 4. 同一章号有多个文件时（重写），取文件名排序最后的那个（最新版本）
@@ -157,8 +157,8 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 
 ## Chapter Index Management
 
-The chapter index is at \`books/${bookId}/chapters/index.json\` (metadata: number, title, status, wordCount, etc.).
-Chapter files are at \`books/${bookId}/chapters/\`, named \`0001_Title.md\`.
+The chapter index is at \`${bookId}/chapters/index.json\` (tool paths are rooted at \`books/\`; include only the part after that).
+Chapter files are at \`${bookId}/chapters/\`, named \`0001_Title.md\`.
 
 If you notice the index is inconsistent with the actual files on disk (e.g. sidebar shows fewer chapters than exist), fix it proactively:
 1. \`ls\` the chapters directory to list all \`.md\` files
