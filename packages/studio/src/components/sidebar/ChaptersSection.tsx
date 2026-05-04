@@ -442,6 +442,7 @@ export function ChaptersSection({
   );
 
   const pushAuditResultMessage = useCallback(
+<<<<<<< HEAD
     (
       chapterNum: number,
       passed: boolean,
@@ -459,11 +460,15 @@ export function ChaptersSection({
         failureGate?: MessageAuditSummary["failureGate"];
       },
     ) => {
+=======
+    (chapterNum: number, passed: boolean, issueCount = 0, summary = "") => {
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
       if (!activeSessionId) return;
       const template = passed
         ? t("sidebar.chapter.action.auditPassed")
         : t("sidebar.chapter.action.auditFailed");
       const base = applyTemplate(template, { chapter: chapterLabel(chapterNum) });
+<<<<<<< HEAD
       const suffix = !passed && issueCount > 0 ? ` (${issueCount})` : "";
       const lines = [`${base}${suffix}`];
       const report = details?.report?.trim();
@@ -503,6 +508,17 @@ export function ChaptersSection({
         }
       }
       appendAssistantMessage(activeSessionId, lines.join("\n"));
+=======
+      if (passed) {
+        appendAssistantMessage(activeSessionId, base);
+        return;
+      }
+
+      const suffixIssueCount = issueCount > 0 ? ` (${issueCount})` : "";
+      const summaryText = summary.trim();
+      const suffixSummary = summaryText.length > 0 ? ` - ${summaryText}` : "";
+      appendAssistantMessage(activeSessionId, `${base}${suffixIssueCount}${suffixSummary}`);
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
     },
     [activeSessionId, appendAssistantMessage, chapterLabel, t],
   );
@@ -622,6 +638,7 @@ export function ChaptersSection({
     return null;
   }, []);
 
+<<<<<<< HEAD
   const ensureBookSessionId = useCallback(async (): Promise<string> => {
     const state = useChatStore.getState();
     const currentSessionId = state.activeSessionId;
@@ -629,6 +646,21 @@ export function ChaptersSection({
       const active = state.sessions[currentSessionId];
       if (active?.bookId === bookId) return currentSessionId;
     }
+=======
+  useEffect(() => {
+    const recent = sse.messages.at(-1);
+    if (!recent) return;
+    const data = recent.data as {
+      bookId?: string;
+      chapter?: number;
+      chapterNumber?: number;
+      error?: string;
+      passed?: boolean;
+      issueCount?: number;
+      summary?: string;
+    } | null;
+    if (data?.bookId !== bookId) return;
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
 
     const existingIds = state.sessionIdsByBook[bookId] ?? [];
     if (existingIds.length > 0) {
@@ -756,6 +788,7 @@ export function ChaptersSection({
     if (message.event === "audit:complete") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
+<<<<<<< HEAD
       const audit = normalizeAuditSummary(data, chapterNum);
       if (audit) {
         latestAuditSummaryByChapterRef.current.set(chapterNum, audit);
@@ -894,6 +927,16 @@ export function ChaptersSection({
           failureGate,
         },
       );
+=======
+      clearAuditFallback(chapterNum);
+      setAuditingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      bumpBookDataVersion();
+      refreshChapters();
+      const passed = typeof data?.passed === "boolean" ? data.passed : false;
+      const issueCount = typeof data?.issueCount === "number" ? data.issueCount : 0;
+      const summary = typeof data?.summary === "string" ? data.summary : "";
+      pushAuditResultMessage(chapterNum, passed, issueCount, summary);
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
       return;
     }
 

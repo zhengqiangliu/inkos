@@ -3153,6 +3153,7 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   });
 
+<<<<<<< HEAD
   it("auto-switches reasoner model for write-intent agent calls and enables quick pipeline defaults", async () => {
     await writeFile(join(root, "inkos.json"), JSON.stringify({
       ...projectConfig,
@@ -4958,6 +4959,48 @@ describe("createStudioServer daemon lifecycle", () => {
         fixedIssues: ["focus restored"],
         applied: true,
         status: "ready-for-review",
+=======
+  it("keeps explicit chapter-audit commands on runAgentSession and renders full report", async () => {
+    runAgentSessionMock.mockImplementationOnce(async (config: any, userMessage: string) => {
+      expect(userMessage).toContain("请执行审计第4章");
+      config.onEvent?.({
+        type: "tool_execution_start",
+        toolName: "sub_agent",
+        toolCallId: "audit-1",
+        args: { agent: "auditor", bookId: "demo-book", chapterNumber: 4 },
+      });
+      config.onEvent?.({
+        type: "tool_execution_end",
+        toolName: "sub_agent",
+        toolCallId: "audit-1",
+        isError: false,
+        result: {
+          content: [{ type: "text", text: "Audit chapter 4: FAILED, 1 issue(s)." }],
+          details: {
+            kind: "audit_report",
+            bookId: "demo-book",
+            chapterNumber: 4,
+            passed: false,
+            issueCount: 1,
+            summary: "时间线冲突",
+            issues: [
+              {
+                severity: "critical",
+                category: "continuity",
+                description: "时间线冲突",
+                suggestion: "统一时间线表述",
+              },
+            ],
+          },
+        },
+      });
+      return {
+        responseText: "tool done",
+        messages: [
+          { role: "user", content: "审计第4章" },
+          { role: "assistant", content: "tool done" },
+        ],
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
       };
     });
 
@@ -4968,6 +5011,7 @@ describe("createStudioServer daemon lifecycle", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+<<<<<<< HEAD
         instruction: "重写第3章",
         activeBookId: "demo-book",
         sessionId: "agent-session-1",
@@ -5476,6 +5520,9 @@ describe("createStudioServer daemon lifecycle", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         instruction: "批量审计受影响章节",
+=======
+        instruction: "审计第4章",
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
         activeBookId: "demo-book",
         sessionId: "agent-session-1",
       }),
@@ -5484,6 +5531,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload).toMatchObject({
+<<<<<<< HEAD
       response: expect.stringContaining("已完成受影响章节批量审计：共2章"),
       runId: expect.any(String),
     });
@@ -7548,6 +7596,15 @@ describe("createStudioServer daemon lifecycle", () => {
         }),
       ]),
     });
+=======
+      response: expect.stringContaining("第4章审计未通过"),
+      session: { sessionId: "agent-session-1", activeBookId: "demo-book" },
+    });
+    expect(payload).toMatchObject({
+      response: expect.stringContaining("摘要：时间线冲突"),
+    });
+    expect(runAgentSessionMock).toHaveBeenCalledTimes(1);
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
   });
 
   it("allows /api/agent to use explicit service+model when Studio config has no defaultModel", async () => {

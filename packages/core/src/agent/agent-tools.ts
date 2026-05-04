@@ -16,6 +16,23 @@ function textResult(text: string): AgentToolResult<undefined> {
   return { content: [{ type: "text", text }], details: undefined };
 }
 
+interface AuditIssueView {
+  severity: string;
+  category: string;
+  description: string;
+  suggestion: string;
+}
+
+interface AuditReportDetails {
+  kind: "audit_report";
+  bookId: string;
+  chapterNumber: number;
+  passed: boolean;
+  issueCount: number;
+  summary: string;
+  issues: AuditIssueView[];
+}
+
 /**
  * Tool paths are documented as relative to books/. Some prompts still include
  * examples with an extra `books/` prefix, so we normalize it away defensively.
@@ -266,6 +283,7 @@ export function createSubAgentTool(
       params: Static<typeof SubAgentParams>,
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
+<<<<<<< HEAD
     ): Promise<AgentToolResult<undefined>> {
       const { agent, instruction: rawInstruction, bookId, title, chapterNumber, chapterCount, genre, platform, language, targetChapters, chapterWordCount, mode, format, approvedOnly } = params;
       const fallbackInstruction = resolveTurnInstruction?.()?.trim() ?? "";
@@ -274,6 +292,10 @@ export function createSubAgentTool(
       const resolvedChapterNumber = chapterNumber ?? inferChapterNumberFromInstruction(instruction);
       const resolvedChapterCount = chapterCount ?? inferChapterCountFromInstruction(instruction);
       let resolvedBookId: string | undefined;
+=======
+    ): Promise<AgentToolResult<AuditReportDetails | undefined>> {
+      const { agent, instruction, bookId, title, chapterNumber, genre, platform, language, targetChapters, chapterWordCount, mode, format, approvedOnly } = params;
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
 
       const progress = (msg: string) => {
         onUpdate?.(textResult(msg));
@@ -396,6 +418,7 @@ export function createSubAgentTool(
           }
 
           case "auditor": {
+<<<<<<< HEAD
             if (!resolvedBookId) return textResult("Error: bookId is required for the auditor agent.");
             progress(`Auditing chapter ${resolvedChapterNumber ?? "latest"} for "${resolvedBookId}"...`);
             const audit = await pipeline.auditDraft(resolvedBookId, resolvedChapterNumber);
@@ -407,6 +430,46 @@ export function createSubAgentTool(
               summary: audit.summary,
               issues: auditIssues,
             }));
+=======
+            if (!bookId) return textResult("Error: bookId is required for the auditor agent.");
+            progress(`Auditing chapter ${chapterNumber ?? "latest"} for "${bookId}"...`);
+            const audit = await pipeline.auditDraft(bookId, chapterNumber);
+            progress(`Audit complete for "${bookId}".`);
+            const issues: AuditIssueView[] = (audit.issues ?? []).map((issue: any) => ({
+              severity: typeof issue?.severity === "string" && issue.severity.trim().length > 0 ? issue.severity : "warning",
+              category: typeof issue?.category === "string" && issue.category.trim().length > 0 ? issue.category : "unknown",
+              description: typeof issue?.description === "string" ? issue.description : String(issue?.description ?? ""),
+              suggestion: typeof issue?.suggestion === "string" ? issue.suggestion : "",
+            }));
+            const details: AuditReportDetails = {
+              kind: "audit_report",
+              bookId,
+              chapterNumber: audit.chapterNumber,
+              passed: audit.passed,
+              issueCount: issues.length,
+              summary: typeof audit.summary === "string" ? audit.summary : "",
+              issues,
+            };
+            const issueLines = issues.length > 0
+              ? issues
+                .map((issue, index) =>
+                  `${index + 1}. [${issue.severity}] ${issue.description}`
+                  + (issue.category ? ` (category: ${issue.category})` : "")
+                  + (issue.suggestion ? `\n   suggestion: ${issue.suggestion}` : ""),
+                )
+                .join("\n")
+              : "No issues.";
+            const reportText = [
+              `Audit chapter ${details.chapterNumber}: ${details.passed ? "PASSED" : "FAILED"}, ${details.issueCount} issue(s).`,
+              details.summary ? `Summary: ${details.summary}` : "",
+              "Issues:",
+              issueLines,
+            ].filter((line) => line.length > 0).join("\n");
+            return {
+              content: [{ type: "text", text: reportText }],
+              details,
+            };
+>>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
           }
 
           case "reviser": {
