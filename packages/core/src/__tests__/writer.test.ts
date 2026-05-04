@@ -37,6 +37,171 @@ describe("WriterAgent", () => {
     vi.restoreAllMocks();
   });
 
+  it("rejects contaminated creative output when sanitized narrative is too short", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-contamination-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "污染样本",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "<think>先给出完整推理过程再写正文。</think>",
+          "思考过程：这一段不是正文。",
+          "夜风吹过巷口，他抬头看了一眼路灯。",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      await expect(agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 120,
+          chapterWordCount: 2200,
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 23,
+        lengthSpec: buildLengthSpec(2200, "zh"),
+      })).rejects.toThrow(/清洗后有效正文过短|too short after sanitization/i);
+      expect(chatSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes corner dialogue quotes to double quotes when strict force_double policy is enabled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-quote-policy-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(join(storyDir, "book_rules.md"), [
+        "---",
+        "dialogueQuotePolicy:",
+        "  mode: force_double",
+        "  strict: true",
+        "  autoNormalize: false",
+        "---",
+        "",
+        "# Rules",
+      ].join("\n"), "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "夜路",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "「你先走。」江砚说。",
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "- ok",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "ok",
+          "",
+          "=== UPDATED_STATE ===",
+          "state",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "hooks",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 1 | 夜路 | 江砚 | 夜路推进 | quote fix | none | tense | action |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "subplots",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "arcs",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "matrix",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      const output = await agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 120,
+          chapterWordCount: 2200,
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 1,
+        lengthSpec: buildLengthSpec(220, "zh"),
+      });
+
+      expect(output.content).toContain("“你先走。”江砚说。");
+      expect(output.content).not.toContain("「你先走。」");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("uses compact summary context plus selected long-range evidence during governed settlement", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-test-"));
     const bookDir = join(root, "book");
@@ -766,6 +931,7 @@ describe("WriterAgent", () => {
       });
 
     try {
+      const deltas: string[] = [];
       await agent.writeChapter({
         book: {
           id: "writer-book",
@@ -782,6 +948,9 @@ describe("WriterAgent", () => {
         bookDir,
         chapterNumber: 1,
         lengthSpec: buildLengthSpec(220, "zh"),
+        onTextDelta: (text) => {
+          deltas.push(text);
+        },
       });
 
       expect(infos).toEqual(expect.arrayContaining([
@@ -790,6 +959,7 @@ describe("WriterAgent", () => {
         "阶段 2a：提取第1章事实",
         "阶段 2b：把观察结果回写到真相文件",
       ]));
+      expect(deltas.join("")).toBe("林越在破庙外停住脚步，想起师门旧债。");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

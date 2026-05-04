@@ -38,6 +38,8 @@ export interface AgentSessionConfig {
   apiKey?: string;
   /** Optional listener for streaming events (for SSE forwarding). */
   onEvent?: (event: AgentEvent) => void;
+  /** Optional external abort signal (e.g. Studio stop button). */
+  signal?: AbortSignal;
 }
 
 export interface AgentSessionResult {
@@ -59,6 +61,7 @@ export interface AgentSessionResult {
 interface CachedAgent {
   agent: Agent;
   bookId: string | null;
+  turnInstructionRef: { value: string };
   lastActive: number;
 }
 
@@ -249,12 +252,13 @@ export async function runAgentSession(
 
   if (!cached) {
     const model = resolveModel(config.model);
+    const turnInstructionRef = { value: "" };
     const agent = new Agent({
       initialState: {
         model,
         systemPrompt: buildAgentSystemPrompt(bookId, language),
         tools: [
-          createSubAgentTool(pipeline, bookId, projectRoot),
+          createSubAgentTool(pipeline, bookId, projectRoot, () => turnInstructionRef.value),
           createReadTool(projectRoot),
           createWriteTruthFileTool(pipeline, projectRoot, bookId),
           createRenameEntityTool(pipeline, projectRoot, bookId),
@@ -278,7 +282,7 @@ export async function runAgentSession(
       agent.state.messages = plainToAgentMessages(initialMessages);
     }
 
-    cached = { agent, bookId, lastActive: Date.now() };
+    cached = { agent, bookId, turnInstructionRef, lastActive: Date.now() };
     agentCache.set(sessionId, cached);
     ensureCleanupTimer();
   }
@@ -295,9 +299,23 @@ export async function runAgentSession(
   }
 
   // ----- Execute the turn -----
+  if (config.signal?.aborted) {
+    throw createAbortError();
+  }
+
+  const onAbort = () => {
+    agent.abort();
+  };
+  config.signal?.addEventListener("abort", onAbort, { once: true });
+
   try {
+    cached.turnInstructionRef.value = userMessage;
     await agent.prompt(userMessage);
+    if (config.signal?.aborted) {
+      throw createAbortError();
+    }
   } finally {
+    config.signal?.removeEventListener("abort", onAbort);
     unsubscribe?.();
   }
 
@@ -321,6 +339,12 @@ function extractResponseText(messages: AgentMessage[]): string {
     }
   }
   return "";
+}
+
+function createAbortError(): Error {
+  const err = new Error("Agent run aborted");
+  err.name = "AbortError";
+  return err;
 }
 
 // ---------------------------------------------------------------------------

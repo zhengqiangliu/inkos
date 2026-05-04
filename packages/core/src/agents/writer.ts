@@ -49,6 +49,8 @@ export interface WriteChapterInput {
   readonly lengthSpec?: LengthSpec;
   readonly wordCountOverride?: number;
   readonly temperatureOverride?: number;
+  readonly allowReapply?: boolean;
+  readonly onTextDelta?: (text: string) => void;
 }
 
 export interface SettleChapterStateInput {
@@ -98,6 +100,15 @@ export interface WriteChapterOutput {
   readonly tokenUsage?: TokenUsage;
 }
 
+type DialogueQuoteStyle = "double" | "corner" | "none" | "mixed";
+type DialogueQuotePolicyMode = "auto" | "force_double" | "force_corner" | "force_none";
+
+interface ResolvedDialogueQuotePolicy {
+  readonly mode: DialogueQuotePolicyMode;
+  readonly strict: boolean;
+  readonly autoNormalize: boolean;
+}
+
 export class WriterAgent extends BaseAgent {
   get name(): string {
     return "writer";
@@ -113,6 +124,50 @@ export class WriterAgent extends BaseAgent {
 
   private logWarn(language: "zh" | "en", messages: { zh: string; en: string }): void {
     this.ctx.logger?.warn(this.localize(language, messages));
+  }
+
+  private isRetryableEmptyResponseError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const message = error.message.toLowerCase();
+    return message.includes("llm returned empty response from stream")
+      || message.includes("llm returned empty response");
+  }
+
+  private async chatWithRetry(
+    language: "zh" | "en",
+    phase: "creative" | "observer" | "settler",
+    messages: ReadonlyArray<{ role: "system" | "user" | "assistant"; content: string }>,
+    options?: { readonly temperature?: number; readonly maxTokens?: number; readonly onTextDelta?: (text: string) => void },
+  ) {
+    try {
+      return await this.chat(messages, options);
+    } catch (error) {
+      if (!this.isRetryableEmptyResponseError(error)) {
+        throw error;
+      }
+      this.logWarn(language, {
+        zh: `阶段 ${phase} 遇到模型空响应，自动重试 1 次。`,
+        en: `Phase ${phase} returned empty model response; retrying once.`,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return await this.chat(messages, options);
+    }
+  }
+
+  private async emitSyntheticTextDeltas(
+    text: string,
+    onTextDelta: ((text: string) => void) | undefined,
+  ): Promise<void> {
+    if (!onTextDelta || !text) return;
+    const chunkSize = 160;
+    let chunkCount = 0;
+    for (let i = 0; i < text.length; i += chunkSize) {
+      onTextDelta(text.slice(i, i + chunkSize));
+      chunkCount += 1;
+      if (chunkCount % 8 === 0) {
+        await Promise.resolve();
+      }
+    }
   }
 
   async writeChapter(input: WriteChapterInput): Promise<WriteChapterOutput> {
@@ -157,6 +212,13 @@ export class WriterAgent extends BaseAgent {
     const hasParentCanon = parentCanon !== "(文件尚未创建)";
     const hasFanficCanon = fanficCanonRaw !== "(文件尚未创建)";
     const resolvedLanguage = book.language ?? genreProfile.language;
+    const dialogueQuotePolicy = this.resolveDialogueQuotePolicy(bookRules, resolvedLanguage);
+    const dialogueQuoteStyle = this.detectDialogueQuoteStyle(recentChapters || fingerprintChapters);
+    const dialogueQuoteGuideline = this.buildDialogueQuoteGuideline(
+      dialogueQuoteStyle,
+      resolvedLanguage,
+      dialogueQuotePolicy,
+    );
     const targetWords = input.lengthSpec?.target ?? input.wordCountOverride ?? book.chapterWordCount;
     const resolvedLengthSpec = input.lengthSpec ?? buildLengthSpec(targetWords, resolvedLanguage);
     const governedMemoryBlocks = input.contextPackage
@@ -197,6 +259,7 @@ export class WriterAgent extends BaseAgent {
           language: book.language ?? genreProfile.language,
           varianceBrief: englishVarianceBrief?.text,
           selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
+          dialogueQuoteGuideline,
         })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -233,6 +296,7 @@ export class WriterAgent extends BaseAgent {
             relevantSummaries,
             parentCanon: hasParentCanon ? parentCanon : undefined,
             language: book.language ?? genreProfile.language,
+            dialogueQuoteGuideline,
           });
         })();
 
@@ -246,21 +310,81 @@ export class WriterAgent extends BaseAgent {
     // Scale maxTokens to chapter word count (Chinese ≈ 1.5 tokens/char)
     const creativeMaxTokens = Math.max(8192, Math.ceil(targetWords * 2));
 
-    const creativeResponse = await this.chat(
+    let sawCreativeDelta = false;
+    const creativeResponse = await this.chatWithRetry(
+      resolvedLanguage,
+      "creative",
       [
         { role: "system", content: creativeSystemPrompt },
         { role: "user", content: creativeUserPrompt },
       ],
-      { maxTokens: creativeMaxTokens, temperature: creativeTemperature },
+      {
+        maxTokens: creativeMaxTokens,
+        temperature: creativeTemperature,
+        onTextDelta: input.onTextDelta
+          ? (text) => {
+            sawCreativeDelta = true;
+            input.onTextDelta?.(text);
+          }
+          : undefined,
+      },
     );
     const creativeUsage = creativeResponse.usage;
 
     const creative = parseCreativeOutput(chapterNumber, creativeResponse.content, resolvedLengthSpec.countingMode);
+    let chapterContent = creative.content;
+    if ((creative.sanitizedCharsRemoved ?? 0) > 0) {
+      this.logWarn(resolvedLanguage, {
+        zh: `检测到并清理了第${chapterNumber}章输出中的非正文片段（约${creative.sanitizedCharsRemoved}字符）。`,
+        en: `Detected and sanitized non-narrative fragments for chapter ${chapterNumber} (~${creative.sanitizedCharsRemoved} chars removed).`,
+      });
+    }
+    const shouldNormalizeDialogueQuotes = resolvedLanguage === "zh"
+      && dialogueQuotePolicy.mode !== "auto"
+      && (dialogueQuotePolicy.autoNormalize || dialogueQuotePolicy.strict);
+    if (shouldNormalizeDialogueQuotes) {
+      const normalized = this.normalizeDialogueQuotes(chapterContent, dialogueQuotePolicy.mode);
+      if (normalized !== chapterContent) {
+        chapterContent = normalized;
+        this.logInfo(resolvedLanguage, {
+          zh: "已按书籍规则自动统一对白引号格式。",
+          en: "Dialogue quote style auto-normalized by book rules.",
+        });
+      }
+    }
+    const normalizedWordCount = countChapterLength(chapterContent, resolvedLengthSpec.countingMode);
+    const minSafeWordCount = resolvedLengthSpec.countingMode === "en_words"
+      ? Math.max(80, Math.floor(resolvedLengthSpec.target * 0.15))
+      : Math.max(200, Math.floor(resolvedLengthSpec.target * 0.12));
+    if (!chapterContent.trim()) {
+      if (creative.fallbackRejected || creative.reasoningLeakDetected) {
+        throw new Error(
+          resolvedLanguage === "en"
+            ? `Chapter ${chapterNumber} output was rejected because it contains reasoning/thinking fragments instead of narrative body. Please retry with a writer-friendly model.`
+            : `第${chapterNumber}章输出被拦截：检测到思考/推理片段污染正文。请切换写作模型后重试。`,
+        );
+      }
+      throw new Error(
+        resolvedLanguage === "en"
+          ? `Chapter ${chapterNumber} generation returned empty body text. Please retry.`
+          : `第${chapterNumber}章生成结果缺少正文内容，请重试。`,
+      );
+    }
+    if ((creative.reasoningLeakDetected || creative.fallbackRejected) && normalizedWordCount < minSafeWordCount) {
+      throw new Error(
+        resolvedLanguage === "en"
+          ? `Chapter ${chapterNumber} content remained too short after sanitization (${normalizedWordCount} < ${minSafeWordCount}). Please retry with a stable writer model.`
+          : `第${chapterNumber}章清洗后有效正文过短（${normalizedWordCount} < ${minSafeWordCount}），请重试并使用稳定写作模型。`,
+      );
+    }
+    if (!sawCreativeDelta && input.onTextDelta) {
+      await this.emitSyntheticTextDeltas(chapterContent, input.onTextDelta);
+    }
 
     // ── Phase 2: State settlement (temperature 0.3) ──
     this.logInfo(resolvedLanguage, {
-      zh: `阶段 2：状态结算（第${chapterNumber}章，${creative.wordCount}字）`,
-      en: `Phase 2: state settlement for chapter ${chapterNumber} (${creative.wordCount} words)`,
+      zh: `阶段 2：状态结算（第${chapterNumber}章，${normalizedWordCount}字）`,
+      en: `Phase 2: state settlement for chapter ${chapterNumber} (${normalizedWordCount} words)`,
     });
     const isGovernedSettlement = Boolean(input.chapterIntent && input.contextPackage && input.ruleStack);
     const filteredHooksForSettlement = isGovernedSettlement && input.contextPackage
@@ -293,7 +417,7 @@ export class WriterAgent extends BaseAgent {
       bookRules,
       chapterNumber,
       title: creative.title,
-      content: creative.content,
+      content: chapterContent,
       currentState,
       ledger: genreProfile.numericalSystem ? ledger : "",
       hooks: filteredHooksForSettlement,
@@ -321,6 +445,7 @@ export class WriterAgent extends BaseAgent {
       settlement.runtimeStateDelta,
       resolvedLanguage,
       chapterNumber,
+      input.allowReapply,
     );
     const resolvedRuntimeStateDelta = runtimeStateArtifacts?.resolvedDelta ?? settlement.runtimeStateDelta;
     const priorHookIds = new Set(parsePendingHooksMarkdown(hooks).map((hook) => hook.hookId));
@@ -338,11 +463,11 @@ export class WriterAgent extends BaseAgent {
 
     // ── Post-write validation (regex + rule-based, zero LLM cost) ──
     const ruleViolations = [
-      ...validatePostWrite(creative.content, genreProfile, bookRules, resolvedLanguage),
-      ...detectCrossChapterRepetition(creative.content, fingerprintChapters, resolvedLanguage),
-      ...detectParagraphLengthDrift(creative.content, fingerprintChapters, resolvedLanguage),
+      ...validatePostWrite(chapterContent, genreProfile, bookRules, resolvedLanguage),
+      ...detectCrossChapterRepetition(chapterContent, fingerprintChapters, resolvedLanguage),
+      ...detectParagraphLengthDrift(chapterContent, fingerprintChapters, resolvedLanguage),
     ];
-    const aiTellIssues = analyzeAITells(creative.content, resolvedLanguage).issues;
+    const aiTellIssues = analyzeAITells(chapterContent, resolvedLanguage).issues;
 
     const postWriteErrors = ruleViolations.filter(v => v.severity === "error");
     const postWriteWarnings = ruleViolations.filter(v => v.severity === "warning");
@@ -385,8 +510,8 @@ export class WriterAgent extends BaseAgent {
     return {
       chapterNumber,
       title: creative.title,
-      content: creative.content,
-      wordCount: creative.wordCount,
+      content: chapterContent,
+      wordCount: normalizedWordCount,
       preWriteCheck: creative.preWriteCheck,
       postSettlement: settlement.postSettlement,
       runtimeStateDelta: resolvedRuntimeStateDelta,
@@ -541,7 +666,9 @@ export class WriterAgent extends BaseAgent {
       zh: `阶段 2a：提取第${params.chapterNumber}章事实`,
       en: `Phase 2a: observing facts for chapter ${params.chapterNumber}`,
     });
-    const observerResponse = await this.chat(
+    const observerResponse = await this.chatWithRetry(
+      resolvedLang,
+      "observer",
       [
         { role: "system", content: observerSystem },
         { role: "user", content: observerUser },
@@ -588,7 +715,9 @@ export class WriterAgent extends BaseAgent {
     // Settler outputs all truth files — scale with content size
     const settlerMaxTokens = Math.max(8192, Math.ceil(params.content.length * 0.8));
 
-    const response = await this.chat(
+    const response = await this.chatWithRetry(
+      resolvedLang,
+      "settler",
       [
         { role: "system", content: settlerSystem },
         { role: "user", content: settlerUser },
@@ -708,6 +837,7 @@ export class WriterAgent extends BaseAgent {
     readonly relevantSummaries?: string;
     readonly parentCanon?: string;
     readonly language?: "zh" | "en";
+    readonly dialogueQuoteGuideline?: string;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
@@ -746,6 +876,11 @@ export class WriterAgent extends BaseAgent {
 本书是番外作品。以下正典约束不可违反，角色不得引用超出其信息边界的信息。
 ${params.parentCanon}\n`
       : "";
+    const dialogueQuoteBlock = params.dialogueQuoteGuideline
+      ? params.language === "en"
+        ? `\n## Dialogue Quote Convention\n${params.dialogueQuoteGuideline}\n`
+        : `\n## 对话引号约定\n${params.dialogueQuoteGuideline}\n`
+      : "";
     const lengthRequirementBlock = this.buildLengthRequirementBlock(params.lengthSpec, params.language ?? "zh");
 
     if (params.language === "en") {
@@ -771,6 +906,7 @@ ${params.volumeOutline}
 - If the outline specifies an event for chapter N, do not resolve it early.
 - Pacing must match the outline's chapter span: if 5 chapters are planned for an arc, do not compress into 1-2.
 - PRE_WRITE_CHECK must identify which outline node this chapter covers.
+${dialogueQuoteBlock}
 
 ${lengthRequirementBlock}
 - Output PRE_WRITE_CHECK first, then the chapter
@@ -799,6 +935,7 @@ ${params.volumeOutline}
 - 如果卷纲指定了某个事件/转折发生在第N章，不得提前到本章完成
 - 剧情推进速度必须与卷纲规划的章节跨度匹配：如果卷纲规划某段剧情跨5章，不得在1-2章内讲完
 - PRE_WRITE_CHECK中必须明确标注本章对应的卷纲节点
+${dialogueQuoteBlock}
 
 ${lengthRequirementBlock}
 - 先输出写作自检表，再写正文
@@ -815,6 +952,7 @@ ${lengthRequirementBlock}
     readonly language?: "zh" | "en";
     readonly varianceBrief?: string;
     readonly selectedEvidenceBlock?: string;
+    readonly dialogueQuoteGuideline?: string;
   }): string {
     const contextSections = params.contextPackage.selectedContext
       .map((entry) => [
@@ -850,6 +988,11 @@ ${lengthRequirementBlock}
         ? `\n## Explicit Hook Agenda\n${explicitHookAgenda}\n`
         : `\n## 显式 Hook Agenda\n${explicitHookAgenda}\n`
       : "";
+    const dialogueQuoteBlock = params.dialogueQuoteGuideline
+      ? params.language === "en"
+        ? `\n## Dialogue Quote Convention\n${params.dialogueQuoteGuideline}\n`
+        : `\n## 对话引号约定\n${params.dialogueQuoteGuideline}\n`
+      : "";
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
@@ -873,6 +1016,7 @@ ${overrideLines}
 ## Trace Notes
 ${traceNotes}
 
+${dialogueQuoteBlock}
 ${varianceBlock}
 ${lengthRequirementBlock}
 - Output PRE_WRITE_CHECK first, then the chapter
@@ -900,6 +1044,7 @@ ${overrideLines}
 ## 追踪说明
 ${traceNotes}
 
+${dialogueQuoteBlock}
 ${varianceBlock}
 ${lengthRequirementBlock}
 - 先输出写作自检表，再写正文
@@ -1265,6 +1410,97 @@ ${overrides}\n`;
     }
   }
 
+  private detectDialogueQuoteStyle(recentChapters: string): DialogueQuoteStyle {
+    if (!recentChapters.trim()) return "none";
+    const doubleCount = (recentChapters.match(/“[^”\n]{1,}”/g) ?? []).length;
+    const cornerCount = (recentChapters.match(/「[^」\n]{1,}」/g) ?? []).length;
+    if (doubleCount === 0 && cornerCount === 0) return "none";
+    if (doubleCount > 0 && cornerCount > 0) {
+      const dominantRatio = Math.max(doubleCount, cornerCount) / (doubleCount + cornerCount);
+      if (dominantRatio < 0.7) return "mixed";
+    }
+    return doubleCount >= cornerCount ? "double" : "corner";
+  }
+
+  private resolveDialogueQuotePolicy(
+    bookRules: BookRules | null,
+    language: "zh" | "en",
+  ): ResolvedDialogueQuotePolicy {
+    if (language === "en") {
+      return {
+        mode: "auto",
+        strict: false,
+        autoNormalize: false,
+      };
+    }
+    const policy = bookRules?.dialogueQuotePolicy;
+    if (!policy) {
+      return {
+        mode: "auto",
+        strict: false,
+        autoNormalize: false,
+      };
+    }
+    return {
+      mode: policy.mode ?? "auto",
+      strict: policy.strict ?? false,
+      autoNormalize: policy.autoNormalize ?? false,
+    };
+  }
+
+  private normalizeDialogueQuotes(content: string, mode: DialogueQuotePolicyMode): string {
+    if (mode === "force_double") {
+      return content
+        .replace(/「/g, "“")
+        .replace(/」/g, "”")
+        .replace(/『/g, "“")
+        .replace(/』/g, "”");
+    }
+    if (mode === "force_corner") {
+      return content
+        .replace(/“/g, "「")
+        .replace(/”/g, "」")
+        .replace(/『/g, "「")
+        .replace(/』/g, "」");
+    }
+    return content;
+  }
+
+  private buildDialogueQuoteGuideline(
+    style: DialogueQuoteStyle,
+    language: "zh" | "en",
+    policy: ResolvedDialogueQuotePolicy,
+  ): string | undefined {
+    if (language === "en") {
+      return "Keep direct speech punctuation consistent with recent chapters. Do not switch quote style mid-chapter.";
+    }
+    if (policy.mode === "force_double") {
+      return policy.strict
+        ? "本书强制对白格式：所有对白必须使用中文双引号“……”，且不得使用无引号“说话人：内容”体。出现「……」或无引号对白都视为违规。"
+        : "本书强制对白格式：所有对白必须使用中文双引号“……”。禁止使用「……」。";
+    }
+    if (policy.mode === "force_corner") {
+      return policy.strict
+        ? "本书强制对白格式：所有对白必须使用「……」引号，且不得使用无引号“说话人：内容”体。出现“……”或无引号对白都视为违规。"
+        : "本书强制对白格式：所有对白必须使用「……」引号。禁止使用“……”。";
+    }
+    if (policy.mode === "force_none") {
+      return "本书强制对白格式：统一使用无引号“说话人：内容”体，不使用“……”或「……」对白引号。";
+    }
+    switch (style) {
+      case "double":
+        return "最近章节主要使用中文双引号“……”标注对白。本章对白统一使用“……”，不要混入「……」或无引号直叙。";
+      case "corner":
+        return "最近章节主要使用日式引号「……」标注对白。本章对白统一使用「……」，不要混入“……”或无引号直叙。";
+      case "none":
+        return "最近章节对白较少使用引号，常见写法是“说话人：内容”。本章默认沿用该写法，不要在同章内混用多种对白标点。";
+      case "mixed":
+        return "最近章节对白引号存在混用。本章请先选定一种引号风格（推荐「……」或“……”之一）并全章保持一致。";
+      default:
+        return undefined;
+    }
+  }
+
 
   /**
    * Extract dialogue fingerprints from recent chapters.
@@ -1276,14 +1512,14 @@ ${overrides}\n`;
     // Match dialogue patterns:
     // Chinese: "speaker说道：" or dialogue in ""「」
     // English: "dialogue," speaker said. or "dialogue."
-    const dialogueRegex = /(?:(.{1,6})(?:说道|道|喝道|冷声道|笑道|怒道|低声道|大声道|喝骂道|冷笑道|沉声道|喊道|叫道|问道|答道)\s*[：:]\s*["""「]([^"""」]+)["""」])|["""「]([^"""」]{2,})["""」]|"([^"]{2,})"/g;
+    const dialogueRegex = /(?:(.{1,6})(?:说道|道|喝道|冷声道|笑道|怒道|低声道|大声道|喝骂道|冷笑道|沉声道|喊道|叫道|问道|答道)\s*[：:]\s*[“「"]([^”」"\n]+)[”」"])|[“「"]([^”」"\n]{2,})[”」"]|"([^"\n]{2,})"/g;
 
     const characterDialogues = new Map<string, string[]>();
     let match: RegExpExecArray | null;
 
     while ((match = dialogueRegex.exec(recentChapters)) !== null) {
       const speaker = match[1]?.trim();
-      const line = match[2] ?? match[3] ?? "";
+      const line = match[2] ?? match[3] ?? match[4] ?? "";
       if (speaker && line.length > 1) {
         const existing = characterDialogues.get(speaker) ?? [];
         characterDialogues.set(speaker, [...existing, line]);

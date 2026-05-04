@@ -61,6 +61,7 @@ export const ChapterIntentSchema = z.object({
   chapter: z.number().int().min(1),
   goal: z.string().min(1),
   outlineNode: z.string().optional(),
+  outlineAnchorMatched: z.boolean().optional(),
   sceneDirective: z.string().min(1).optional(),
   arcDirective: z.string().min(1).optional(),
   moodDirective: z.string().min(1).optional(),

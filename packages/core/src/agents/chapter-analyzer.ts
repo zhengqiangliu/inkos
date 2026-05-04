@@ -38,6 +38,10 @@ export class ChapterAnalyzerAgent extends BaseAgent {
     const { profile: genreProfile, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
     const resolvedLanguage = book.language ?? genreProfile.language;
+    const governedMode = Boolean(input.chapterIntent && input.contextPackage && input.ruleStack);
+    const governedMemoryBlocks = input.contextPackage
+      ? buildGovernedMemoryEvidenceBlocks(input.contextPackage, resolvedLanguage)
+      : undefined;
 
     // Read current truth files (same set as writer.ts)
     const [
@@ -57,20 +61,21 @@ export class ChapterAnalyzerAgent extends BaseAgent {
     const parsedBookRules = await readBookRules(bookDir);
     const bookRulesBody = parsedBookRules?.body ?? "";
     const bookRules = parsedBookRules?.rules;
-    const governedMode = Boolean(input.chapterIntent && input.contextPackage && input.ruleStack);
-    const memorySelection = await retrieveMemorySelection({
-      bookDir,
-      chapterNumber,
-      goal: this.buildMemoryGoal(chapterTitle, chapterContent),
-      outlineNode: this.findOutlineNode(volumeOutline, chapterNumber),
-    });
-    const chapterSummaries = this.renderSummarySnapshot(
-      memorySelection.summaries,
-      resolvedLanguage,
-    );
-    const governedMemoryBlocks = input.contextPackage
-      ? buildGovernedMemoryEvidenceBlocks(input.contextPackage, resolvedLanguage)
-      : undefined;
+    const shouldRetrieveMemorySelection = !governedMemoryBlocks?.summariesBlock;
+    const memorySelection = shouldRetrieveMemorySelection
+      ? await retrieveMemorySelection({
+          bookDir,
+          chapterNumber,
+          goal: this.buildMemoryGoal(chapterTitle, chapterContent),
+          outlineNode: this.findOutlineNode(volumeOutline, chapterNumber),
+        })
+      : null;
+    const chapterSummaries = memorySelection
+      ? this.renderSummarySnapshot(
+          memorySelection.summaries,
+          resolvedLanguage,
+        )
+      : this.missingFilePlaceholder(resolvedLanguage);
     const hooksWorkingSet = governedMode && input.contextPackage
       ? buildGovernedHookWorkingSet({
           hooksMarkdown: hooks,

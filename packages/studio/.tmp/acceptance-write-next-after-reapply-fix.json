@@ -1,0 +1,186 @@
+{
+  "baseUrl": "http://localhost:4317",
+  "bookId": "诡异复苏-我在夜里斩神-白天送外卖-",
+  "projectRoot": "E:\\my-novel",
+  "sessionId": "1777139035780-o980s7",
+  "requestedSessionId": null,
+  "sessionCreated": true,
+  "commands": [
+    "write-next"
+  ],
+  "commandCount": 1,
+  "cases": [
+    {
+      "caseName": "write-next",
+      "runId": "write-next-20260425174355-5ijsyb",
+      "instruction": "写下一章",
+      "expectedChapters": [
+        25
+      ],
+      "startedAt": 1777139035834,
+      "endedAt": 1777139858178,
+      "elapsedMs": 822344,
+      "response": {
+        "status": 200,
+        "error": null,
+        "errorCode": null,
+        "errorMessage": null,
+        "persisted": true,
+        "addedChapterNumbers": [
+          25
+        ],
+        "addedChapterNumbersMatchExpected": true,
+        "missingChapterFiles": [],
+        "pass": true,
+        "bodyPreview": "已完成第25章写作。"
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 25,
+            "indexEntry": {
+              "number": 25,
+              "title": "二十分钟缓冲区",
+              "status": "ready-for-review",
+              "wordCount": 2895,
+              "createdAt": "2026-04-25T17:57:38.131Z",
+              "updatedAt": "2026-04-25T17:57:38.131Z",
+              "auditIssues": [
+                "[warning] “上午联席会签试运行—傍晚APP出现新入口‘高风险报备’并即时生效—当晚即进入‘人工护栏池’”的系统落地速度偏快，若无预埋开关说明，容易给读者‘技术开挂’感。",
+                "[warning] 第24章与第25章连续出现“赵国梁催单→接单→外场举证→异常免罚取消”的同构流程，虽然第25章新增了证人和会商，但结果反馈仍较相似，爽点边际递减。",
+                "[warning] H14（门禁代刷执行人）与H16（精准施压通道）持续推进但仍停留在“联系中/询问中”层级；本章虽有保洁亭口述与来电威胁，但核心身份仍未落地，期待缺口在累积。",
+                "[warning] 联席会段落中多角色台词偏“条款宣读腔”，邓栩/周宁/胡警官在句式上趋同，人物声音区分度略弱。",
+                "[info] 近期章节类型序列为：22（高压行动）→23（高压行动）→24（日常喘息+风险处置）→25（会商制度+风险处置）。虽有会商新形态，但“风险处置”连续占比仍高。",
+                "[info] 卷纲节点“死人催单二选一”在24、25两章连续消耗；第25章已通过“制度试运行+当场验证”产生新弧线节点，未构成硬偏离，但存在节点滞留风险。",
+                "[info] 高疲劳词与AI标记词（如“仿佛/不禁/宛如/竟然/忽然/猛地”）在本章密度较低，未触发预警。"
+              ],
+              "lengthWarnings": [],
+              "lengthTelemetry": {
+                "target": 3000,
+                "softMin": 2591,
+                "softMax": 3409,
+                "hardMin": 2182,
+                "hardMax": 3818,
+                "countingMode": "zh_chars",
+                "writerCount": 2801,
+                "postWriterNormalizeCount": 2801,
+                "postReviseCount": 2895,
+                "finalCount": 2895,
+                "normalizeApplied": false,
+                "lengthWarning": false
+              },
+              "tokenUsage": {
+                "promptTokens": 0,
+                "completionTokens": 0,
+                "totalTokens": 0
+              }
+            },
+            "chapterFiles": [
+              "0025_二十分钟缓冲区.md"
+            ],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\25",
+            "snapshotExists": true,
+            "snapshotCurrentStateExists": true,
+            "snapshotPendingHooksExists": true,
+            "pass": true
+          }
+        ],
+        "pass": true
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 2988,
+        "maxGapMs": 30026,
+        "maxGapFromEvent": "log",
+        "maxGapToEvent": "llm:progress",
+        "limitMs": 15000,
+        "pass": false,
+        "sampleEvents": [
+          {
+            "ts": 1777139035845,
+            "event": "thinking:start"
+          },
+          {
+            "ts": 1777139035845,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777139035845,
+            "event": "log"
+          },
+          {
+            "ts": 1777139035845,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777139035845,
+            "event": "tool:start"
+          },
+          {
+            "ts": 1777139035861,
+            "event": "log"
+          },
+          {
+            "ts": 1777139035886,
+            "event": "log"
+          },
+          {
+            "ts": 1777139035886,
+            "event": "log"
+          },
+          {
+            "ts": 1777139035892,
+            "event": "log"
+          },
+          {
+            "ts": 1777139065901,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777139095904,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777139125911,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777139129054,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777139129055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777139129055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777139129055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777139129239,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777139129239,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777139129239,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777139129239,
+            "event": "chapter:delta"
+          }
+        ]
+      },
+      "pass": false
+    }
+  ],
+  "overallPass": false
+}

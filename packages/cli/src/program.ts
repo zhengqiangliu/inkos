@@ -28,7 +28,6 @@ import { createStudioCommand, launchStudioEntry } from "./commands/studio.js";
 import { consolidateCommand } from "./commands/consolidate.js";
 import { createInteractCommand, type InteractCommandHooks } from "./commands/interact.js";
 import { createTuiCommand } from "./commands/tui.js";
-import { launchTui } from "./tui/app.js";
 import { findProjectRoot } from "./utils.js";
 
 const require = createRequire(import.meta.url);

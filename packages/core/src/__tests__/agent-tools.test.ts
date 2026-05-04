@@ -159,6 +159,72 @@ describe("agent deterministic writing tools", () => {
     expect(pipeline.writeNextChapter).toHaveBeenCalledWith("harbor", 2600);
   });
 
+  it("supports explicit writer chapterCount for consecutive chapters", async () => {
+    const pipeline = {
+      writeNextChapter: vi
+        .fn()
+        .mockResolvedValueOnce({ chapterNumber: 4, wordCount: 2600 })
+        .mockResolvedValueOnce({ chapterNumber: 5, wordCount: 2550 })
+        .mockResolvedValueOnce({ chapterNumber: 6, wordCount: 2480 }),
+    };
+    const tool = createSubAgentTool(pipeline as never, "harbor");
+
+    const result = await tool.execute("tool-7a", {
+      agent: "writer",
+      bookId: "harbor",
+      chapterCount: 3,
+      chapterWordCount: 2500,
+      instruction: "连续写3章",
+    } as any);
+
+    expect(pipeline.writeNextChapter).toHaveBeenCalledTimes(3);
+    expect(pipeline.writeNextChapter).toHaveBeenNthCalledWith(1, "harbor", 2500);
+    expect(pipeline.writeNextChapter).toHaveBeenNthCalledWith(2, "harbor", 2500);
+    expect(pipeline.writeNextChapter).toHaveBeenNthCalledWith(3, "harbor", 2500);
+    expect(result.content[0]?.type).toBe("text");
+    if (result.content[0]?.type === "text") {
+      expect(result.content[0].text).toContain("3 chapters");
+      expect(result.content[0].text).toContain("chapter 4-6");
+    }
+  });
+
+  it("infers writer chapterCount from instruction when omitted", async () => {
+    const pipeline = {
+      writeNextChapter: vi
+        .fn()
+        .mockResolvedValueOnce({ chapterNumber: 4, wordCount: 2600 })
+        .mockResolvedValueOnce({ chapterNumber: 5, wordCount: 2550 }),
+    };
+    const tool = createSubAgentTool(
+      pipeline as never,
+      "harbor",
+      undefined,
+      () => "请连续写2章",
+    );
+
+    await tool.execute("tool-7aa", {
+      agent: "writer",
+      bookId: "harbor",
+    } as any);
+
+    expect(pipeline.writeNextChapter).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when writer sub-agent fails, so the caller can mark tool error", async () => {
+    const pipeline = {
+      writeNextChapter: vi.fn(async () => {
+        throw new Error("terminated");
+      }),
+    };
+    const tool = createSubAgentTool(pipeline as never, "harbor");
+
+    await expect(tool.execute("tool-7b", {
+      agent: "writer",
+      bookId: "harbor",
+      instruction: "继续写",
+    } as any)).rejects.toThrow("terminated");
+  });
+
   it("prefers explicit reviser mode over instruction guessing", async () => {
     const pipeline = {
       reviseDraft: vi.fn(async () => ({
@@ -180,6 +246,202 @@ describe("agent deterministic writing tools", () => {
     } as any);
 
     expect(pipeline.reviseDraft).toHaveBeenCalledWith("harbor", 3, "spot-fix");
+  });
+
+  it("allows auditor calls without instruction", async () => {
+    const pipeline = {
+      auditDraft: vi.fn(async () => ({
+        chapterNumber: 3,
+        passed: true,
+        issues: [],
+      })),
+    };
+    const tool = createSubAgentTool(pipeline as never, "harbor");
+
+    const result = await tool.execute("tool-8b", {
+      agent: "auditor",
+      bookId: "harbor",
+      chapterNumber: 3,
+    } as any);
+
+    expect(pipeline.auditDraft).toHaveBeenCalledWith("harbor", 3);
+    expect(result.content[0]?.type).toBe("text");
+  });
+
+  it("formats auditor output with score, report and grouped issues", async () => {
+    const pipeline = {
+      auditDraft: vi.fn(async () => ({
+        chapterNumber: 12,
+        passed: false,
+        summary: "存在时间线冲突与设定矛盾。",
+        issues: [
+          { severity: "warning", category: "节奏", description: "中段推进过快。" },
+          { severity: "critical", category: "时间线", description: "与第10章冲突。" },
+          { severity: "info", category: "文风", description: "个别口语重复。" },
+        ],
+      })),
+    };
+    const tool = createSubAgentTool(pipeline as never, "harbor");
+
+    const result = await tool.execute("tool-8b-score", {
+      agent: "auditor",
+      bookId: "harbor",
+      chapterNumber: 12,
+    } as any);
+
+    expect(result.content[0]?.type).toBe("text");
+    if (result.content[0]?.type !== "text") return;
+    expect(result.content[0].text).toContain("第12章审计未通过");
+    expect(result.content[0].text).toContain("审计评分：49/100");
+    expect(result.content[0].text).toContain("审计报告：存在时间线冲突与设定矛盾。");
+    expect(result.content[0].text).toContain("严重：");
+    expect(result.content[0].text).toContain("警告：");
+    expect(result.content[0].text).toContain("提示：");
+  });
+
+  it("recovers missing instruction/chapterNumber from current turn text", async () => {
+    const pipeline = {
+      auditDraft: vi.fn(async () => ({
+        chapterNumber: 13,
+        passed: true,
+        issues: [],
+      })),
+    };
+    const tool = createSubAgentTool(
+      pipeline as never,
+      "harbor",
+      undefined,
+      () => "请审计第13章",
+    );
+
+    await tool.execute("tool-8bb", {
+      agent: "auditor",
+    } as any);
+
+    expect(pipeline.auditDraft).toHaveBeenCalledWith("harbor", 13);
+  });
+
+  it("infers auditor agent from current turn text when args are empty", async () => {
+    const pipeline = {
+      auditDraft: vi.fn(async () => ({
+        chapterNumber: 7,
+        passed: true,
+        issues: [],
+      })),
+    };
+    const tool = createSubAgentTool(
+      pipeline as never,
+      "harbor",
+      undefined,
+      () => "审计第7章",
+    );
+
+    await tool.execute("tool-8bc", {} as any);
+
+    expect(pipeline.auditDraft).toHaveBeenCalledWith("harbor", 7);
+  });
+
+  it("infers reviser + chapter number from 重订13章", async () => {
+    const pipeline = {
+      reviseDraft: vi.fn(async () => ({
+        chapterNumber: 13,
+        wordCount: 2400,
+        fixedIssues: [],
+        applied: true,
+        status: "ready-for-review" as const,
+      })),
+    };
+    const tool = createSubAgentTool(
+      pipeline as never,
+      "harbor",
+      undefined,
+      () => "重订13章",
+    );
+
+    await tool.execute("tool-8bd", {} as any);
+
+    expect(pipeline.reviseDraft).toHaveBeenCalledWith("harbor", 13, "spot-fix");
+  });
+
+  it("normalizes legacy books/ prefix in sub-agent bookId", async () => {
+    const pipeline = {
+      reviseDraft: vi.fn(async () => ({
+        chapterNumber: 13,
+        wordCount: 2400,
+        fixedIssues: [],
+        applied: true,
+        status: "ready-for-review" as const,
+      })),
+    };
+    const tool = createSubAgentTool(pipeline as never, null);
+
+    await tool.execute("tool-8bd2", {
+      agent: "reviser",
+      bookId: "books/harbor",
+      chapterNumber: 13,
+      mode: "spot-fix",
+    } as any);
+
+    expect(pipeline.reviseDraft).toHaveBeenCalledWith("harbor", 13, "spot-fix");
+  });
+
+  it("rejects nested bookId paths in sub-agent calls", async () => {
+    const pipeline = {
+      reviseDraft: vi.fn(async () => ({})),
+    };
+    const tool = createSubAgentTool(pipeline as never, null);
+
+    const result = await tool.execute("tool-8bd3", {
+      agent: "reviser",
+      bookId: "books/harbor/chapters",
+      chapterNumber: 13,
+    } as any);
+
+    expect(result.content[0]?.type).toBe("text");
+    if (result.content[0]?.type === "text") {
+      expect(result.content[0].text).toContain("Invalid bookId");
+    }
+    expect(pipeline.reviseDraft).not.toHaveBeenCalled();
+  });
+
+  it("reroutes mistaken writer calls to reviser for chapter-targeted revision instructions", async () => {
+    const pipeline = {
+      writeNextChapter: vi.fn(async () => ({
+        chapterNumber: 4,
+        wordCount: 3000,
+      })),
+      reviseDraft: vi.fn(async () => ({
+        chapterNumber: 13,
+        wordCount: 2400,
+        fixedIssues: [],
+        applied: true,
+        status: "ready-for-review" as const,
+      })),
+    };
+    const tool = createSubAgentTool(
+      pipeline as never,
+      "harbor",
+      undefined,
+      () => "重订13章",
+    );
+
+    await tool.execute("tool-8be", {
+      agent: "writer",
+    } as any);
+
+    expect(pipeline.writeNextChapter).not.toHaveBeenCalled();
+    expect(pipeline.reviseDraft).toHaveBeenCalledWith("harbor", 13, "spot-fix");
+  });
+
+  it("returns a readable error when agent is missing", async () => {
+    const tool = createSubAgentTool({} as never, "harbor", undefined, () => "");
+
+    const result = await tool.execute("tool-8c", {} as any);
+
+    expect(result.content[0]?.type).toBe("text");
+    if (result.content[0]?.type === "text") {
+      expect(result.content[0].text).toContain("agent is required");
+    }
   });
 
   it("uses explicit exporter params instead of guessing from instruction", async () => {

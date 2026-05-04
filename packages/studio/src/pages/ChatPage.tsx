@@ -18,11 +18,12 @@ import {
 } from "../components/ai-elements/reasoning";
 import { ChatMessage } from "../components/chat/ChatMessage";
 import { QuickActions } from "../components/chat/QuickActions";
-import { ToolExecutionSteps } from "../components/chat/ToolExecutionSteps";
+import { ExecutionPanel } from "../components/chat/ExecutionPanel";
 import {
   Loader2,
   BotMessageSquare,
   ArrowUp,
+  Square,
   ChevronDown,
   Check,
 } from "lucide-react";
@@ -35,8 +36,15 @@ import {
   clearBookCreateSessionId,
   filterModelGroups,
   getBookCreateSessionId,
+  resolveAssistantPreview,
+  resolveModelSelection,
   setBookCreateSessionId,
 } from "./chat-page-state";
+import {
+  buildExecutionPanelStorageKey,
+  pickLatestAssistantToolExecutions,
+  readExecutionPanelCollapsedFromStorage,
+} from "./chat-execution-panel";
 
 // -- Types --
 
@@ -71,6 +79,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
   // -- Store actions --
   const setInput = useChatStore((s) => s.setInput);
   const sendMessage = useChatStore((s) => s.sendMessage);
+  const stopMessage = useChatStore((s) => s.stopMessage);
   const setPendingBookArgs = useChatStore((s) => s.setPendingBookArgs);
   const handleCreateBook = useChatStore((s) => s.handleCreateBook);
   const setCreateProgress = useChatStore((s) => s.setCreateProgress);
@@ -85,6 +94,9 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
 
   const isZh = t("nav.connected") === "\u5DF2\u8FDE\u63A5";
   const hasBook = Boolean(activeBookId);
+  const stopping = activeSession?.isStopping ?? false;
+  const canStop = Boolean(activeSessionId) && (loading || stopping);
+  const stopLabel = stopping ? (isZh ? "停止中..." : "Stopping...") : t("daemon.stop");
 
   // Derived: is the assistant currently streaming/thinking/executing tools?
   const isStreaming = useMemo(() => {
@@ -124,15 +136,14 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
       .map((s) => ({ service: s.service, label: s.label, models: modelsByService[s.service]!.models }));
   }, [services, modelsByService]);
 
-  // Auto-select first model when models load and none selected
+  // Ensure selected model is always valid for current grouped models.
   useEffect(() => {
-    if (!selectedModel && groupedModels.length > 0) {
-      const first = groupedModels[0];
-      if (first.models.length > 0) {
-        setSelectedModel(first.models[0].id, first.service);
-      }
+    const resolved = resolveModelSelection(groupedModels, selectedModel, selectedService);
+    if (!resolved) return;
+    if (resolved.model !== selectedModel || resolved.service !== selectedService) {
+      setSelectedModel(resolved.model, resolved.service);
     }
-  }, [groupedModels, selectedModel, setSelectedModel]);
+  }, [groupedModels, selectedModel, selectedService, setSelectedModel]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -217,9 +228,25 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
   }, [activeBookId, activateSession, createSession, loadSessionDetail, loadSessionList]);
 
   const onSend = (text: string) => {
+    if (loading || stopping) return;
     if (!activeSessionId) return;
     void sendMessage(activeSessionId, text, activeBookId);
   };
+
+  const onAssistantQuickCommand = (command: string) => {
+    onSend(command);
+  };
+
+  useEffect(() => {
+    if (!canStop || !activeSessionId) return;
+    const onEscStop = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || stopping) return;
+      event.preventDefault();
+      void stopMessage(activeSessionId);
+    };
+    window.addEventListener("keydown", onEscStop);
+    return () => window.removeEventListener("keydown", onEscStop);
+  }, [activeSessionId, canStop, stopMessage, stopping]);
 
   const onCreateBook = async () => {
     if (!activeSessionId) return;
@@ -239,8 +266,51 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
     ? "\u544A\u8BC9\u6211\u4F60\u60F3\u5199\u4EC0\u4E48\u2014\u2014\u9898\u6750\u3001\u4E16\u754C\u89C2\u3001\u4E3B\u89D2\u3001\u6838\u5FC3\u51B2\u7A81"
     : "Tell me what you want to write \u2014 genre, world, protagonist, core conflict";
 
+  const executionPanelStorageKey = useMemo(
+    () => buildExecutionPanelStorageKey(activeSessionId),
+    [activeSessionId],
+  );
+  const [executionPanelCollapsed, setExecutionPanelCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return readExecutionPanelCollapsedFromStorage(
+      (key) => window.localStorage.getItem(key),
+      buildExecutionPanelStorageKey(null),
+      true,
+    );
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setExecutionPanelCollapsed(
+      readExecutionPanelCollapsedFromStorage(
+        (key) => window.localStorage.getItem(key),
+        executionPanelStorageKey,
+        true,
+      ),
+    );
+  }, [executionPanelStorageKey]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(executionPanelStorageKey, executionPanelCollapsed ? "1" : "0");
+  }, [executionPanelCollapsed, executionPanelStorageKey]);
+
+  const panelExecutions = useMemo(
+    () => pickLatestAssistantToolExecutions(messages),
+    [messages],
+  );
+
   return (
     <div className="flex flex-col h-full flex-1 min-w-0">
+      {panelExecutions.length > 0 && (
+        <div className="shrink-0 px-3 pt-2 sm:px-4 sm:pt-3">
+          <div className="sticky top-2 z-20 mx-auto w-full max-w-[min(1600px,calc(100vw-1rem))] sm:max-w-[min(1600px,calc(100vw-2rem))]">
+            <ExecutionPanel
+              executions={panelExecutions}
+              collapsed={executionPanelCollapsed}
+              onCollapsedChange={setExecutionPanelCollapsed}
+            />
+          </div>
+        </div>
+      )}
       {/* Message scroll area */}
       <div
         ref={scrollRef}
@@ -263,55 +333,35 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                   /* User message */
                   <ChatMessage role="user" content={msg.content} timestamp={msg.timestamp} theme={theme} />
                 ) : msg.parts && msg.parts.length > 0 ? (
-                  /* Assistant message — parts-based rendering (chronological) */
-                  /* Merge consecutive utility tool parts into one group */
-                  <>
-                    {(() => {
-                      type RenderItem =
-                        | { kind: "thinking"; pi: number; part: Extract<typeof msg.parts[0], { type: "thinking" }> }
-                        | { kind: "text"; pi: number; part: Extract<typeof msg.parts[0], { type: "text" }> }
-                        | { kind: "tools"; parts: Array<Extract<typeof msg.parts[0], { type: "tool" }>>; startIdx: number };
-
-                      const items: RenderItem[] = [];
-                      for (let pi = 0; pi < msg.parts!.length; pi++) {
-                        const part = msg.parts![pi];
-                        if (part.type === "thinking") {
-                          items.push({ kind: "thinking", pi, part });
-                        } else if (part.type === "text") {
-                          items.push({ kind: "text", pi, part });
-                        } else if (part.type === "tool") {
-                          // Merge consecutive tool parts into one group
-                          const last = items[items.length - 1];
-                          if (last?.kind === "tools") {
-                            last.parts.push(part);
-                          } else {
-                            items.push({ kind: "tools", parts: [part], startIdx: pi });
-                          }
-                        }
-                      }
-
-                      return items.map((item) => {
-                        if (item.kind === "thinking") {
-                          return (
-                            <div key={`t-${item.pi}`} className="mb-2">
-                              <Reasoning isStreaming={item.part.streaming}>
-                                <ReasoningTrigger />
-                                <ReasoningContent>{item.part.content}</ReasoningContent>
-                              </Reasoning>
+                  /* Assistant message — split sections: reasoning / execution / final text */
+                  (() => {
+                    const preview = resolveAssistantPreview({
+                      content: msg.content,
+                      hasAudit: Boolean(msg.audit),
+                    });
+                    return (
+                      <div className="space-y-2">
+                        {!!msg.thinking && (
+                          <div className="rounded-xl border border-border/40 bg-card/40 px-3 py-2">
+                            <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">思考过程（流式）</div>
+                            <Reasoning isStreaming={msg.thinkingStreaming === true}>
+                              <ReasoningTrigger />
+                              <ReasoningContent>{msg.thinking}</ReasoningContent>
+                            </Reasoning>
+                          </div>
+                        )}
+                        {preview.shouldShowPreview && (
+                          <div className="space-y-1">
+                            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                              {preview.previewLabel}
                             </div>
-                          );
-                        }
-                        if (item.kind === "tools") {
-                          return <ToolExecutionSteps key={`x-${item.startIdx}`} executions={item.parts.map(p => p.execution)} />;
-                        }
-                        if (item.kind === "text" && item.part.content) {
-                          return (
                             <ChatMessage
-                              key={`c-${item.pi}`}
                               role="assistant"
-                              content={item.part.content}
+                              content={preview.previewContent}
                               timestamp={msg.timestamp}
                               theme={theme}
+                              audit={msg.audit}
+                              onQuickCommand={onAssistantQuickCommand}
                               toolCall={msg.toolCall?.name === "create_book" && pendingBookArgs
                                 ? { name: msg.toolCall.name, arguments: pendingBookArgs }
                                 : msg.toolCall}
@@ -323,12 +373,11 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                                 : undefined}
                               confirming={msg.toolCall?.name === "create_book" ? bookCreating : undefined}
                             />
-                          );
-                        }
-                        return null;
-                      });
-                    })()}
-                  </>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()
                 ) : (
                   /* Assistant message — fallback (no parts, e.g. error messages) */
                   <ChatMessage
@@ -336,6 +385,8 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                     content={msg.content}
                     timestamp={msg.timestamp}
                     theme={theme}
+                    audit={msg.audit}
+                    onQuickCommand={msg.role === "assistant" ? onAssistantQuickCommand : undefined}
                     toolCall={msg.toolCall?.name === "create_book" && pendingBookArgs
                       ? { name: msg.toolCall.name, arguments: pendingBookArgs }
                       : msg.toolCall}
@@ -387,7 +438,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
         <div className="shrink-0 max-w-3xl mx-auto w-full px-4">
           <QuickActions
             onAction={handleQuickAction}
-            disabled={loading || !activeSessionId}
+            disabled={loading || stopping || !activeSessionId}
             isZh={isZh}
           />
         </div>
@@ -440,19 +491,37 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(input); } }}
                   placeholder={isZh ? "输入指令..." : "Enter command..."}
-                  disabled={loading || !activeSessionId}
+                  disabled={!activeSessionId}
                   rows={1}
                   className="flex-1 bg-transparent text-sm leading-6 placeholder:text-muted-foreground/50 outline-none! border-none! ring-0! shadow-none focus:outline-none! focus:ring-0! focus:border-none! resize-none disabled:opacity-50 max-h-[200px] overflow-y-auto"
                 />
                 <button
                   type="button"
-                  onClick={() => onSend(input)}
-                  disabled={!input.trim() || loading || !activeSessionId}
+                  onClick={() => {
+                    if (!activeSessionId) return;
+                    if (canStop) {
+                      void stopMessage(activeSessionId);
+                      return;
+                    }
+                    onSend(input);
+                  }}
+                  disabled={!activeSessionId || (!canStop && !input.trim()) || stopping}
+                  title={canStop ? stopLabel : (isZh ? "发送" : "Send")}
+                  aria-label={canStop ? stopLabel : (isZh ? "发送" : "Send")}
                   className="w-8 h-8 rounded-lg bg-primary text-primary-foreground flex items-center justify-center shrink-0 hover:scale-105 active:scale-95 transition-all disabled:opacity-20 disabled:scale-100 shadow-sm shadow-primary/20"
                 >
-                  {loading ? <Loader2 size={14} className="animate-spin" /> : <ArrowUp size={14} strokeWidth={2.5} />}
+                  {canStop
+                    ? <Square size={12} fill="currentColor" strokeWidth={2.2} />
+                    : <ArrowUp size={14} strokeWidth={2.5} />}
                 </button>
               </div>
+              {canStop && (
+                <div className="px-3 pb-1 text-[11px] text-muted-foreground/70">
+                  {stopping
+                    ? (isZh ? "正在停止当前对话..." : "Stopping current run...")
+                    : (isZh ? "正在执行中，按 Esc 或点击右侧按钮可停止" : "Run in progress. Press Esc or click the right button to stop.")}
+                </div>
+              )}
               <div className="flex items-center gap-2 px-3 pb-2 border-t border-border/20 pt-1.5">
                 {modelPickerStatus === "loading" ? (
                   <span className="text-xs text-muted-foreground/40 animate-pulse">加载模型...</span>

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChapterAnalyzerAgent } from "../agents/chapter-analyzer.js";
 import type { BookConfig } from "../models/book.js";
+import * as memoryRetrieval from "../utils/memory-retrieval.js";
 import { countChapterLength } from "../utils/length-metrics.js";
 
 const ZERO_USAGE = {
@@ -567,6 +568,107 @@ describe("ChapterAnalyzerAgent", () => {
       expect(userPrompt).not.toContain("## Story Bible");
       expect(userPrompt).not.toContain("Full bible should stay out of governed analyzer prompts");
       expect(userPrompt).not.toContain("guild-route");
+    } finally {
+      await rm(bookDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips memory retrieval when governed context already provides summary evidence", async () => {
+    const bookDir = await mkdtemp(join(tmpdir(), "inkos-chapter-analyzer-governed-"));
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    const chapterContent = "Lin Yue checked the oath token and left no trace.";
+    const agent = new ChapterAnalyzerAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+    const retrieveSelection = vi.spyOn(memoryRetrieval, "retrieveMemorySelection");
+    const chat = vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({
+        content: [
+          "=== CHAPTER_TITLE ===",
+          "Token Trace",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          chapterContent,
+          "",
+          "=== PRE_WRITE_CHECK ===",
+          "",
+          "=== POST_SETTLEMENT ===",
+          "",
+          "=== UPDATED_STATE ===",
+          "| Field | Value |",
+          "| --- | --- |",
+          "| Current Chapter | 3 |",
+          "",
+          "=== UPDATED_LEDGER ===",
+          "",
+          "=== UPDATED_HOOKS ===",
+          "| hook_id | status |",
+          "| --- | --- |",
+          "| h1 | open |",
+          "",
+          "=== CHAPTER_SUMMARY ===",
+          "| 3 | Token Trace |",
+          "",
+          "=== UPDATED_SUBPLOTS ===",
+          "",
+          "=== UPDATED_EMOTIONAL_ARCS ===",
+          "",
+          "=== UPDATED_CHARACTER_MATRIX ===",
+          "",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    const book: BookConfig = {
+      id: "governed-book",
+      title: "Governed Book",
+      platform: "other",
+      genre: "other",
+      status: "active",
+      targetChapters: 20,
+      chapterWordCount: 2200,
+      language: "en",
+      createdAt: "2026-03-22T00:00:00.000Z",
+      updatedAt: "2026-03-22T00:00:00.000Z",
+    };
+
+    try {
+      await agent.analyzeChapter({
+        book,
+        bookDir,
+        chapterNumber: 3,
+        chapterTitle: "Token Trace",
+        chapterContent,
+        chapterIntent: "Goal: keep mentor-oath thread active",
+        contextPackage: {
+          selectedContext: [{
+            source: "story/chapter_summaries.md#ch2",
+            reason: "carry unresolved mentor debt",
+            excerpt: "mentor-oath unresolved after ch2",
+          }],
+        } as any,
+        ruleStack: {
+          sections: { hard: [], soft: [], diagnostic: [] },
+          activeOverrides: [],
+        } as any,
+      });
+
+      expect(retrieveSelection).not.toHaveBeenCalled();
+      const messages = chat.mock.calls[0]?.[0] as Array<{ role: string; content: string }>;
+      expect(messages[1]?.content).toContain("Selected Chapter Summary Evidence");
     } finally {
       await rm(bookDir, { recursive: true, force: true });
     }

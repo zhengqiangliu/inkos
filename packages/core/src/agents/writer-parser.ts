@@ -8,6 +8,9 @@ export interface CreativeOutput {
   readonly content: string;
   readonly wordCount: number;
   readonly preWriteCheck: string;
+  readonly reasoningLeakDetected?: boolean;
+  readonly fallbackRejected?: boolean;
+  readonly sanitizedCharsRemoved?: number;
 }
 
 export function parseCreativeOutput(
@@ -23,12 +26,23 @@ export function parseCreativeOutput(
     return match?.[1]?.trim() ?? "";
   };
 
-  let chapterContent = extract("CHAPTER_CONTENT");
+  const taggedChapterContent = extract("CHAPTER_CONTENT");
+  let chapterContent = taggedChapterContent;
+  let fallbackRejected = false;
+  const reasoningLeakDetected = containsReasoningLeakIndicators(content);
+  let sanitizedCharsRemoved = 0;
 
   // Fallback: if === TAG === parsing fails (common with local/small models),
   // try to extract usable content from the raw output
   if (!chapterContent) {
-    chapterContent = fallbackExtractContent(content, countingMode);
+    const fallback = fallbackExtractContent(content, countingMode);
+    chapterContent = fallback.content;
+    fallbackRejected = fallback.blockedByReasoning;
+    sanitizedCharsRemoved += fallback.sanitizedCharsRemoved;
+  } else {
+    const sanitized = sanitizeChapterNarrative(chapterContent);
+    chapterContent = sanitized.content;
+    sanitizedCharsRemoved += sanitized.removedChars;
   }
 
   let title = extract("CHAPTER_TITLE");
@@ -41,6 +55,71 @@ export function parseCreativeOutput(
     content: chapterContent,
     wordCount: countChapterLength(chapterContent, countingMode),
     preWriteCheck: extract("PRE_WRITE_CHECK"),
+    ...(reasoningLeakDetected ? { reasoningLeakDetected: true } : {}),
+    ...(fallbackRejected ? { fallbackRejected: true } : {}),
+    ...(sanitizedCharsRemoved > 0 ? { sanitizedCharsRemoved } : {}),
+  };
+}
+
+interface SanitizedNarrative {
+  readonly content: string;
+  readonly removedChars: number;
+}
+
+interface FallbackExtractionResult {
+  readonly content: string;
+  readonly blockedByReasoning: boolean;
+  readonly sanitizedCharsRemoved: number;
+}
+
+const REASONING_BLOCK_PATTERNS: ReadonlyArray<RegExp> = [
+  /<\s*think\b[^>]*>[\s\S]*?<\s*\/\s*think\s*>/gi,
+  /<\s*analysis\b[^>]*>[\s\S]*?<\s*\/\s*analysis\s*>/gi,
+  /(?:^|\n)```(?:thinking|reasoning|analysis|thoughts?)\b[\s\S]*?```/gim,
+  /(?:^|\n)\s*#{1,6}\s*(?:思考过程|推理过程|analysis|reasoning|thinking)\b[\s\S]*?(?=\n\s*#{1,6}\s|\n\s*===\s*[A-Z_]+\s*===|$)/gim,
+];
+
+const REASONING_LINE_PATTERNS: ReadonlyArray<RegExp> = [
+  /^\s*(?:思考过程|推理过程|analysis|reasoning|thinking)\s*[:：].*$/i,
+  /^\s*(?:-|\*|\d+\.)?\s*(?:analysis|reasoning|thinking)\s*[:：].*$/i,
+];
+
+const PARSER_META_LINE_PATTERN = /^(?:PRE_WRITE_CHECK|CHAPTER_TITLE|CHAPTER_CONTENT|POST_SETTLEMENT|UPDATED_STATE|UPDATED_LEDGER|UPDATED_HOOKS|CHAPTER_SUMMARY|UPDATED_SUBPLOTS|UPDATED_EMOTIONAL_ARCS|UPDATED_CHARACTER_MATRIX)\b[:：]?/i;
+
+function containsReasoningLeakIndicators(raw: string): boolean {
+  return (
+    /<\s*think\b/i.test(raw)
+    || /<\s*analysis\b/i.test(raw)
+    || /(?:^|\n)```(?:thinking|reasoning|analysis|thoughts?)\b/i.test(raw)
+    || /(?:^|\n)\s*(?:思考过程|推理过程|analysis|reasoning|thinking)\s*[:：]/i.test(raw)
+    || /(?:^|\n)\s*#{1,6}\s*(?:思考过程|推理过程|analysis|reasoning|thinking)\b/i.test(raw)
+  );
+}
+
+function sanitizeChapterNarrative(raw: string): SanitizedNarrative {
+  let next = raw;
+  const originalLength = raw.length;
+  for (const pattern of REASONING_BLOCK_PATTERNS) {
+    next = next.replace(pattern, "\n");
+  }
+
+  const lines = next.split("\n");
+  const keptLines: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^===\s*[A-Z_]+\s*===/.test(trimmed)) continue;
+    if (PARSER_META_LINE_PATTERN.test(trimmed)) continue;
+    if (REASONING_LINE_PATTERNS.some((pattern) => pattern.test(trimmed))) continue;
+    keptLines.push(line);
+  }
+  const normalized = keptLines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return {
+    content: normalized,
+    removedChars: Math.max(0, originalLength - normalized.length),
   };
 }
 
@@ -49,30 +128,47 @@ export function parseCreativeOutput(
  * Tries common patterns from local/small models, then falls back to
  * stripping metadata and returning the longest prose block.
  */
-function fallbackExtractContent(raw: string, countingMode: LengthCountingMode): string {
+function fallbackExtractContent(raw: string, countingMode: LengthCountingMode): FallbackExtractionResult {
+  if (containsReasoningLeakIndicators(raw)) {
+    return {
+      content: "",
+      blockedByReasoning: true,
+      sanitizedCharsRemoved: 0,
+    };
+  }
+
+  const finalize = (candidate: string): FallbackExtractionResult => {
+    const sanitized = sanitizeChapterNarrative(candidate);
+    return {
+      content: sanitized.content.length > 100 ? sanitized.content : "",
+      blockedByReasoning: false,
+      sanitizedCharsRemoved: sanitized.removedChars,
+    };
+  };
+
   // Try markdown heading: # 第N章 ... followed by content
   const headingMatch = raw.match(/^#\s*第\d+章[^\n]*\n+([\s\S]+)/m);
   if (headingMatch) {
-    return headingMatch[1]!.trim();
+    return finalize(headingMatch[1]!.trim());
   }
 
   if (countingMode === "en_words") {
     const englishHeadingMatch = raw.match(/^#\s*Chapter\s+\d+(?::|\s+)([^\n]*)\n+([\s\S]+)/im);
     if (englishHeadingMatch) {
-      return englishHeadingMatch[2]!.trim();
+      return finalize(englishHeadingMatch[2]!.trim());
     }
   }
 
   // Try "正文" or "内容" labeled section
   const labelMatch = raw.match(/(?:正文|内容|章节内容)[：:]\s*\n+([\s\S]+)/);
   if (labelMatch) {
-    return labelMatch[1]!.trim();
+    return finalize(labelMatch[1]!.trim());
   }
 
   if (countingMode === "en_words") {
     const englishLabelMatch = raw.match(/(?:content|chapter content)[：:]\s*\n+([\s\S]+)/i);
     if (englishLabelMatch) {
-      return englishLabelMatch[1]!.trim();
+      return finalize(englishLabelMatch[1]!.trim());
     }
   }
 
@@ -85,9 +181,7 @@ function fallbackExtractContent(raw: string, countingMode: LengthCountingMode): 
     if (/^(PRE_WRITE_CHECK|CHAPTER_TITLE|章节标题|写作自检)[：:]/.test(trimmed)) return false;
     return true;
   });
-  const result = proseLines.join("\n").trim();
-  // Only use fallback if we got meaningful content (>100 chars)
-  return result.length > 100 ? result : "";
+  return finalize(proseLines.join("\n").trim());
 }
 
 /**

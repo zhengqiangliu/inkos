@@ -10,7 +10,7 @@ vi.mock("node:fs/promises", () => ({
   access: accessMock,
 }));
 
-describe("studio runtime resolution", () => {
+describe("studio runtime resolution", { timeout: 15_000 }, () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.resetModules();

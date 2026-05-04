@@ -145,6 +145,92 @@ describe("validatePostWrite", () => {
     expect(findRule(result, "段落过碎")?.severity).toBe("warning");
   });
 
+  it("warns when Chinese dialogue quote styles are mixed in one chapter", () => {
+    const content = [
+      "「先走。」男人把门拉开。",
+      "“你别回头。”女人低声说。",
+      "「楼梯口有人。」他又补了一句。",
+      "“我知道。”她点头。",
+    ].join("\n\n");
+
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "对话引号风格混用")).toBeDefined();
+  });
+
+  it("enforces force_double dialogue policy as error when corner quotes appear", () => {
+    const bookRules = {
+      version: "1",
+      protagonist: { name: "张三", personalityLock: [], behavioralConstraints: [] },
+      prohibitions: [],
+      genreLock: { primary: "xuanhuan" as const, forbidden: [] },
+      chapterTypesOverride: [],
+      fatigueWordsOverride: [],
+      additionalAuditDimensions: [],
+      enableFullCastTracking: false,
+      allowedDeviations: [],
+      dialogueQuotePolicy: {
+        mode: "force_double" as const,
+        strict: false,
+        autoNormalize: false,
+      },
+    };
+    const content = [
+      "「先走。」男人把门拉开。",
+      "“你别回头。”女人低声说。",
+    ].join("\n\n");
+
+    const result = validatePostWrite(content, baseProfile, bookRules);
+    const v = findRule(result, "对话引号强约束");
+    expect(v).toBeDefined();
+    expect(v?.severity).toBe("error");
+  });
+
+  it("enforces strict force_double policy against unquoted speaker-colon dialogue", () => {
+    const bookRules = {
+      version: "1",
+      protagonist: { name: "张三", personalityLock: [], behavioralConstraints: [] },
+      prohibitions: [],
+      genreLock: { primary: "xuanhuan" as const, forbidden: [] },
+      chapterTypesOverride: [],
+      fatigueWordsOverride: [],
+      additionalAuditDimensions: [],
+      enableFullCastTracking: false,
+      allowedDeviations: [],
+      dialogueQuotePolicy: {
+        mode: "force_double" as const,
+        strict: true,
+        autoNormalize: false,
+      },
+    };
+    const content = [
+      "男人：先走。",
+      "女人：后门锁了。",
+      "男人：不要停。",
+      "女人：楼下有人。",
+      "男人：跟紧我。",
+      "女人：别回头。",
+    ].join("\n");
+
+    const result = validatePostWrite(content, baseProfile, bookRules);
+    const v = findRule(result, "对话引号强约束");
+    expect(v).toBeDefined();
+    expect(v?.severity).toBe("error");
+  });
+
+  it("warns when most speaker-colon dialogue lines are unquoted", () => {
+    const content = [
+      "男人：先走。",
+      "女人：后门锁了。",
+      "男人：不要停。",
+      "女人：楼下有人。",
+      "男人：跟紧我。",
+      "女人：别回头。",
+    ].join("\n");
+
+    const result = validatePostWrite(content, baseProfile, null);
+    expect(findRule(result, "对话未标引号")).toBeDefined();
+  });
+
   it("detects runs of consecutive short paragraphs", () => {
     const content = [
       "他绕过柜台，把灯挪到门边，先看了一眼地上的水印，确认脚印是新的。",

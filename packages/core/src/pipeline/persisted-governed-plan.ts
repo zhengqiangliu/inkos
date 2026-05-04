@@ -24,6 +24,12 @@ export async function loadPersistedPlan(
     if (outlineNode && outlineNode !== "(not found)" && isInvalidPersistedIntentScalar(outlineNode)) {
       return null;
     }
+    const outlineAnchorMatchedRaw = readIntentScalar(sections, "Outline Anchor Matched");
+    const outlineAnchorMatched = outlineAnchorMatchedRaw === "true"
+      ? true
+      : outlineAnchorMatchedRaw === "false"
+        ? false
+        : undefined;
     const conflicts = readIntentList(sections, "Conflicts")
       .map((line) => {
         const separator = line.indexOf(":");
@@ -41,6 +47,7 @@ export async function loadPersistedPlan(
         chapter: chapterNumber,
         goal,
         outlineNode: outlineNode && outlineNode !== "(not found)" ? outlineNode : undefined,
+        ...(typeof outlineAnchorMatched === "boolean" ? { outlineAnchorMatched } : {}),
         mustKeep: readIntentList(sections, "Must Keep"),
         mustAvoid: readIntentList(sections, "Must Avoid"),
         styleEmphasis: readIntentList(sections, "Style Emphasis"),

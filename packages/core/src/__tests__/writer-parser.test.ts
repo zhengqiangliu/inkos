@@ -264,6 +264,25 @@ describe("WriterAgent parseOutput", () => {
 // ---------------------------------------------------------------------------
 
 describe("parseCreativeOutput fallback", () => {
+  it("sanitizes think/analysis fragments from tagged chapter content", () => {
+    const raw = [
+      "=== CHAPTER_TITLE ===",
+      "夜巡",
+      "",
+      "=== CHAPTER_CONTENT ===",
+      "<think>先分析剧情走向，再输出正文。</think>",
+      "江砚把车停在巷口，雨水沿着后视镜滑落。",
+      "他没有下车，只是盯着巷子深处那盏忽明忽暗的灯。",
+    ].join("\n");
+
+    const result = parseCreativeOutput(12, raw);
+    expect(result.title).toBe("夜巡");
+    expect(result.content).toContain("江砚把车停在巷口");
+    expect(result.content).not.toContain("<think>");
+    expect(result.content).not.toContain("先分析剧情走向");
+    expect(result.reasoningLeakDetected).toBe(true);
+  });
+
   it("extracts content from markdown heading when tags are missing", () => {
     const raw = `# 第1章 觉醒之日
 
@@ -312,6 +331,20 @@ ${prose}`;
     const result = parseCreativeOutput(1, "太短了");
     expect(result.content).toBe("");
     expect(result.title).toBe("第1章");
+  });
+
+  it("rejects fallback extraction when reasoning markers are present", () => {
+    const raw = [
+      "# 第23章 雨夜",
+      "",
+      "思考过程：先列出冲突，再写正文。",
+      `${"这是伪正文。".repeat(80)}`,
+    ].join("\n");
+
+    const result = parseCreativeOutput(23, raw);
+    expect(result.content).toBe("");
+    expect(result.fallbackRejected).toBe(true);
+    expect(result.reasoningLeakDetected).toBe(true);
   });
 
   it("returns an English fallback title when short English output has no structure", () => {

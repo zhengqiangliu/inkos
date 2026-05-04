@@ -1,0 +1,31 @@
+InkOS Studio running on http://localhost:4317 (requestTimeout=disabled)
+[studio] [run:write-next-20260426005929-c6g28h] 阶段：准备章节输入
+[studio] [run:write-next-20260426005929-c6g28h] 阶段：撰写章节草稿
+[writer] [run:write-next-20260426005929-c6g28h][chapter:28] 阶段 1：创作正文（第28章）
+[writer] [run:write-next-20260426005929-c6g28h][chapter:28] 阶段 2：状态结算（第28章，2795字）
+[writer] [run:write-next-20260426005929-c6g28h][chapter:28] 阶段 2a：提取第28章事实
+[writer] [run:write-next-20260426005929-c6g28h] 阶段 2b：把观察结果回写到真相文件
+[studio] [run:write-next-20260426005929-c6g28h] 阶段：审计草稿
+[studio] [run:write-next-20260426005929-c6g28h] 阶段：落盘最终章节
+[studio] [run:write-next-20260426005929-c6g28h] 阶段：生成最终真相文件
+[studio] [run:write-next-20260426005929-c6g28h] 同步记忆索引已转后台执行
+[studio] [run:write-next-20260426005929-c6g28h] 阶段：更新章节索引与快照
+[studio] [run:write-next-20260426005929-c6g28h] 更新章节快照与事实历史已转后台执行
+[studio] [run:write-next-20260426005929-c6g28h] 同步记忆索引已完成
+[studio] [run:write-next-20260426005929-c6g28h] 更新章节快照与事实历史已完成
+[studio] [run:write-target-20260426010757-7u8hfv] 阶段：准备章节输入
+[studio] [run:write-target-20260426010757-7u8hfv] 阶段：撰写章节草稿
+[writer] [run:write-target-20260426010757-7u8hfv][chapter:29] 阶段 1：创作正文（第29章）
+[writer] [run:write-target-20260426010757-7u8hfv][chapter:29] 阶段 2：状态结算（第29章，3329字）
+[writer] [run:write-target-20260426010757-7u8hfv][chapter:29] 阶段 2a：提取第29章事实
+[writer] [run:write-target-20260426010757-7u8hfv] 阶段 2b：把观察结果回写到真相文件
+[studio] [run:write-target-20260426010757-7u8hfv] 阶段：审计草稿
+[studio] [run:write-target-20260426010757-7u8hfv] 阶段：自动修复关键问题
+[studio] [run:write-target-20260426010757-7u8hfv][chapter:29] 审计前字数归一化：第29章 3601 -> 2974
+[studio] [run:write-target-20260426010757-7u8hfv] 阶段：落盘最终章节
+[studio] [run:write-target-20260426010757-7u8hfv] 阶段：生成最终真相文件
+[studio] [run:write-target-20260426010757-7u8hfv] 同步记忆索引已转后台执行
+[studio] [run:write-target-20260426010757-7u8hfv] 阶段：更新章节索引与快照
+[studio] [run:write-target-20260426010757-7u8hfv] 更新章节快照与事实历史已转后台执行
+[studio] [run:write-target-20260426010757-7u8hfv] 同步记忆索引已完成
+[studio] [run:write-target-20260426010757-7u8hfv] 更新章节快照与事实历史已完成

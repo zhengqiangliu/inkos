@@ -286,6 +286,7 @@ export class StateManager {
     const files = [
       "current_state.md", "particle_ledger.md", "pending_hooks.md",
       "chapter_summaries.md", "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
+      "volume_outline.md",
     ];
     await Promise.all(
       files.map(async (f) => {
@@ -345,6 +346,7 @@ export class StateManager {
     const files = [
       "current_state.md", "particle_ledger.md", "pending_hooks.md",
       "chapter_summaries.md", "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
+      "volume_outline.md",
     ];
     try {
       // current_state.md and pending_hooks.md are required;
@@ -367,7 +369,11 @@ export class StateManager {
             const content = await readFile(join(snapshotDir, f), "utf-8");
             await writeFile(targetPath, content, "utf-8");
           } catch {
-            await rm(targetPath, { force: true });
+            // volume_outline.md is only restored if the snapshot has it;
+            // never delete it when the snapshot is missing it (old snapshots)
+            if (f !== "volume_outline.md") {
+              await rm(targetPath, { force: true });
+            }
           }
         }),
       );
@@ -415,7 +421,24 @@ export class StateManager {
     if (!restored) {
       throw new Error(`Cannot restore snapshot for chapter ${targetChapter} in "${bookId}"`);
     }
+    return this.rollbackArtifactsToChapter(bookId, targetChapter);
+  }
 
+  /**
+   * Roll back chapter artifacts without restoring snapshot markdown/state first.
+   * Used as a fallback when snapshot chain has holes but chapter files still exist.
+   */
+  async rollbackToChapterWithoutSnapshot(
+    bookId: string,
+    targetChapter: number,
+  ): Promise<ReadonlyArray<number>> {
+    return this.rollbackArtifactsToChapter(bookId, targetChapter);
+  }
+
+  private async rollbackArtifactsToChapter(
+    bookId: string,
+    targetChapter: number,
+  ): Promise<ReadonlyArray<number>> {
     const bookDir = this.bookDir(bookId);
     const chaptersDir = join(bookDir, "chapters");
     const index = await this.loadChapterIndex(bookId);
@@ -498,6 +521,8 @@ export class StateManager {
       rm(join(bookDir, "story", "memory.db"), { force: true }),
       rm(join(bookDir, "story", "memory.db-shm"), { force: true }),
       rm(join(bookDir, "story", "memory.db-wal"), { force: true }),
+      rm(join(bookDir, "story", "current_state_fact_sync.json"), { force: true }),
+      rm(join(bookDir, "story", "narrative_memory_sync.json"), { force: true }),
     ]);
 
     await this.saveChapterIndex(bookId, kept);

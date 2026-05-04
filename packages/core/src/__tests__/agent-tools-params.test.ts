@@ -121,8 +121,10 @@ describe("auditor agent — rich return value", () => {
     const tool = createSubAgentTool({ auditDraft: auditDraftMock } as any, "book");
     const result = await tool.execute("tc1", { agent: "auditor", instruction: "Audit", bookId: "my-book", chapterNumber: 3 });
     const text = (result.content[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("FAILED");
-    expect(text).toContain("2 issue(s)");
+    expect(text).toContain("第3章审计未通过，共2项问题。");
+    expect(text).toContain("审计评分：53/100");
+    expect(text).toContain("严重：");
+    expect(text).toContain("警告：");
     expect(text).toContain("[warning]");
     expect(text).toContain("[critical]");
     expect(text).toContain("Pacing too fast");

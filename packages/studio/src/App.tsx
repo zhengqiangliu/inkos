@@ -57,6 +57,13 @@ export function App() {
     }
   }, [project]);
 
+  useEffect(() => {
+    if (!("bookId" in route)) return;
+    const bookId = route.bookId?.trim();
+    if (!bookId || typeof window === "undefined") return;
+    window.localStorage.setItem("inkos:last-active-book-id", bookId);
+  }, [route]);
+
   useSessionEvents(sse, route, setRoute);
 
   const nav = {

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm --filter @actalk/inkos-core build)",
+      "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/pipeline-runner.test.ts -t \"fails write-next in governed mode when chapter outline anchor is missing\" --reporter=verbose)",
+      "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/pipeline-runner.test.ts --reporter=verbose)",
+      "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/state-manager.test.ts --reporter=verbose)",
+      "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/chapter-persistence.test.ts --reporter=verbose)"
+    ]
+  }
+}

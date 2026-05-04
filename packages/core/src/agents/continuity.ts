@@ -14,6 +14,7 @@ export interface AuditResult {
   readonly passed: boolean;
   readonly issues: ReadonlyArray<AuditIssue>;
   readonly summary: string;
+  readonly dimensionChecks?: ReadonlyArray<AuditDimensionCheck>;
   readonly tokenUsage?: {
     readonly promptTokens: number;
     readonly completionTokens: number;
@@ -26,6 +27,12 @@ export interface AuditIssue {
   readonly category: string;
   readonly description: string;
   readonly suggestion: string;
+}
+
+export interface AuditDimensionCheck {
+  readonly dimension: string;
+  readonly status: "pass" | "warning" | "failed";
+  readonly evidence?: string;
 }
 
 type PromptLanguage = "zh" | "en";
@@ -92,6 +99,23 @@ function dimensionName(id: number, language: PromptLanguage): string | undefined
 
 function joinLocalized(items: ReadonlyArray<string>, language: PromptLanguage): string {
   return items.join(language === "en" ? ", " : "、");
+}
+
+function normalizeAuditDimensionStatus(value: unknown): AuditDimensionCheck["status"] | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "pass" || normalized === "ok" || normalized === "passed") return "pass";
+  if (normalized === "warning" || normalized === "warn") return "warning";
+  if (normalized === "failed" || normalized === "fail" || normalized === "critical" || normalized === "error") {
+    return "failed";
+  }
+  return null;
+}
+
+function inferDimensionStatusFromSeverity(severity: AuditIssue["severity"]): AuditDimensionCheck["status"] {
+  if (severity === "critical") return "failed";
+  if (severity === "warning") return "warning";
+  return "pass";
 }
 
 function formatFanficSeverityNote(
@@ -400,6 +424,13 @@ ${dimList}
 Output format MUST be JSON:
 {
   "passed": true/false,
+  "dimensionChecks": [
+    {
+      "dimension": "dimension name",
+      "status": "pass|warning|failed",
+      "evidence": "concise evidence sentence from chapter/context"
+    }
+  ],
   "issues": [
     {
       "severity": "critical|warning|info",
@@ -420,6 +451,13 @@ ${dimList}
 输出格式必须为 JSON：
 {
   "passed": true/false,
+  "dimensionChecks": [
+    {
+      "dimension": "审查维度名称",
+      "status": "pass|warning|failed",
+      "evidence": "来自正文/上下文的简要证据句"
+    }
+  ],
   "issues": [
     {
       "severity": "critical|warning|info",
@@ -577,6 +615,8 @@ ${chapterContent}`;
     const summaryMatch = content.match(/"summary"\s*:\s*"([^"]*)"/);
     if (passedMatch) {
       const issues: AuditIssue[] = [];
+      const parsed = this.tryParseAuditJson(trimmed, language);
+      if (parsed) return parsed;
       if (issuesMatch) {
         // Try to parse individual issue objects
         const issuePattern = /\{[^{}]*"severity"\s*:\s*"[^"]*"[^{}]*\}/g;
@@ -678,17 +718,58 @@ ${overrides}\n`;
     try {
       const parsed = JSON.parse(json);
       if (typeof parsed.passed !== "boolean" && parsed.passed !== undefined) return null;
+      const normalizedIssues: AuditIssue[] = Array.isArray(parsed.issues)
+        ? parsed.issues.map((i: Record<string, unknown>) => ({
+            severity: (i.severity as string) ?? "warning",
+            category: (i.category as string) ?? (language === "en" ? "Uncategorized" : "未分类"),
+            description: (i.description as string) ?? "",
+            suggestion: (i.suggestion as string) ?? "",
+          }))
+        : [];
+      const dimensionChecksFromPayload = Array.isArray(parsed.dimensionChecks)
+        ? parsed.dimensionChecks
+          .map((item: unknown) => {
+            if (!item || typeof item !== "object") return null;
+            const payload = item as { dimension?: unknown; status?: unknown; evidence?: unknown };
+            const dimension = typeof payload.dimension === "string" ? payload.dimension.trim() : "";
+            if (!dimension) return null;
+            const status = normalizeAuditDimensionStatus(payload.status);
+            if (!status) return null;
+            const evidence = typeof payload.evidence === "string" && payload.evidence.trim()
+              ? payload.evidence.trim()
+              : undefined;
+            return { dimension, status, ...(evidence ? { evidence } : {}) };
+          })
+          .filter((item: unknown): item is AuditDimensionCheck => item !== null)
+        : [];
+      const fallbackDimensionChecks: AuditDimensionCheck[] = normalizedIssues.map((issue: AuditIssue) => ({
+        dimension: issue.category,
+        status: inferDimensionStatusFromSeverity(issue.severity),
+        ...(issue.description ? { evidence: issue.description } : {}),
+      }));
+      const mergedDimensionChecks: AuditDimensionCheck[] = (() => {
+        const merged = new Map<string, AuditDimensionCheck>();
+        for (const check of [...dimensionChecksFromPayload, ...fallbackDimensionChecks]) {
+          const key = check.dimension.trim().toLowerCase();
+          if (!key) continue;
+          const existing = merged.get(key);
+          if (!existing) {
+            merged.set(key, check);
+            continue;
+          }
+          const rank = (status: AuditDimensionCheck["status"]): number =>
+            status === "failed" ? 2 : status === "warning" ? 1 : 0;
+          const next = rank(check.status) > rank(existing.status) ? check : existing;
+          const evidence = next.evidence ?? check.evidence ?? existing.evidence;
+          merged.set(key, evidence ? { ...next, evidence } : next);
+        }
+        return [...merged.values()];
+      })();
       return {
         passed: Boolean(parsed.passed ?? false),
-        issues: Array.isArray(parsed.issues)
-          ? parsed.issues.map((i: Record<string, unknown>) => ({
-              severity: (i.severity as string) ?? "warning",
-              category: (i.category as string) ?? (language === "en" ? "Uncategorized" : "未分类"),
-              description: (i.description as string) ?? "",
-              suggestion: (i.suggestion as string) ?? "",
-            }))
-          : [],
+        issues: normalizedIssues,
         summary: String(parsed.summary ?? ""),
+        ...(mergedDimensionChecks.length > 0 ? { dimensionChecks: mergedDimensionChecks } : {}),
       };
     } catch {
       return null;

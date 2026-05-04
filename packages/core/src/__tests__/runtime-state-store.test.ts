@@ -174,6 +174,61 @@ describe("runtime-state-store memory helpers", () => {
     ]);
   });
 
+  it("normalizes current_state chapter when it is ahead of durable manifest progress", async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-runtime-state-current-ahead-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    const stateDir = join(storyDir, "state");
+    const chaptersDir = join(bookDir, "chapters");
+    await mkdir(stateDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(
+      join(chaptersDir, "index.json"),
+      JSON.stringify(
+        Array.from({ length: 11 }, (_, i) => ({ number: i + 1, title: `Ch${i + 1}`, status: "approved" })),
+      ),
+      "utf-8",
+    );
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n| Field | Value |\n| --- | --- |\n| Current Chapter | 12 |\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "", "utf-8"),
+      writeFile(join(stateDir, "manifest.json"), JSON.stringify({
+        schemaVersion: 2,
+        language: "en",
+        lastAppliedChapter: 11,
+        projectionVersion: 1,
+        migrationWarnings: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "current_state.json"), JSON.stringify({
+        chapter: 12,
+        facts: [
+          {
+            subject: "protagonist",
+            predicate: "Current Goal",
+            object: "Stale chapter goal",
+            validFromChapter: 12,
+            validUntilChapter: null,
+            sourceChapter: 12,
+          },
+        ],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "hooks.json"), JSON.stringify({
+        hooks: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "chapter_summaries.json"), JSON.stringify({
+        rows: [],
+      }, null, 2), "utf-8"),
+    ]);
+
+    const snapshot = await loadRuntimeStateSnapshot(bookDir);
+    expect(snapshot.manifest.lastAppliedChapter).toBe(11);
+    expect(snapshot.currentState.chapter).toBe(11);
+    expect(snapshot.currentState.facts[0]?.validFromChapter).toBe(11);
+    expect(snapshot.currentState.facts[0]?.sourceChapter).toBe(11);
+  });
+
   it("rejects persisted duplicate summary chapters in structured runtime state", async () => {
     root = await mkdtemp(join(tmpdir(), "inkos-runtime-state-invalid-"));
     const bookDir = join(root, "book");
@@ -235,6 +290,71 @@ describe("runtime-state-store memory helpers", () => {
     const snapshot = await loadRuntimeStateSnapshot(bookDir);
     expect(snapshot.chapterSummaries.rows).toHaveLength(1);
     expect(snapshot.chapterSummaries.rows[0]?.title).toBe("重复河埠对账");
+  });
+
+  it("auto-repairs duplicate hook ids in persisted runtime state", async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-runtime-state-duplicate-hooks-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    const stateDir = join(storyDir, "state");
+    const chaptersDir = join(bookDir, "chapters");
+    await mkdir(stateDir, { recursive: true });
+    await mkdir(chaptersDir, { recursive: true });
+    await writeFile(
+      join(chaptersDir, "index.json"),
+      JSON.stringify(
+        Array.from({ length: 14 }, (_, i) => ({ number: i + 1, title: `Ch${i + 1}`, status: "approved" })),
+      ),
+      "utf-8",
+    );
+
+    await Promise.all([
+      writeFile(join(stateDir, "manifest.json"), JSON.stringify({
+        schemaVersion: 2,
+        language: "zh",
+        lastAppliedChapter: 14,
+        projectionVersion: 1,
+        migrationWarnings: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "current_state.json"), JSON.stringify({
+        chapter: 14,
+        facts: [],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "hooks.json"), JSON.stringify({
+        hooks: [
+          {
+            hookId: "New/Implicit",
+            startChapter: 12,
+            type: "mystery",
+            status: "open",
+            lastAdvancedChapter: 13,
+            expectedPayoff: "旧版本",
+            notes: "旧版本",
+          },
+          {
+            hookId: "New/Implicit",
+            startChapter: 13,
+            type: "mystery",
+            status: "progressing",
+            lastAdvancedChapter: 14,
+            expectedPayoff: "新版本",
+            notes: "新版本",
+          },
+        ],
+      }, null, 2), "utf-8"),
+      writeFile(join(stateDir, "chapter_summaries.json"), JSON.stringify({
+        rows: [],
+      }, null, 2), "utf-8"),
+    ]);
+
+    const snapshot = await loadRuntimeStateSnapshot(bookDir);
+    expect(snapshot.hooks.hooks).toHaveLength(1);
+    expect(snapshot.hooks.hooks[0]).toEqual(expect.objectContaining({
+      hookId: "New/Implicit",
+      status: "progressing",
+      lastAdvancedChapter: 14,
+      expectedPayoff: "新版本",
+    }));
   });
 
   it("arbitrates new hook candidates before applying structured state updates", async () => {

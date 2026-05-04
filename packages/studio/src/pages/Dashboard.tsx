@@ -1,4 +1,4 @@
-import { fetchJson, useApi, postApi } from "../hooks/use-api";
+import { fetchJson, useApi } from "../hooks/use-api";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useServiceStore } from "../store/service";
 import type { SSEMessage } from "../hooks/use-sse";
@@ -41,6 +41,23 @@ interface Nav {
   toServices: () => void;
 }
 
+const BOOK_DETAIL_AGENT_SESSION_KEY_PREFIX = "inkos:book-detail:agent-session:";
+
+function getBookDetailAgentSessionKey(bookId: string): string {
+  return `${BOOK_DETAIL_AGENT_SESSION_KEY_PREFIX}${bookId}`;
+}
+
+function readBookDetailSessionId(bookId: string): string | null {
+  if (typeof localStorage === "undefined") return null;
+  const value = localStorage.getItem(getBookDetailAgentSessionKey(bookId))?.trim() ?? "";
+  return value || null;
+}
+
+function writeBookDetailSessionId(bookId: string, sessionId: string): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(getBookDetailAgentSessionKey(bookId), sessionId);
+}
+
 function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
   readonly bookId: string;
   readonly bookTitle: string;
@@ -77,7 +94,12 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
   };
 
   return (
-    <div ref={menuRef} className="relative">
+    <div
+      ref={menuRef}
+      className="relative"
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
       <button
         onClick={() => setOpen((prev) => !prev)}
         className="p-3 rounded-xl text-muted-foreground hover:text-primary hover:bg-primary/10 hover:scale-105 active:scale-95 transition-all cursor-pointer"
@@ -129,6 +151,11 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
 export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: ReadonlyArray<SSEMessage> }; theme: Theme; t: TFunction }) {
   const c = useColors(theme);
   const [menuOpenBookId, setMenuOpenBookId] = useState<string | null>(null);
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const stored = window.localStorage.getItem("inkos:last-active-book-id")?.trim() ?? "";
+    return stored || null;
+  });
   const { data, loading, error, refetch } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const writingBooks = useMemo(() => deriveActiveBookIds(sse.messages), [sse.messages]);
   const serviceStoreServices = useServiceStore((s) => s.services);
@@ -146,6 +173,61 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
       refetch();
     }
   }, [refetch, sse.messages]);
+
+  useEffect(() => {
+    if (!data?.books?.length) {
+      setSelectedBookId(null);
+      return;
+    }
+    if (!selectedBookId) return;
+    const stillExists = data.books.some((book) => book.id === selectedBookId);
+    if (!stillExists) {
+      setSelectedBookId(null);
+    }
+  }, [data?.books, selectedBookId]);
+
+  const ensureAgentSessionId = async (bookId: string): Promise<string> => {
+    const existing = readBookDetailSessionId(bookId);
+    if (existing) return existing;
+    const created = await fetchJson<{ session?: { sessionId?: string } }>("/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookId }),
+    });
+    const sessionId = created.session?.sessionId?.trim();
+    if (!sessionId) throw new Error("无法创建会话");
+    writeBookDetailSessionId(bookId, sessionId);
+    return sessionId;
+  };
+
+  const dispatchWriteNextInstruction = async (bookId: string, language?: string): Promise<void> => {
+    const instruction = language === "en" ? "write next chapter" : "写下一章";
+    const send = async (sessionId: string): Promise<void> => {
+      await fetchJson("/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction,
+          activeBookId: bookId,
+          sessionId,
+        }),
+      });
+    };
+
+    let sessionId = await ensureAgentSessionId(bookId);
+    try {
+      await send(sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/SESSION_NOT_FOUND|Session not found/i.test(message)) {
+        writeBookDetailSessionId(bookId, "");
+        sessionId = await ensureAgentSessionId(bookId);
+        await send(sessionId);
+        return;
+      }
+      throw error;
+    }
+  };
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center py-32 space-y-4">
@@ -216,11 +298,31 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
       <div className="grid gap-6">
         {data.books.map((book, index) => {
           const isWriting = writingBooks.has(book.id);
+          const isSelected = selectedBookId === book.id;
           const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
           return (
             <div
               key={book.id}
-              className={`paper-sheet group relative rounded-2xl fade-in ${staggerClass} ${menuOpenBookId === book.id ? "z-50" : ""}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                setSelectedBookId(book.id);
+                if (typeof window !== "undefined") {
+                  window.localStorage.setItem("inkos:last-active-book-id", book.id);
+                }
+                nav.toBook(book.id);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setSelectedBookId(book.id);
+                  if (typeof window !== "undefined") {
+                    window.localStorage.setItem("inkos:last-active-book-id", book.id);
+                  }
+                  nav.toBook(book.id);
+                }
+              }}
+              className={`paper-sheet group relative rounded-2xl fade-in cursor-pointer transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-primary/10 hover:ring-1 hover:ring-primary/30 hover:bg-primary/[0.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${isSelected ? "ring-1 ring-primary/45 bg-primary/[0.045] shadow-lg shadow-primary/10" : ""} ${staggerClass} ${menuOpenBookId === book.id ? "z-50" : ""}`}
             >
               <div className="p-8 flex items-start justify-between">
                 <div className="flex-1 min-w-0">
@@ -229,11 +331,23 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                       <BookOpen size={20} />
                     </div>
                     <button
-                      onClick={() => nav.toBook(book.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSelectedBookId(book.id);
+                        if (typeof window !== "undefined") {
+                          window.localStorage.setItem("inkos:last-active-book-id", book.id);
+                        }
+                        nav.toBook(book.id);
+                      }}
                       className="font-serif text-2xl hover:text-primary transition-all text-left truncate block font-medium hover:underline underline-offset-4 decoration-primary/30"
                     >
                       {book.title}
                     </button>
+                    {isSelected && (
+                      <span className="shrink-0 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-primary">
+                        当前创作中
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-y-2 gap-x-4 text-[13px] text-muted-foreground font-medium">
@@ -273,8 +387,9 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
 
                 <div className="flex items-center gap-3 shrink-0 ml-6">
                   <button
-                    onClick={async () => {
-                      try { await postApi(`/books/${book.id}/write-next`); }
+                    onClick={async (event) => {
+                      event.stopPropagation();
+                      try { await dispatchWriteNextInstruction(book.id, book.language); }
                       catch (e) { alert(e instanceof Error ? e.message : "Write failed"); }
                     }}
                     disabled={isWriting}
@@ -297,7 +412,10 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                     )}
                   </button>
                   <button
-                    onClick={() => nav.toAnalytics(book.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      nav.toAnalytics(book.id);
+                    }}
                     className="p-3 rounded-xl bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 hover:border-primary/30 hover:shadow-md hover:scale-105 active:scale-95 transition-all border border-border/50 shadow-sm"
                     title={t("dash.stats")}
                   >

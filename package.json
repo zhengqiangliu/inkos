@@ -27,6 +27,8 @@
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",
     "verify:publish-manifests": "node scripts/verify-no-workspace-protocol.mjs packages/core packages/cli packages/studio",
+    "perf:write-next": "node scripts/write-next-perf-report.mjs",
+    "metrics:fpr7d": "node scripts/first-pass-rate-report.mjs",
     "release": "pnpm build && pnpm test",
     "release:publish": "node scripts/publish-release.mjs",
     "release:local": "node scripts/release-local.mjs"

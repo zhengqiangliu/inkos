@@ -3,11 +3,17 @@ import { resolve, join, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { normalizeStudioProjectRoot } from "./root-resolver.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const root = resolve(process.argv[2] ?? process.env.INKOS_PROJECT_ROOT ?? process.cwd());
+const rawRoot = resolve(process.argv[2] ?? process.env.INKOS_PROJECT_ROOT ?? process.cwd());
+const root = normalizeStudioProjectRoot(rawRoot);
 const port = parseInt(process.env.INKOS_STUDIO_PORT ?? "4567", 10);
+
+if (root !== rawRoot) {
+  console.warn(`[studio] normalized project root: ${rawRoot} -> ${root}`);
+}
 
 // Find studio package root (2 levels up from src/api/)
 const studioRoot = resolve(__dirname, "../..");

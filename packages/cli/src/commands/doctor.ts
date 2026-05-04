@@ -92,9 +92,11 @@ async function fetchDoctorModels(
 export const doctorCommand = new Command("doctor")
   .description("Check environment and project health")
   .option("--repair-node-runtime", "Write .nvmrc and .node-version pinned to Node 22 for this project")
-  .action(async (opts: { repairNodeRuntime?: boolean }) => {
+  .option("--test-api-connectivity", "Actively probe the configured LLM endpoint with a test request")
+  .action(async (opts: { repairNodeRuntime?: boolean; testApiConnectivity?: boolean }) => {
     const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
     const root = findProjectRoot();
+    log("\nInkOS Doctor\n");
 
     if (opts.repairNodeRuntime) {
       const repair = await ensureNodeRuntimePinFiles(root);
@@ -269,63 +271,79 @@ export const doctorCommand = new Command("doctor")
           detail: `provider=${llmConfig.provider} model=${llmConfig.model} stream=${llmConfig.stream ?? true} baseUrl=${llmConfig.baseUrl}`,
         });
 
-        log("\n  [..] Testing API connectivity...");
-
-        let connected = false;
-        let detectedDetail = "";
-        let lastError = "Unknown error";
-        const modelsBaseUrl = resolveDoctorModelsBaseUrl(
-          typeof llmConfig.service === "string" ? llmConfig.service : undefined,
-          llmConfig.baseUrl,
-          resolveServiceModelsBaseUrl,
-        );
-        const discoveredModels = (llmConfig.apiKey && modelsBaseUrl)
-          ? await fetchDoctorModels(modelsBaseUrl, llmConfig.apiKey)
-          : [];
-        const modelCandidates = (llmConfig.provider === "openai" || discoveredModels.length > 0)
-          ? buildDoctorModelCandidates(llmConfig.model, discoveredModels)
-          : [llmConfig.model];
-        const plans = llmConfig.provider === "openai"
-          ? buildDoctorProbePlans(llmConfig.apiFormat, llmConfig.stream)
-          : [{ apiFormat: (llmConfig.apiFormat ?? "chat") as "chat" | "responses", stream: llmConfig.stream ?? true }];
-
-        for (const model of modelCandidates) {
-          for (const plan of plans) {
-            try {
-              const client = createLLMClient({
-                ...llmConfig,
-                model,
-                apiFormat: plan.apiFormat,
-                stream: plan.stream,
-              });
-              const response = await chatCompletion(client, model, [
-                { role: "user", content: "Say OK" },
-              ], { maxTokens: 16 });
-
-              connected = true;
-              detectedDetail = `OK (model: ${model}, apiFormat=${plan.apiFormat}, stream=${plan.stream}, tokens: ${response.usage.totalTokens})`;
-              break;
-            } catch (error) {
-              lastError = error instanceof Error ? error.message : String(error);
-            }
-          }
-          if (connected) {
-            break;
-          }
+        let localEndpoint = false;
+        try {
+          const parsed = new URL(llmConfig.baseUrl);
+          localEndpoint = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1" || parsed.hostname === "::1";
+        } catch {
+          localEndpoint = false;
         }
 
-        checks.push({
-          name: "API Connectivity",
-          ok: connected,
-          detail: connected ? detectedDetail : lastError.split("\n")[0]!,
-        });
-
-        if (!connected && llmConfig.provider === "openai") {
+        if (!localEndpoint && !opts.testApiConnectivity) {
           checks.push({
-            name: "  Hint",
-            ok: false,
-            detail: "当前已自动尝试 chat/responses 与流式开关组合；如果仍失败，问题更可能在模型名、baseUrl 路径或服务商兼容性本身。",
+            name: "API Connectivity",
+            ok: true,
+            detail: "Skipped for remote endpoint. Use --test-api-connectivity to run a live probe.",
           });
+        } else {
+          log("\n  [..] Testing API connectivity...");
+
+          let connected = false;
+          let detectedDetail = "";
+          let lastError = "Unknown error";
+          const modelsBaseUrl = resolveDoctorModelsBaseUrl(
+            typeof llmConfig.service === "string" ? llmConfig.service : undefined,
+            llmConfig.baseUrl,
+            resolveServiceModelsBaseUrl,
+          );
+          const discoveredModels = (llmConfig.apiKey && modelsBaseUrl)
+            ? await fetchDoctorModels(modelsBaseUrl, llmConfig.apiKey)
+            : [];
+          const modelCandidates = (llmConfig.provider === "openai" || discoveredModels.length > 0)
+            ? buildDoctorModelCandidates(llmConfig.model, discoveredModels)
+            : [llmConfig.model];
+          const plans = llmConfig.provider === "openai"
+            ? buildDoctorProbePlans(llmConfig.apiFormat, llmConfig.stream)
+            : [{ apiFormat: (llmConfig.apiFormat ?? "chat") as "chat" | "responses", stream: llmConfig.stream ?? true }];
+
+          for (const model of modelCandidates) {
+            for (const plan of plans) {
+              try {
+                const client = createLLMClient({
+                  ...llmConfig,
+                  model,
+                  apiFormat: plan.apiFormat,
+                  stream: plan.stream,
+                });
+                const response = await chatCompletion(client, model, [
+                  { role: "user", content: "Say OK" },
+                ], { maxTokens: 16 });
+
+                connected = true;
+                detectedDetail = `OK (model: ${model}, apiFormat=${plan.apiFormat}, stream=${plan.stream}, tokens: ${response.usage.totalTokens})`;
+                break;
+              } catch (error) {
+                lastError = error instanceof Error ? error.message : String(error);
+              }
+            }
+            if (connected) {
+              break;
+            }
+          }
+
+          checks.push({
+            name: "API Connectivity",
+            ok: connected,
+            detail: connected ? detectedDetail : lastError.split("\n")[0]!,
+          });
+
+          if (!connected && llmConfig.provider === "openai") {
+            checks.push({
+              name: "  Hint",
+              ok: false,
+              detail: "当前已自动尝试 chat/responses 与流式开关组合；如果仍失败，问题更可能在模型名、baseUrl 路径或服务商兼容性本身。",
+            });
+          }
         }
       }
     } catch (e) {
@@ -357,7 +375,6 @@ export const doctorCommand = new Command("doctor")
     }
 
     // Output
-    log("\nInkOS Doctor\n");
     for (const check of checks) {
       const icon = check.ok ? "[OK]" : "[!!]";
       log(`  ${icon} ${check.name}: ${check.detail}`);

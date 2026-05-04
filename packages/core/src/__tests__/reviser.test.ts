@@ -294,7 +294,471 @@ describe("ReviserAgent", () => {
         "他把手按在潮冷的门框上，没有出声。",
         "更远处传来极轻的脚步回响，又很快断掉。",
       ].join("\n"));
-      expect(result.fixedIssues).toEqual(["- 收紧了开头动作句。"]);
+      expect(result.fixedIssues).toEqual(["[ISSUE-01] - 收紧了开头动作句。"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires issue-id based targeted fixes in revise prompts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-issue-id-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "[ISSUE-01] 已修复。",
+        "",
+        "=== REVISED_CONTENT ===",
+        "Revised chapter content.",
+        "",
+        "=== UPDATED_STATE ===",
+        "State card",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "Hooks board",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await agent.reviseChapter(
+        bookDir,
+        "Original chapter content.",
+        1,
+        [CRITICAL_ISSUE],
+        "rewrite",
+        "xuanhuan",
+      );
+      const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined;
+      const systemPrompt = messages?.[0]?.content ?? "";
+      const userPrompt = messages?.[1]?.content ?? "";
+
+      expect(systemPrompt).toContain("FIXED_ISSUES");
+      expect(systemPrompt).toContain("[ISSUE-XX]");
+      expect(userPrompt).toContain("[ISSUE-01]");
+      expect(userPrompt).toContain("[critical]");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("injects audit gate and unresolved issue context into revise prompt when provided", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-audit-context-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "[ISSUE-01] 已修复。",
+        "",
+        "=== REVISED_CONTENT ===",
+        "修订后的正文。",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await agent.reviseChapter(
+        bookDir,
+        "原始正文。",
+        1,
+        [CRITICAL_ISSUE],
+        "rewrite",
+        "xuanhuan",
+        {
+          reviseContext: {
+            failureGate: "critical",
+            score: 62,
+            passScoreThreshold: 80,
+            mustFixFirstIssueIds: ["ISSUE-01"],
+            unresolvedIssueIdsFromPrevRound: ["ISSUE-01"],
+            issueClassCounts: { structural: 2, textual: 1 },
+            primaryIssueClass: "structural",
+            dimensionChecks: [
+              { dimension: "大纲偏离检测", status: "failed", evidence: "主线推进缺失" },
+            ],
+          },
+        },
+      );
+
+      const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined;
+      const userPrompt = messages?.[1]?.content ?? "";
+      expect(userPrompt).toContain("## 审计门禁信息");
+      expect(userPrompt).toContain("failureGate: critical");
+      expect(userPrompt).toContain("门禁策略：critical gate");
+      expect(userPrompt).toContain("当前评分: 62");
+      expect(userPrompt).toContain("通过阈值: 80");
+      expect(userPrompt).toContain("问题分类计数：structural=2, textual=1");
+      expect(userPrompt).toContain("主问题类型：structural");
+      expect(userPrompt).toContain("ISSUE-01");
+      expect(userPrompt).toContain("必须优先修复");
+      expect(userPrompt).toContain("## 本轮失败维度（优先修复）");
+      expect(userPrompt).toContain("大纲偏离检测");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not render failed-dimension block when dimensionChecks has only warning/pass", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-dimension-check-warning-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "[ISSUE-01] 已修复。",
+        "",
+        "=== REVISED_CONTENT ===",
+        "修订后的正文。",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await agent.reviseChapter(
+        bookDir,
+        "原始正文。",
+        1,
+        [CRITICAL_ISSUE],
+        "rewrite",
+        "xuanhuan",
+        {
+          reviseContext: {
+            failureGate: "score",
+            score: 70,
+            passScoreThreshold: 80,
+            mustFixFirstIssueIds: ["ISSUE-01"],
+            unresolvedIssueIdsFromPrevRound: ["ISSUE-01"],
+            dimensionChecks: [
+              { dimension: "时间线检查", status: "warning", evidence: "局部跳跃" },
+              { dimension: "角色一致性", status: "pass", evidence: "通过" },
+            ],
+          },
+        },
+      );
+
+      const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined;
+      const userPrompt = messages?.[1]?.content ?? "";
+      expect(userPrompt).toContain("## 审计门禁信息");
+      expect(userPrompt).toContain("failureGate: score");
+      expect(userPrompt).toContain("门禁策略：score gate");
+      expect(userPrompt).not.toContain("## 本轮失败维度（优先修复）");
+      expect(userPrompt).not.toContain("时间线检查");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces structural truth-action block when structural issues are present", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-structural-block-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+    const structuralIssue: AuditIssue = {
+      severity: "warning",
+      category: "卷纲一致性",
+      description: "卷纲偏离，主线推进失焦。",
+      suggestion: "对齐卷纲锚点。",
+    };
+
+    const chatSpy = vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "[ISSUE-01] 已修复。",
+        "",
+        "=== REVISED_CONTENT ===",
+        "修订后的正文。",
+        "",
+        "=== STRUCTURAL_TRUTH_ACTIONS ===",
+        "[ISSUE-01] file=current_state.md action=补齐卷纲锚点 reason=修复主线偏移",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await agent.reviseChapter(bookDir, "原始正文。", 1, [structuralIssue], "rewrite", "xuanhuan");
+      const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined;
+      const systemPrompt = messages?.[0]?.content ?? "";
+      expect(systemPrompt).toContain("=== STRUCTURAL_TRUTH_ACTIONS ===");
+      expect(systemPrompt).toContain("结构修复模式（强制）");
+      expect(systemPrompt).toContain("current_state.md / pending_hooks.md");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to original chapter when rewrite output crosses chapter boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-boundary-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "[ISSUE-01] 已修复。",
+        "",
+        "=== REVISED_CONTENT ===",
+        "# 第2章 越界内容",
+        "跨章段落。",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    const original = "这是第1章正文。";
+    try {
+      const result = await agent.reviseChapter(bookDir, original, 1, [CRITICAL_ISSUE], "rewrite", "xuanhuan");
+      expect(result.revisedContent).toBe(original);
+      expect(result.fixedIssues.some((line) => line.includes("章节边界保护"))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes FIXED_ISSUES to issue-id mapped lines", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-fixed-map-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "修复了角色动机冲突。",
+        "补强了结尾推进。",
+        "",
+        "=== REVISED_CONTENT ===",
+        "修订后的正文。",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    const issues: AuditIssue[] = [
+      {
+        severity: "warning",
+        category: "动机一致性",
+        description: "角色动机断裂。",
+        suggestion: "补齐动机桥接。",
+      },
+      {
+        severity: "warning",
+        category: "收束",
+        description: "章末落点偏弱。",
+        suggestion: "强化章末推进。",
+      },
+    ];
+    try {
+      const result = await agent.reviseChapter(bookDir, "原始正文。", 1, issues, "rewrite", "xuanhuan");
+      expect(result.fixedIssues[0]).toContain("[ISSUE-01]");
+      expect(result.fixedIssues[1]).toContain("[ISSUE-02]");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("streams spot-fix patch deltas when onSpotFixPatchDelta is provided", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-spotfix-stream-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chunks = [
+      [
+        "=== FIXED_ISSUES ===",
+        "- 修复了关键句。",
+        "",
+        "=== PATCHES ===",
+        "--- PATCH 1 ---",
+        "TARGET_TEXT:",
+        "原句。",
+        "",
+      ].join("\n"),
+      [
+        "REPLACEMENT_TEXT:",
+        "新句。",
+        "--- END PATCH ---",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+    ];
+    vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockImplementation(
+      async (...args: any[]) => {
+        const options = args[1] as { onTextDelta?: (text: string) => void } | undefined;
+        for (const chunk of chunks) {
+          options?.onTextDelta?.(chunk);
+        }
+        return {
+          content: chunks.join(""),
+          usage: ZERO_USAGE,
+        };
+      },
+    );
+
+    const patchDeltas: string[] = [];
+    const original = ["开头。", "原句。", "结尾。"].join("\n");
+
+    try {
+      const result = await agent.reviseChapter(
+        bookDir,
+        original,
+        1,
+        [CRITICAL_ISSUE],
+        "spot-fix",
+        "xuanhuan",
+        {
+          onSpotFixPatchDelta: (text) => patchDeltas.push(text),
+        },
+      );
+
+      expect(patchDeltas.join("")).toContain("--- PATCH 1 ---");
+      expect(patchDeltas.join("")).toContain("REPLACEMENT_TEXT");
+      expect(result.revisedContent.length).toBeGreaterThan(0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

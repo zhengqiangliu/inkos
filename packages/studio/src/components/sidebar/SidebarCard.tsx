@@ -7,13 +7,22 @@ interface SidebarCardProps {
   readonly defaultOpen?: boolean;
   readonly children: React.ReactNode;
   readonly actions?: React.ReactNode;
+  readonly className?: string;
+  readonly contentClassName?: string;
 }
 
-export function SidebarCard({ title, defaultOpen = true, children, actions }: SidebarCardProps) {
+export function SidebarCard({
+  title,
+  defaultOpen = true,
+  children,
+  actions,
+  className,
+  contentClassName,
+}: SidebarCardProps) {
   const [open, setOpen] = useState(defaultOpen);
 
   return (
-    <div className="rounded-xl bg-card/60">
+    <div className={cn("rounded-xl bg-card/60", className)}>
       <button
         onClick={() => setOpen(!open)}
         className="w-full flex items-center justify-between px-3 py-2.5"
@@ -24,7 +33,7 @@ export function SidebarCard({ title, defaultOpen = true, children, actions }: Si
           <ChevronDown className={cn("w-4 h-4 text-muted-foreground transition-transform", open && "rotate-180")} />
         </div>
       </button>
-      {open && <div className="px-3 pb-3">{children}</div>}
+      {open && <div className={cn("px-3 pb-3", contentClassName)}>{children}</div>}
     </div>
   );
 }

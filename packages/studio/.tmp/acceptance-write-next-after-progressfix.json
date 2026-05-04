@@ -1,0 +1,189 @@
+{
+  "baseUrl": "http://localhost:4317",
+  "bookId": "诡异复苏-我在夜里斩神-白天送外卖-",
+  "projectRoot": "E:\\my-novel",
+  "sessionId": "1777139961307-l4piqv",
+  "requestedSessionId": null,
+  "sessionCreated": true,
+  "commands": [
+    "write-next"
+  ],
+  "commandCount": 1,
+  "cases": [
+    {
+      "caseName": "write-next",
+      "runId": "write-next-20260425175921-bfjtnv",
+      "instruction": "写下一章",
+      "expectedChapters": [
+        26
+      ],
+      "startedAt": 1777139961345,
+      "endedAt": 1777140494900,
+      "elapsedMs": 533555,
+      "response": {
+        "status": 200,
+        "error": null,
+        "errorCode": null,
+        "errorMessage": null,
+        "persisted": true,
+        "addedChapterNumbers": [
+          26
+        ],
+        "addedChapterNumbersMatchExpected": true,
+        "missingChapterFiles": [],
+        "pass": true,
+        "bodyPreview": "已完成第26章写作。"
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 26,
+            "indexEntry": {
+              "number": 26,
+              "title": "接单键只亮九十秒",
+              "status": "ready-for-review",
+              "wordCount": 3406,
+              "createdAt": "2026-04-25T18:08:14.834Z",
+              "updatedAt": "2026-04-25T18:08:14.834Z",
+              "auditIssues": [
+                "[warning] 第25章已明确“明早8:30分局语音辨认”，本章末又抛出“明早9:00协同会改到东港八楼”的新节点，但主角行程冲突尚未被角色主动意识或安排，存在下一章衔接穿帮风险。",
+                "[warning] 本章主流程与第25章高度同构：死人催单→接单取证→联勤/警方介入→医院交接→异常物证→章尾新钩子，读感有“模板复用”倾向，削弱新鲜度。",
+                "[warning] 反派在已知主角处于警方/平台重点盯控的前提下，仍持续采用高可见、高留痕的闸口交接与外包临时签收，策略动机未解释；同时“收货点三院”与短信“九点前带眼睛到东港八楼”之间的链路尚未打通。",
+                "[warning] 章末“答案已经贴在这条夜单里”带有定论口吻，但现有证据仅到“强关联线索”，尚不足以锁定泄密源与指令层级，存在推理跨步。",
+                "[warning] 门卫、外包保洁等配角主要承担“给证词+触发程序”的单一功能，行为模式重复（‘收钱办事’）且个体差异不足，人物立体度偏弱。",
+                "[warning] 江砚在22-26章持续处于“高压警戒+流程执行”同型情绪，外部事件在升级，但内在重估（信任、代价、策略边界）推进不足，弧线有趋平风险。",
+                "[warning] 最近章节类型序列为：22高压行动→23高压行动/证据闭环→24日常缓冲+风险处置→25制度协调+高压处置→26高压行动+物证揭示。整体仍以高压处置为主，‘调查消化/关系回弹/阶段性释放’占比偏低。",
+                "[info] 本章与卷纲节点“死人催单，二选一”总体匹配，并完成了H04（‘眼睛’）的关键实物化推进，未见明显跳纲。",
+                "[warning] 本章新开了 5 个伏笔，但没有回收任何旧债。",
+                "[warning] 连续出现4个不足35字的短段，容易形成短句堆砌。"
+              ],
+              "lengthWarnings": [],
+              "lengthTelemetry": {
+                "target": 3000,
+                "softMin": 2591,
+                "softMax": 3409,
+                "hardMin": 2182,
+                "hardMax": 3818,
+                "countingMode": "zh_chars",
+                "writerCount": 3406,
+                "postWriterNormalizeCount": 3406,
+                "postReviseCount": 0,
+                "finalCount": 3406,
+                "normalizeApplied": false,
+                "lengthWarning": false
+              },
+              "tokenUsage": {
+                "promptTokens": 0,
+                "completionTokens": 0,
+                "totalTokens": 0
+              }
+            },
+            "chapterFiles": [
+              "0026_接单键只亮九十秒.md"
+            ],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\26",
+            "snapshotExists": true,
+            "snapshotCurrentStateExists": true,
+            "snapshotPendingHooksExists": true,
+            "pass": true
+          }
+        ],
+        "pass": true
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 3493,
+        "maxGapMs": 30011,
+        "maxGapFromEvent": "llm:progress",
+        "maxGapToEvent": "llm:progress",
+        "limitMs": 15000,
+        "pass": false,
+        "sampleEvents": [
+          {
+            "ts": 1777139961356,
+            "event": "thinking:start"
+          },
+          {
+            "ts": 1777139961356,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777139961356,
+            "event": "log"
+          },
+          {
+            "ts": 1777139961356,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777139961356,
+            "event": "tool:start"
+          },
+          {
+            "ts": 1777139961364,
+            "event": "log"
+          },
+          {
+            "ts": 1777139961390,
+            "event": "log"
+          },
+          {
+            "ts": 1777139961390,
+            "event": "log"
+          },
+          {
+            "ts": 1777139961395,
+            "event": "log"
+          },
+          {
+            "ts": 1777139991396,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777140021400,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777140051402,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777140061704,
+            "event": "chapter:delta"
+          }
+        ]
+      },
+      "pass": false
+    }
+  ],
+  "overallPass": false
+}

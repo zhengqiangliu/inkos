@@ -1,34 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { ToolExecution } from "../../../store/chat/types";
-
-// Import the grouping logic — we'll extract it as a named export
-// For now, inline the function to test the expected behavior
-function groupChronologically(executions: ToolExecution[]) {
-  type RenderGroup =
-    | { type: "pipeline"; exec: ToolExecution }
-    | { type: "utilities"; execs: ToolExecution[] };
-
-  const groups: RenderGroup[] = [];
-  let utilBuf: ToolExecution[] = [];
-
-  const flushUtils = () => {
-    if (utilBuf.length > 0) {
-      groups.push({ type: "utilities", execs: utilBuf });
-      utilBuf = [];
-    }
-  };
-
-  for (const exec of executions) {
-    if (exec.tool === "sub_agent") {
-      flushUtils();
-      groups.push({ type: "pipeline", exec });
-    } else {
-      utilBuf.push(exec);
-    }
-  }
-  flushUtils();
-  return groups;
-}
+import { groupChronologically } from "../ToolExecutionSteps";
 
 const makeExec = (overrides: Partial<ToolExecution> & { id: string; tool: string }): ToolExecution => ({
   label: "test",

@@ -11,11 +11,21 @@ export const GLOBAL_ENV_PATH = join(GLOBAL_CONFIG_DIR, ".env");
 interface ServiceConfigEntry {
   readonly service: string;
   readonly name?: string;
+  readonly models?: readonly ServiceModelEntry[];
+  readonly modelMode?: "auto" | "manual" | "hybrid";
+  readonly preferredModel?: string;
   readonly baseUrl?: string;
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly apiFormat?: "chat" | "responses";
   readonly stream?: boolean;
+}
+
+interface ServiceModelEntry {
+  readonly id: string;
+  readonly name?: string;
+  readonly enabled?: boolean;
+  readonly source?: "manual" | "detected";
 }
 
 type LLMConfigSource = "env" | "studio";
@@ -97,8 +107,12 @@ export async function loadProjectConfig(
     if (selectedEntry) {
       llm.service = selectedEntry.service;
 
-      if (!(typeof llm.model === "string" && llm.model.length > 0) && typeof llm.defaultModel === "string" && llm.defaultModel.length > 0) {
-        llm.model = llm.defaultModel;
+      if (!(typeof llm.model === "string" && llm.model.length > 0)) {
+        if (typeof selectedEntry.preferredModel === "string" && selectedEntry.preferredModel.length > 0) {
+          llm.model = selectedEntry.preferredModel;
+        } else if (typeof llm.defaultModel === "string" && llm.defaultModel.length > 0) {
+          llm.model = llm.defaultModel;
+        }
       }
 
       if (!(typeof llm.baseUrl === "string" && llm.baseUrl.length > 0)) {
@@ -214,6 +228,9 @@ function normalizeServiceEntries(raw: unknown): ServiceConfigEntry[] {
       .map((entry) => ({
         service: typeof entry.service === "string" && entry.service.length > 0 ? entry.service : "custom",
         ...(typeof entry.name === "string" && entry.name.length > 0 ? { name: entry.name } : {}),
+        ...(typeof entry.modelMode === "string" && ["auto", "manual", "hybrid"].includes(entry.modelMode) ? { modelMode: entry.modelMode as "auto" | "manual" | "hybrid" } : {}),
+        ...(typeof entry.preferredModel === "string" && entry.preferredModel.length > 0 ? { preferredModel: entry.preferredModel } : {}),
+        ...normalizeServiceModelsField(entry.models),
         ...(typeof entry.baseUrl === "string" && entry.baseUrl.length > 0 ? { baseUrl: entry.baseUrl } : {}),
         ...(typeof entry.temperature === "number" ? { temperature: entry.temperature } : {}),
         ...(typeof entry.maxTokens === "number" ? { maxTokens: entry.maxTokens } : {}),
@@ -236,6 +253,9 @@ function normalizeServiceEntryFromPatch(serviceId: string, value: Record<string,
     return {
       service: "custom",
       name: decodeURIComponent(serviceId.slice("custom:".length)),
+      ...(typeof value.modelMode === "string" && ["auto", "manual", "hybrid"].includes(value.modelMode) ? { modelMode: value.modelMode as "auto" | "manual" | "hybrid" } : {}),
+      ...(typeof value.preferredModel === "string" && value.preferredModel.length > 0 ? { preferredModel: value.preferredModel } : {}),
+      ...normalizeServiceModelsField(value.models),
       ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
       ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
       ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
@@ -248,6 +268,9 @@ function normalizeServiceEntryFromPatch(serviceId: string, value: Record<string,
     return {
       service: "custom",
       ...(typeof value.name === "string" && value.name.length > 0 ? { name: value.name } : {}),
+      ...(typeof value.modelMode === "string" && ["auto", "manual", "hybrid"].includes(value.modelMode) ? { modelMode: value.modelMode as "auto" | "manual" | "hybrid" } : {}),
+      ...(typeof value.preferredModel === "string" && value.preferredModel.length > 0 ? { preferredModel: value.preferredModel } : {}),
+      ...normalizeServiceModelsField(value.models),
       ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
       ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
       ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
@@ -258,11 +281,32 @@ function normalizeServiceEntryFromPatch(serviceId: string, value: Record<string,
 
   return {
     service: serviceId,
+    ...(typeof value.modelMode === "string" && ["auto", "manual", "hybrid"].includes(value.modelMode) ? { modelMode: value.modelMode as "auto" | "manual" | "hybrid" } : {}),
+    ...(typeof value.preferredModel === "string" && value.preferredModel.length > 0 ? { preferredModel: value.preferredModel } : {}),
+    ...normalizeServiceModelsField(value.models),
     ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
     ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
     ...(value.apiFormat === "chat" || value.apiFormat === "responses" ? { apiFormat: value.apiFormat } : {}),
     ...(typeof value.stream === "boolean" ? { stream: value.stream } : {}),
   };
+}
+
+function normalizeServiceModels(raw: unknown): ServiceModelEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+    .map((entry) => ({
+      id: typeof entry.id === "string" ? entry.id.trim() : "",
+      ...(typeof entry.name === "string" && entry.name.trim().length > 0 ? { name: entry.name.trim() } : {}),
+      ...(typeof entry.enabled === "boolean" ? { enabled: entry.enabled } : {}),
+      ...(entry.source === "manual" || entry.source === "detected" ? { source: entry.source as "manual" | "detected" } : {}),
+    }))
+    .filter((entry) => entry.id.length > 0);
+}
+
+function normalizeServiceModelsField(raw: unknown): { models: ServiceModelEntry[] } | Record<string, never> {
+  if (!Array.isArray(raw)) return {};
+  return { models: normalizeServiceModels(raw) };
 }
 
 function selectServiceEntry(

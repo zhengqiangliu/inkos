@@ -19,11 +19,13 @@ import {
   Save,
   Eye,
 } from "lucide-react";
+import { countChapterLengthByLanguage } from "../utils/chapter-length";
 
 interface ChapterData {
   readonly chapterNumber: number;
   readonly filename: string;
   readonly content: string;
+  readonly wordCount?: number;
 }
 
 interface Nav {
@@ -84,14 +86,18 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
   if (error) return <div className="text-destructive p-8 bg-destructive/5 rounded-xl border border-destructive/20">Error: {error}</div>;
   if (!data) return null;
 
+  const sourceContent = editing ? editContent : data.content;
   // Split markdown content into title and body
-  const lines = data.content.split("\n");
+  const lines = sourceContent.split("\n");
   const titleLine = lines.find((l) => l.startsWith("# "));
   const title = titleLine?.replace(/^#\s*/, "") ?? `Chapter ${chapterNumber}`;
   const body = lines
     .filter((l) => l !== titleLine)
     .join("\n")
     .trim();
+  const chapterWordCount = typeof data.wordCount === "number" && Number.isFinite(data.wordCount)
+    ? data.wordCount
+    : countChapterLengthByLanguage(sourceContent);
 
   const handleApprove = async () => {
     try {
@@ -236,11 +242,11 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
           <div className="flex items-center gap-4 text-xs font-medium text-muted-foreground">
              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary/50">
                <Type size={14} className="text-primary/60" />
-               <span>{body.length.toLocaleString()} {t("reader.characters")}</span>
+               <span>{chapterWordCount.toLocaleString()} {t("reader.characters")}</span>
              </div>
              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary/50">
                <Clock size={14} className="text-primary/60" />
-               <span>{Math.ceil(body.length / 500)} {t("reader.minRead")}</span>
+               <span>{Math.ceil(chapterWordCount / 500)} {t("reader.minRead")}</span>
              </div>
           </div>
           <p className="text-[10px] uppercase tracking-widest text-muted-foreground/40 font-bold">{t("reader.endOfChapter")}</p>

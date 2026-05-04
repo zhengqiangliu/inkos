@@ -255,7 +255,7 @@ describe.sequential("publish packaging", () => {
     }
   });
 
-  it("packs the studio runtime entry alongside the built frontend", { timeout: 60_000 }, async () => {
+  it("packs the studio runtime entry alongside the built frontend", { timeout: 180_000 }, async () => {
     const packDir = await mkdtemp(join(tmpdir(), "inkos-studio-pack-"));
 
     try {

@@ -1,0 +1,185 @@
+{
+  "baseUrl": "http://localhost:4317",
+  "bookId": "诡异复苏-我在夜里斩神-白天送外卖-",
+  "projectRoot": "E:\\my-novel",
+  "sessionId": "1777138275971-e6f6oj",
+  "requestedSessionId": null,
+  "sessionCreated": true,
+  "commands": [
+    "write-next"
+  ],
+  "commandCount": 1,
+  "cases": [
+    {
+      "caseName": "write-next",
+      "runId": "write-next-20260425173116-gdo6t0",
+      "instruction": "写下一章",
+      "expectedChapters": [
+        24
+      ],
+      "startedAt": 1777138276009,
+      "endedAt": 1777138746238,
+      "elapsedMs": 470229,
+      "response": {
+        "status": 500,
+        "error": null,
+        "errorCode": "AGENT_ERROR",
+        "errorMessage": "delta chapter 24 goes backwards",
+        "persisted": false,
+        "addedChapterNumbers": [],
+        "addedChapterNumbersMatchExpected": false,
+        "missingChapterFiles": null,
+        "pass": false,
+        "bodyPreview": null
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 24,
+            "indexEntry": {
+              "number": 24,
+              "title": "午睡前的催单铃",
+              "status": "ready-for-review",
+              "wordCount": 3058,
+              "createdAt": "2026-04-25T17:31:46.683Z",
+              "updatedAt": "2026-04-25T17:31:46.683Z",
+              "auditIssues": [
+                "[warning] 本章前半段（医院窗口→派出所→站点上传）连续流程性操作较密，虽然服务于“12:00前补件”主目标，但情绪起伏主要依赖后半段新催单触发，前半段存在轻微“办事流程流水化”风险。",
+                "[warning] 陈茜在关键时点“恰好出现并一锤定音”推进盖章，功能性较强；林主任态度转变也偏快，容易给读者“为主角服务”的工具人观感。",
+                "[warning] 昨夜已报警并封存入链的高压背景下，敌方同日再用“赵国梁”账号、同类医配路径直接发单，行为显得过于高调；若无解释，容易被读者质疑反派决策合理性。",
+                "[warning] “法务核了商标备案，确认为康顺达本地医配车”这一证据链表述不严谨：商标备案通常只能证明标识归属，不足以单独证明具体车辆权属与运营链路。",
+                "[info] 上一章承诺的“次日12:00前补件”在本章完成回收，同时章尾抛出“联席协同会”新期待点，兑现与悬念衔接较好。",
+                "[info] 高疲劳词与AI标记词（仿佛/不禁/宛如/竟然/忽然/猛地）密度控制良好，未见明显重复堆叠。",
+                "[info] 本章与卷纲节点“死人催单+拒单封号/送单送命二选一”高度一致，且在不跳纲情况下推进到新地点（南码头A2）与新弧线节点（多方协同会预告）。",
+                "[warning] 这些伏笔已经进入回收/推进压力，但本章没有真正处理：H13（近期，已逾期）。"
+              ],
+              "lengthWarnings": [],
+              "lengthTelemetry": {
+                "target": 3000,
+                "softMin": 2591,
+                "softMax": 3409,
+                "hardMin": 2182,
+                "hardMax": 3818,
+                "countingMode": "zh_chars",
+                "writerCount": 3058,
+                "postWriterNormalizeCount": 3058,
+                "postReviseCount": 0,
+                "finalCount": 3058,
+                "normalizeApplied": false,
+                "lengthWarning": false
+              },
+              "tokenUsage": {
+                "promptTokens": 0,
+                "completionTokens": 0,
+                "totalTokens": 0
+              }
+            },
+            "chapterFiles": [
+              "0024_午睡前的催单铃.md"
+            ],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\24",
+            "snapshotExists": true,
+            "snapshotCurrentStateExists": true,
+            "snapshotPendingHooksExists": true,
+            "pass": true
+          }
+        ],
+        "pass": true
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 3046,
+        "maxGapMs": 30014,
+        "maxGapFromEvent": "llm:progress",
+        "maxGapToEvent": "llm:progress",
+        "limitMs": 15000,
+        "pass": false,
+        "sampleEvents": [
+          {
+            "ts": 1777138276032,
+            "event": "thinking:start"
+          },
+          {
+            "ts": 1777138276032,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777138276032,
+            "event": "log"
+          },
+          {
+            "ts": 1777138276032,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777138276032,
+            "event": "tool:start"
+          },
+          {
+            "ts": 1777138276049,
+            "event": "log"
+          },
+          {
+            "ts": 1777138276061,
+            "event": "log"
+          },
+          {
+            "ts": 1777138276061,
+            "event": "log"
+          },
+          {
+            "ts": 1777138276070,
+            "event": "log"
+          },
+          {
+            "ts": 1777138306068,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777138336082,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777138366085,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777138390055,
+            "event": "chapter:delta"
+          }
+        ]
+      },
+      "pass": false
+    }
+  ],
+  "overallPass": false
+}

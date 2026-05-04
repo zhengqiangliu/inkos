@@ -44,13 +44,12 @@ const FOUNDATION_LABELS: Record<string, string> = {
 const streamdownPlugins = { cjk };
 const RIGHT_PANEL_TAB_STORAGE_PREFIX = "studio.book.right-tab.";
 
-type RightPanelTab = "chapters" | "outline" | "settings" | "review" | "assets";
+type RightPanelTab = "chapters" | "outline" | "settings" | "assets";
 
 const RIGHT_PANEL_TABS: ReadonlyArray<{ id: RightPanelTab; label: string; compactLabel: string }> = [
   { id: "chapters", label: "章节", compactLabel: "章节" },
   { id: "outline", label: "大纲", compactLabel: "大纲" },
   { id: "settings", label: "设定", compactLabel: "设定" },
-  { id: "review", label: "审计修订", compactLabel: "审计" },
   { id: "assets", label: "资产版本", compactLabel: "版本" },
 ];
 
@@ -579,6 +578,7 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
   const [activeTab, setActiveTab] = useState<RightPanelTab>(() => readRightPanelTab(bookId));
   // Show writing indicator only during pipeline operations (write/audit/revise)
   const [activeOp, setActiveOp] = useState<string | null>(null);
+  const [chapterFilter, setChapterFilter] = useState<"all" | "pending-review" | "failed">("all");
   const bookDataVersion = useChatStore((s) => s.bookDataVersion);
   const [failedChapterCount, setFailedChapterCount] = useState(0);
   const [unpublishedChapterCount, setUnpublishedChapterCount] = useState(0);
@@ -643,7 +643,8 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
       || last.event === "rewrite:complete"
       || last.event === "rewrite:error"
     ) {
-      setActiveTab("review");
+      setActiveTab("chapters");
+      setChapterFilter("failed");
       refreshChapterStats();
       return;
     }
@@ -666,7 +667,7 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
     if (tab === "chapters" && activeOp) {
       return <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />;
     }
-    if (tab === "review" && failedChapterCount > 0) {
+    if (tab === "chapters" && failedChapterCount > 0) {
       return (
         <span className="rounded-full bg-destructive/15 px-1.5 py-0.5 text-[10px] text-destructive">
           {Math.min(failedChapterCount, 99)}
@@ -688,7 +689,39 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
       return (
         <>
           <ProgressSection sse={sse} />
-          <ChaptersSection bookId={bookId} t={t} sse={sse} />
+          <SidebarCard title="筛选">
+            <div className="flex items-center gap-1">
+              {[
+                { key: "all", label: "全部" },
+                { key: "pending-review", label: "待审" },
+                { key: "failed", label: "未通过" },
+              ].map((item) => {
+                const active = chapterFilter === item.key;
+                return (
+                  <button
+                    key={item.key}
+                    type="button"
+                    onClick={() => setChapterFilter(item.key as "all" | "pending-review" | "failed")}
+                    className={`rounded-md px-2 py-1 text-[11px] transition-colors ${
+                      active
+                        ? "bg-primary/15 text-primary"
+                        : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
+          </SidebarCard>
+          <ChaptersSection
+            bookId={bookId}
+            t={t}
+            sse={sse}
+            filter={chapterFilter}
+            className="flex min-h-0 flex-1 flex-col"
+            listClassName="h-full min-h-0"
+          />
         </>
       );
     }
@@ -704,7 +737,6 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
               { file: "current_state.md", label: "状态卡" },
             ]}
           />
-          <FoundationSection bookId={bookId} />
         </>
       );
     }
@@ -725,34 +757,30 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
         </>
       );
     }
-    if (activeTab === "review") {
-      return (
-        <>
-          <SidebarCard title="审计修订">
-            <p className="text-xs text-muted-foreground">
-              这里聚焦章节审计与修订动作，优先处理未通过章节。
-            </p>
-          </SidebarCard>
-          <ChaptersSection bookId={bookId} t={t} sse={sse} />
-        </>
-      );
-    }
     return (
       <>
-        <QuickFileLinks
-          title="资产文件"
-          files={[
-            { file: "story_bible.md", label: "世界观设定" },
-            { file: "volume_outline.md", label: "卷纲规划" },
-            { file: "book_rules.md", label: "叙事规则" },
-            { file: "current_state.md", label: "状态卡" },
-            { file: "pending_hooks.md", label: "伏笔池" },
-            { file: "subplot_board.md", label: "支线进度" },
-            { file: "emotional_arcs.md", label: "感情线" },
-            { file: "character_matrix.md", label: "角色矩阵" },
-          ]}
-        />
         <FoundationSection bookId={bookId} />
+        <SidebarCard title="版本与导出">
+          <p className="text-xs text-muted-foreground">
+            资产页聚焦版本与导出，并提供核心文件入口。
+          </p>
+          <div className="mt-2 space-y-1">
+            <button
+              type="button"
+              onClick={() => useChatStore.getState().openArtifact("current_state.md")}
+              className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground"
+            >
+              查看当前状态快照
+            </button>
+            <button
+              type="button"
+              onClick={() => useChatStore.getState().openArtifact("book_rules.md")}
+              className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground"
+            >
+              查看发布前规则
+            </button>
+          </div>
+        </SidebarCard>
       </>
     );
   };
@@ -784,7 +812,7 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="flex flex-col gap-2 p-3">
+        <div className="flex h-full min-h-0 flex-col gap-2 p-3">
           {activeOp && (
             <div className="flex items-center gap-2 rounded-lg border border-primary/10 bg-primary/5 px-3 py-2">
               <Loader2 size={12} className="shrink-0 animate-spin text-primary" />

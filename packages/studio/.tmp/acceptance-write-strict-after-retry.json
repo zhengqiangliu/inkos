@@ -1,0 +1,491 @@
+{
+  "baseUrl": "http://localhost:4317",
+  "bookId": "诡异复苏-我在夜里斩神-白天送外卖-",
+  "projectRoot": "E:\\my-novel",
+  "sessionId": "1777165169817-2cs8o4",
+  "requestedSessionId": null,
+  "sessionCreated": true,
+  "commands": [
+    "write-next",
+    "write-target",
+    "write-shorthand",
+    "write-batch"
+  ],
+  "commandCount": 4,
+  "cases": [
+    {
+      "caseName": "write-next",
+      "runId": "write-next-20260426005929-c6g28h",
+      "instruction": "写下一章",
+      "expectedChapters": [
+        28
+      ],
+      "startedAt": 1777165169905,
+      "endedAt": 1777165677238,
+      "elapsedMs": 507333,
+      "response": {
+        "status": 200,
+        "error": null,
+        "errorCode": null,
+        "errorMessage": null,
+        "persisted": true,
+        "addedChapterNumbers": [
+          28
+        ],
+        "addedChapterNumbersMatchExpected": true,
+        "missingChapterFiles": [],
+        "pass": true,
+        "bodyPreview": "已完成第28章写作。"
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 28,
+            "indexEntry": {
+              "number": 28,
+              "title": "零点四十三分的改址单",
+              "status": "ready-for-review",
+              "wordCount": 2795,
+              "createdAt": "2026-04-26T01:07:57.153Z",
+              "updatedAt": "2026-04-26T01:07:57.153Z",
+              "auditIssues": [
+                "[warning] 何小波在第27章主要身份是“东港联勤中心物业主管”，第28章却在“金桥B座启元导诊驻点”以内场主事人姿态出现，缺少岗位流转或双重职责说明，读者会感到人物位置跳变。",
+                "[warning] 何小波台词“我今晚就让你号进黑名单”与其既有权限不匹配，容易显得为制造冲突而强行越权。",
+                "[warning] 驻点柜台女与何小波在关键场景中较快暴露、较少反制策略，呈现“快速送证据”倾向，反派执行层智商压力不足。",
+                "[warning] 近期章节类型序列为：24（日常喘息/风险处置）→26（高压行动）→27（高压行动）→28（高压行动+现场查缉）。连续三章同型“倒计时+改址+紧急取证”，节奏有压平风险。",
+                "[warning] “90秒二选一”机制在15/26/27后再次出现，虽然本章有新证据回收，但核心爽点结构重复，边际刺激下降。",
+                "[info] H04、H05推进有效：通过反向验证把泄露口锁到外包查询链，并拿到改址日志+终端+IP+实物（定位器/热敏单）的多源互证；H14/H15/H16也同步增厚。",
+                "[info] 本章兑现了上章承诺的“原件提交/指认推进/补件闭环”，并在章尾抛出“4F档案室+明早辨认”新钩子，期待链条总体健康。",
+                "[warning] 最近3章持续高压（高压、对抗、克制取证 -> 高压追索、克制推进，结尾再度绷紧 -> 高压决断、对峙取证后阶段回落但追查继续收紧），缺少明显的情绪释放。"
+              ],
+              "lengthWarnings": [],
+              "lengthTelemetry": {
+                "target": 3000,
+                "softMin": 2591,
+                "softMax": 3409,
+                "hardMin": 2182,
+                "hardMax": 3818,
+                "countingMode": "zh_chars",
+                "writerCount": 2795,
+                "postWriterNormalizeCount": 2795,
+                "postReviseCount": 0,
+                "finalCount": 2795,
+                "normalizeApplied": false,
+                "lengthWarning": false
+              },
+              "tokenUsage": {
+                "promptTokens": 0,
+                "completionTokens": 0,
+                "totalTokens": 0
+              }
+            },
+            "chapterFiles": [
+              "0028_零点四十三分的改址单.md"
+            ],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\28",
+            "snapshotExists": true,
+            "snapshotCurrentStateExists": true,
+            "snapshotPendingHooksExists": true,
+            "pass": true
+          }
+        ],
+        "pass": true
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 2922,
+        "maxGapMs": 12019,
+        "maxGapFromEvent": "llm:progress",
+        "maxGapToEvent": "llm:progress",
+        "limitMs": 15000,
+        "pass": true,
+        "sampleEvents": [
+          {
+            "ts": 1777165169939,
+            "event": "agent:start"
+          },
+          {
+            "ts": 1777165169948,
+            "event": "thinking:start"
+          },
+          {
+            "ts": 1777165169948,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777165169948,
+            "event": "log"
+          },
+          {
+            "ts": 1777165169948,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777165169948,
+            "event": "tool:start"
+          },
+          {
+            "ts": 1777165169973,
+            "event": "log"
+          },
+          {
+            "ts": 1777165170009,
+            "event": "log"
+          },
+          {
+            "ts": 1777165170009,
+            "event": "log"
+          },
+          {
+            "ts": 1777165170302,
+            "event": "log"
+          },
+          {
+            "ts": 1777165182264,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165194271,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165206278,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165218289,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165230293,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165242299,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165254299,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165254888,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777165254889,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777165254890,
+            "event": "chapter:delta"
+          }
+        ]
+      },
+      "pass": true
+    },
+    {
+      "caseName": "write-target",
+      "runId": "write-target-20260426010757-7u8hfv",
+      "instruction": "写第29章",
+      "expectedChapters": [
+        29
+      ],
+      "startedAt": 1777165677408,
+      "endedAt": 1777166577410,
+      "elapsedMs": 900002,
+      "response": {
+        "status": 0,
+        "error": "Error: request timeout after 900000ms",
+        "errorCode": null,
+        "errorMessage": null,
+        "persisted": false,
+        "addedChapterNumbers": [],
+        "addedChapterNumbersMatchExpected": false,
+        "missingChapterFiles": null,
+        "pass": false,
+        "bodyPreview": null
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 29,
+            "indexEntry": null,
+            "chapterFiles": [],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\29",
+            "snapshotExists": false,
+            "snapshotCurrentStateExists": false,
+            "snapshotPendingHooksExists": false,
+            "pass": false
+          }
+        ],
+        "pass": false
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 3563,
+        "maxGapMs": 12018,
+        "maxGapFromEvent": "llm:progress",
+        "maxGapToEvent": "llm:progress",
+        "limitMs": 15000,
+        "pass": true,
+        "sampleEvents": [
+          {
+            "ts": 1777165677452,
+            "event": "agent:start"
+          },
+          {
+            "ts": 1777165677490,
+            "event": "thinking:start"
+          },
+          {
+            "ts": 1777165677490,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777165677502,
+            "event": "log"
+          },
+          {
+            "ts": 1777165677502,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777165677502,
+            "event": "tool:start"
+          },
+          {
+            "ts": 1777165677646,
+            "event": "log"
+          },
+          {
+            "ts": 1777165677688,
+            "event": "log"
+          },
+          {
+            "ts": 1777165677688,
+            "event": "log"
+          },
+          {
+            "ts": 1777165677694,
+            "event": "log"
+          },
+          {
+            "ts": 1777165689707,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165701715,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165713716,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165725718,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165737730,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165749732,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165761734,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777165771249,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777165771249,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777165771249,
+            "event": "chapter:delta"
+          }
+        ]
+      },
+      "pass": false
+    },
+    {
+      "caseName": "write-shorthand",
+      "runId": "write-shorthand-20260426012312-v1et3l",
+      "instruction": "写2章",
+      "expectedChapters": [
+        29,
+        30
+      ],
+      "startedAt": 1777166592789,
+      "endedAt": 1777166595295,
+      "elapsedMs": 2506,
+      "response": {
+        "status": 429,
+        "error": null,
+        "errorCode": "AGENT_BUSY",
+        "errorMessage": "正在处理中，请等待当前操作完成",
+        "persisted": false,
+        "addedChapterNumbers": [],
+        "addedChapterNumbersMatchExpected": false,
+        "missingChapterFiles": null,
+        "pass": false,
+        "bodyPreview": "正在处理中，请等待当前操作完成后再发送。"
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 29,
+            "indexEntry": null,
+            "chapterFiles": [],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\29",
+            "snapshotExists": false,
+            "snapshotCurrentStateExists": false,
+            "snapshotPendingHooksExists": false,
+            "pass": false
+          },
+          {
+            "chapter": 30,
+            "indexEntry": null,
+            "chapterFiles": [],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\30",
+            "snapshotExists": false,
+            "snapshotCurrentStateExists": false,
+            "snapshotPendingHooksExists": false,
+            "pass": false
+          }
+        ],
+        "pass": false
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 1,
+        "maxGapMs": 0,
+        "maxGapFromEvent": null,
+        "maxGapToEvent": null,
+        "limitMs": 15000,
+        "pass": true,
+        "sampleEvents": [
+          {
+            "ts": 1777166595295,
+            "event": "capture:error"
+          }
+        ]
+      },
+      "pass": false
+    },
+    {
+      "caseName": "write-batch",
+      "runId": "write-batch-20260426012330-3vm52f",
+      "instruction": "连写2章",
+      "expectedChapters": [
+        29,
+        30
+      ],
+      "startedAt": 1777166610682,
+      "endedAt": 1777166613189,
+      "elapsedMs": 2507,
+      "response": {
+        "status": 429,
+        "error": null,
+        "errorCode": "AGENT_BUSY",
+        "errorMessage": "正在处理中，请等待当前操作完成",
+        "persisted": false,
+        "addedChapterNumbers": [],
+        "addedChapterNumbersMatchExpected": false,
+        "missingChapterFiles": null,
+        "pass": false,
+        "bodyPreview": "正在处理中，请等待当前操作完成后再发送。"
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 29,
+            "indexEntry": {
+              "number": 29,
+              "title": "四楼档案室有豆浆味",
+              "status": "audit-failed",
+              "wordCount": 2974,
+              "createdAt": "2026-04-26T01:23:41.979Z",
+              "updatedAt": "2026-04-26T01:23:41.979Z",
+              "auditIssues": [
+                "[critical] 第28章已明确“赵国梁账号已冻结，关联设备族进高危名单”，但第29章在06:40与午后又两次出现同一死人账号直派单（含90秒倒计时）。若无额外机制说明，会直接抵消上一章的处置成果与平台规则可信度。",
+                "[warning] 卷纲节点写的是“拒单封号/送单送命二选一”，本章前段虽然再次触发催单，但因人工冻结不计时，真实生死/生计二选一压力被削弱，承诺张力下降。",
+                "[warning] 何小波与郑冬在同一场景内连续给出高度关键口供（含“引出院区再带仓里”“号码后四位3907”），推进效率高但阻力偏弱，容易显得“为主线让路”。",
+                "[warning] “链子能扣住了”后很快转入轻松吃面与玩笑，司法化落地（立案层级、措施变化、对手反制）展示不足，爽点更像口头胜利。",
+                "[warning] 中段连续时间戳+证据枚举（8:02/8:40/9:20等）信息密度高，阅读体验偏“案情纪要”，人物内在波动被压缩。",
+                "[info] 未见高疲劳词堆叠；AI标记词（仿佛/不禁/宛如/竟然/忽然/猛地）密度未触发阈值。",
+                "[warning] 最近4章持续高压（高压、对抗、克制取证 -> 高压追索、克制推进，结尾再度绷紧 -> 高压决断、对峙取证后阶段回落但追查继续收紧 -> 高压取证后回落，夹杂日常温情与克制幽默），缺少明显的情绪释放。"
+              ],
+              "lengthWarnings": [],
+              "lengthTelemetry": {
+                "target": 3000,
+                "softMin": 2591,
+                "softMax": 3409,
+                "hardMin": 2182,
+                "hardMax": 3818,
+                "countingMode": "zh_chars",
+                "writerCount": 3329,
+                "postWriterNormalizeCount": 3329,
+                "postReviseCount": 2974,
+                "finalCount": 2974,
+                "normalizeApplied": true,
+                "lengthWarning": false
+              },
+              "tokenUsage": {
+                "promptTokens": 0,
+                "completionTokens": 0,
+                "totalTokens": 0
+              }
+            },
+            "chapterFiles": [
+              "0029_四楼档案室有豆浆味.md"
+            ],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\29",
+            "snapshotExists": true,
+            "snapshotCurrentStateExists": true,
+            "snapshotPendingHooksExists": true,
+            "pass": true
+          },
+          {
+            "chapter": 30,
+            "indexEntry": null,
+            "chapterFiles": [],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\30",
+            "snapshotExists": false,
+            "snapshotCurrentStateExists": false,
+            "snapshotPendingHooksExists": false,
+            "pass": false
+          }
+        ],
+        "pass": false
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 1,
+        "maxGapMs": 0,
+        "maxGapFromEvent": null,
+        "maxGapToEvent": null,
+        "limitMs": 15000,
+        "pass": true,
+        "sampleEvents": [
+          {
+            "ts": 1777166613189,
+            "event": "capture:error"
+          }
+        ]
+      },
+      "pass": false
+    }
+  ],
+  "overallPass": false
+}

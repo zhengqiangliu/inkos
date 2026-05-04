@@ -1,6 +1,14 @@
 import { z } from "zod";
 
 const LLMServiceEntrySchema = z.object({
+  models: z.array(z.object({
+    id: z.string().min(1),
+    name: z.string().min(1).optional(),
+    enabled: z.boolean().optional(),
+    source: z.enum(["manual", "detected"]).optional(),
+  })).optional(),
+  modelMode: z.enum(["auto", "manual", "hybrid"]).optional(),
+  preferredModel: z.string().min(1).optional(),
   service: z.string().min(1),
   name: z.string().min(1).optional(),
   baseUrl: z.string().url().optional(),
@@ -86,6 +94,15 @@ export type AgentLLMOverride = z.infer<typeof AgentLLMOverrideSchema>;
 
 export const InputGovernanceModeSchema = z.enum(["legacy", "v2"]);
 export type InputGovernanceMode = z.infer<typeof InputGovernanceModeSchema>;
+export const AutoReviewModeSchema = z.enum(["spot-fix", "polish", "rework"]);
+export type AutoReviewMode = z.infer<typeof AutoReviewModeSchema>;
+
+export const AutoReviewConfigSchema = z.object({
+  enabled: z.boolean().default(true),
+  maxReviseRounds: z.number().int().min(0).max(5).default(2),
+  reviseMode: AutoReviewModeSchema.default("spot-fix"),
+});
+export type AutoReviewConfig = z.infer<typeof AutoReviewConfigSchema>;
 
 const ModelOverrideValueSchema = z.union([z.string(), AgentLLMOverrideSchema]);
 
@@ -98,6 +115,11 @@ export const ProjectConfigSchema = z.object({
   detection: DetectionConfigSchema.optional(),
   modelOverrides: z.record(z.string(), ModelOverrideValueSchema).optional(),
   inputGovernanceMode: InputGovernanceModeSchema.default("v2"),
+  autoReview: AutoReviewConfigSchema.default({
+    enabled: true,
+    maxReviseRounds: 2,
+    reviseMode: "spot-fix",
+  }),
   daemon: z.object({
     schedule: z.object({
       radarCron: z.string().default("0 */6 * * *"),

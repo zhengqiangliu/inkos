@@ -29,7 +29,7 @@ export type OnStreamProgress = (progress: StreamProgress) => void;
 
 export function createStreamMonitor(
   onProgress?: OnStreamProgress,
-  intervalMs: number = 30000,
+  intervalMs: number = 12000,
 ): { readonly onChunk: (text: string) => void; readonly stop: () => void } {
   let totalChars = 0;
   let chineseChars = 0;
@@ -799,7 +799,21 @@ export async function chatWithTools(
  * (e.g. agent overrides).
  */
 function resolvePiModel(client: LLMClient, model: string): PiModel<PiApi> {
-  const base = client._piModel!;
+  const base = client._piModel;
+  if (!base) {
+    return {
+      id: model,
+      name: model,
+      api: "openai-completions",
+      provider: client.provider,
+      baseUrl: "",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: client.defaults.maxTokens,
+    };
+  }
   if (base.id === model) return base;
   return { ...base, id: model, name: model };
 }

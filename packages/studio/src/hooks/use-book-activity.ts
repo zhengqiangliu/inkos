@@ -1,7 +1,15 @@
 import type { SSEMessage } from "./use-sse";
 
-const START_EVENTS = new Set(["write:start", "draft:start"]);
-const TERMINAL_EVENTS = new Set(["write:complete", "write:error", "draft:complete", "draft:error"]);
+const START_EVENTS = new Set(["write:start", "draft:start", "agent:start"]);
+const TERMINAL_EVENTS = new Set([
+  "write:complete",
+  "write:error",
+  "draft:complete",
+  "draft:error",
+  "agent:complete",
+  "agent:error",
+  "agent:stopped",
+]);
 const BOOK_REFRESH_EVENTS = new Set([
   "write:complete",
   "write:error",
@@ -17,6 +25,8 @@ const BOOK_REFRESH_EVENTS = new Set([
   "approve:error",
   "delete:complete",
   "delete:error",
+  "agent:complete",
+  "agent:error",
 ]);
 
 const BOOK_COLLECTION_REFRESH_EVENTS = new Set([
@@ -37,6 +47,8 @@ const BOOK_COLLECTION_REFRESH_EVENTS = new Set([
   "approve:error",
   "delete:complete",
   "delete:error",
+  "agent:complete",
+  "agent:error",
 ]);
 
 const DAEMON_STATUS_REFRESH_EVENTS = new Set([
@@ -52,8 +64,9 @@ export interface BookActivity {
 }
 
 function getBookId(message: SSEMessage): string | null {
-  const data = message.data as { bookId?: unknown } | null;
-  return typeof data?.bookId === "string" ? data.bookId : null;
+  const data = message.data as { bookId?: unknown; activeBookId?: unknown } | null;
+  if (typeof data?.bookId === "string") return data.bookId;
+  return typeof data?.activeBookId === "string" ? data.activeBookId : null;
 }
 
 export function deriveActiveBookIds(messages: ReadonlyArray<SSEMessage>): ReadonlySet<string> {
@@ -108,6 +121,22 @@ export function deriveBookActivity(messages: ReadonlyArray<SSEMessage>, bookId: 
         lastError = null;
         break;
       case "draft:error":
+        drafting = false;
+        lastError = typeof data?.error === "string" ? data.error : "Unknown error";
+        break;
+      case "agent:start":
+        writing = true;
+        drafting = false;
+        lastError = null;
+        break;
+      case "agent:complete":
+      case "agent:stopped":
+        writing = false;
+        drafting = false;
+        lastError = null;
+        break;
+      case "agent:error":
+        writing = false;
         drafting = false;
         lastError = typeof data?.error === "string" ? data.error : "Unknown error";
         break;

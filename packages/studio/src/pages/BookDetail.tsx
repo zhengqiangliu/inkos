@@ -3,9 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
+import { useServiceStore } from "../store/service";
 import { useColors } from "../hooks/use-colors";
 import { deriveBookActivity, shouldRefetchBookView } from "../hooks/use-book-activity";
+import { resolveModelSelection } from "./chat-page-state";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { resolveBookAgentInstruction } from "../utils/agent-instruction";
+import { withErrorGuidance } from "../utils/error-guidance";
 import {
   ChevronLeft,
   Zap,
@@ -27,11 +31,79 @@ import {
   Save
 } from "lucide-react";
 
+const BOOK_DETAIL_AGENT_SESSION_KEY_PREFIX = "inkos:book-detail:agent-session:";
+
+function getBookDetailAgentSessionKey(bookId: string): string {
+  return `${BOOK_DETAIL_AGENT_SESSION_KEY_PREFIX}${bookId}`;
+}
+
+function readBookDetailSessionId(bookId: string): string | null {
+  if (typeof localStorage === "undefined") return null;
+  const value = localStorage.getItem(getBookDetailAgentSessionKey(bookId))?.trim() ?? "";
+  return value || null;
+}
+
+function writeBookDetailSessionId(bookId: string, sessionId: string): void {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(getBookDetailAgentSessionKey(bookId), sessionId);
+}
+
+function createBookDetailRunId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function extractToolUpdateText(partialResult: unknown): string | null {
+  if (typeof partialResult === "string") {
+    const value = partialResult.trim();
+    return value.length > 0 ? value : null;
+  }
+  if (!partialResult || typeof partialResult !== "object") return null;
+  const payload = partialResult as { text?: unknown; content?: unknown };
+  if (typeof payload.text === "string") {
+    const value = payload.text.trim();
+    if (value) return value;
+  }
+  if (typeof payload.content === "string") {
+    const value = payload.content.trim();
+    if (value) return value;
+  }
+  if (Array.isArray(payload.content)) {
+    const text = payload.content
+      .filter((item): item is { type?: unknown; text?: unknown } => !!item && typeof item === "object")
+      .filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => String(item.text).trim())
+      .filter(Boolean)
+      .join("\n");
+    return text || null;
+  }
+  return null;
+}
+
+function formatElapsedMs(ms: number): string {
+  const secs = Math.max(0, Math.round(ms / 1000));
+  return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+}
+
+function isHeartbeatLogLine(message: string): boolean {
+  return /（进行中\s*\d+s）|\(\d+s elapsed\)/i.test(message);
+}
+
 interface ChapterMeta {
   readonly number: number;
   readonly title: string;
   readonly status: string;
   readonly wordCount: number;
+}
+
+interface RealtimeBatchProgress {
+  batchId: string;
+  status: "started" | "progress" | "completed" | "failed";
+  total: number;
+  completed: number;
+  elapsedMs: number;
+  currentChapter?: number;
+  failedChapterNumber?: number;
+  error?: string;
 }
 
 interface BookData {
@@ -68,6 +140,7 @@ function translateChapterStatus(status: string, t: TFunction): string {
     "needs-revision": () => t("chapter.needsRevision"),
     "imported": () => t("chapter.imported"),
     "audit-failed": () => t("chapter.auditFailed"),
+    "state-degraded": () => "状态降级",
   };
   return map[status]?.() ?? status;
 }
@@ -77,6 +150,7 @@ const STATUS_CONFIG: Record<string, { color: string; icon: React.ReactNode }> = 
   approved: { color: "text-emerald-500 bg-emerald-500/10", icon: <Check size={12} /> },
   drafted: { color: "text-muted-foreground bg-muted/20", icon: <FileText size={12} /> },
   "needs-revision": { color: "text-destructive bg-destructive/10", icon: <RotateCcw size={12} /> },
+  "state-degraded": { color: "text-orange-600 bg-orange-500/10", icon: <X size={12} /> },
   imported: { color: "text-blue-500 bg-blue-500/10", icon: <Download size={12} /> },
 };
 
@@ -108,19 +182,278 @@ export function BookDetail({
   const [settingsStatus, setSettingsStatus] = useState<BookStatus | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("txt");
   const [exportApprovedOnly, setExportApprovedOnly] = useState(false);
+  const [selectedService, setSelectedService] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [activeAgentRun, setActiveAgentRun] = useState<{ sessionId: string; runId: string } | null>(null);
+
+  const services = useServiceStore((s) => s.services);
+  const servicesLoading = useServiceStore((s) => s.servicesLoading);
+  const modelsByService = useServiceStore((s) => s.modelsByService);
+  const fetchServices = useServiceStore((s) => s.fetchServices);
+  const fetchModels = useServiceStore((s) => s.fetchModels);
+
+  useEffect(() => { void fetchServices(); }, [fetchServices]);
+  useEffect(() => {
+    for (const service of services) {
+      if (service.connected) void fetchModels(service.service);
+    }
+  }, [fetchModels, services]);
+
+  const groupedModels = useMemo(() => (
+    services
+      .filter((service) => service.connected && (modelsByService[service.service]?.models.length ?? 0) > 0)
+      .map((service) => ({
+        service: service.service,
+        label: service.label,
+        models: modelsByService[service.service]!.models,
+      }))
+  ), [modelsByService, services]);
+
+  useEffect(() => {
+    const resolved = resolveModelSelection(groupedModels, selectedModel, selectedService);
+    if (!resolved) {
+      setSelectedModel(null);
+      setSelectedService(null);
+      return;
+    }
+    if (resolved.model !== selectedModel || resolved.service !== selectedService) {
+      setSelectedModel(resolved.model);
+      setSelectedService(resolved.service);
+    }
+  }, [groupedModels, selectedModel, selectedService]);
+
+  const runtimeModelPayload = selectedService && selectedModel
+    ? { service: selectedService, model: selectedModel }
+    : undefined;
+  const instructionLanguage = data?.book.language === "en" ? "en" : "zh";
+  const resolveReviseInstruction = (
+    chapterNum: number,
+    mode: ReviseMode,
+    brief?: string,
+  ): string => {
+    if (mode === "rewrite") {
+      return resolveBookAgentInstruction("rewrite", {
+        chapterNumber: chapterNum,
+        brief,
+        language: instructionLanguage,
+      });
+    }
+    const lang = instructionLanguage;
+    const suffix = brief?.trim() ? ` ${brief.trim()}` : "";
+    if (lang === "en") {
+      if (mode === "polish") return `polish chapter ${chapterNum}${suffix}`;
+      if (mode === "rework") return `revise chapter ${chapterNum} rework${suffix}`;
+      if (mode === "anti-detect") return `anti-detect chapter ${chapterNum}${suffix}`;
+      return `revise chapter ${chapterNum}${suffix}`;
+    }
+    if (mode === "polish") return `润色第${chapterNum}章${suffix}`;
+    if (mode === "rework") return `修订第${chapterNum}章 rework${suffix}`;
+    if (mode === "anti-detect") return `修订第${chapterNum}章 anti-detect${suffix}`;
+    return `修订第${chapterNum}章${suffix}`;
+  };
+
+  const ensureAgentSessionId = async (): Promise<string> => {
+    const existing = readBookDetailSessionId(bookId);
+    if (existing) return existing;
+    const created = await fetchJson<{ session?: { sessionId?: string } }>("/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookId }),
+    });
+    const sessionId = created.session?.sessionId?.trim();
+    if (!sessionId) throw new Error("无法创建会话");
+    writeBookDetailSessionId(bookId, sessionId);
+    return sessionId;
+  };
+
+  const dispatchAgentInstruction = async (instruction: string): Promise<void> => {
+    const send = async (sessionId: string, runId: string): Promise<void> => {
+      setActiveAgentRun({ sessionId, runId });
+      await fetchJson<{ response?: string; runId?: string }>("/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instruction,
+          activeBookId: bookId,
+          sessionId,
+          runId,
+          ...(runtimeModelPayload ?? {}),
+        }),
+      });
+    };
+
+    let sessionId = await ensureAgentSessionId();
+    let runId = createBookDetailRunId();
+    try {
+      await send(sessionId, runId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/SESSION_NOT_FOUND|Session not found/i.test(message)) {
+        writeBookDetailSessionId(bookId, "");
+        sessionId = await ensureAgentSessionId();
+        runId = createBookDetailRunId();
+        await send(sessionId, runId);
+        return;
+      }
+      setActiveAgentRun((current) =>
+        current && current.sessionId === sessionId && current.runId === runId
+          ? null
+          : current,
+      );
+      throw error;
+    }
+  };
   const activity = useMemo(() => deriveBookActivity(sse.messages, bookId), [bookId, sse.messages]);
+  const activityErrorText = useMemo(
+    () => (activity.lastError ? withErrorGuidance(activity.lastError) : null),
+    [activity.lastError],
+  );
   const writing = writeRequestPending || activity.writing;
   const drafting = draftRequestPending || activity.drafting;
   const latestPersistedChapter = data ? data.nextChapter - 1 : 0;
+  const realtimeAgentLines = useMemo(() => {
+    if (!activeAgentRun) return [] as string[];
+    const lines: string[] = [];
+    for (const message of sse.messages) {
+      const payload = message.data as {
+        sessionId?: string;
+        runId?: string;
+        message?: string;
+        partialResult?: unknown;
+        text?: string;
+        previewType?: "chapter" | "patch";
+        mode?: string;
+        status?: string;
+        elapsedMs?: number;
+      } | null;
+      if (!payload || payload.sessionId !== activeAgentRun.sessionId) continue;
+      if (typeof payload.runId === "string" && payload.runId !== activeAgentRun.runId) continue;
+
+      if (message.event === "log" && typeof payload.message === "string" && payload.message.trim()) {
+        if (!isHeartbeatLogLine(payload.message)) {
+          lines.push(payload.message.trim());
+        }
+      } else if (message.event === "thinking:start") {
+        lines.push("思考过程（流式）开始");
+      } else if (message.event === "thinking:delta" && typeof payload.text === "string" && payload.text.trim()) {
+        lines.push(`思考中：${payload.text.trim()}`);
+      } else if (message.event === "thinking:end") {
+        lines.push("思考过程（流式）结束");
+      } else if (message.event === "draft:delta" && typeof payload.text === "string" && payload.text.trim()) {
+        lines.push(`回复：${payload.text.trim()}`);
+      } else if (message.event === "tool:update") {
+        const text = extractToolUpdateText(payload.partialResult);
+        if (text) lines.push(text);
+      } else if (message.event === "chapter:delta" && typeof payload.text === "string" && payload.text.trim()) {
+        const normalizedMode = typeof payload.mode === "string" ? payload.mode.trim().toLowerCase() : "";
+        const label = payload.previewType === "patch"
+          ? "修订补丁片段"
+          : normalizedMode === "rewrite"
+            ? "重写正文片段"
+            : "正文片段";
+        lines.push(`${label}：${payload.text.trim()}`);
+      } else if (message.event === "llm:progress") {
+        const status = typeof payload.status === "string" ? payload.status : "running";
+        lines.push(`进度：${status}`);
+      } else if (message.event === "persist:check") {
+        const p = payload as {
+          status?: string;
+          persisted?: boolean;
+          addedChapterNumbers?: unknown;
+          missingChapterFiles?: unknown;
+        };
+        if (p.status === "started") {
+          lines.push("落盘校验：开始");
+        } else {
+          const added = Array.isArray(p.addedChapterNumbers) ? p.addedChapterNumbers.length : 0;
+          const missing = Array.isArray(p.missingChapterFiles) ? p.missingChapterFiles.length : 0;
+          lines.push(`落盘校验：${p.persisted ? "通过" : "失败"} · 新增索引 ${added} · 缺失正文 ${missing}`);
+        }
+      } else if (message.event === "persist:repair") {
+        const p = payload as { status?: string; repairedChapterNumbers?: unknown; reason?: string };
+        const repaired = Array.isArray(p.repairedChapterNumbers) ? p.repairedChapterNumbers.join(",") : "";
+        lines.push(
+          `索引修复：${p.status ?? "unknown"}`
+          + `${repaired ? ` · 章节 ${repaired}` : ""}`
+          + `${typeof p.reason === "string" && p.reason.trim() ? ` · ${p.reason.trim()}` : ""}`,
+        );
+      } else if (message.event === "agent:error" || message.event === "write:error" || message.event === "rewrite:error") {
+        const errorText = typeof (payload as { error?: unknown }).error === "string"
+          ? (payload as { error: string }).error
+          : "Unknown error";
+        lines.push(`执行失败：${withErrorGuidance(errorText).replace(/\s*\n\s*/g, " ")}`);
+      }
+    }
+    return lines.slice(-40);
+  }, [activeAgentRun, sse.messages]);
+
+  const realtimeBatchProgress = useMemo(() => {
+    if (!activeAgentRun) return [] as RealtimeBatchProgress[];
+    const latest = new Map<string, RealtimeBatchProgress>();
+    for (const message of sse.messages) {
+      if (message.event !== "batch:progress") continue;
+      const payload = message.data as {
+        sessionId?: string;
+        runId?: string;
+        batchId?: string;
+        status?: "started" | "progress" | "completed" | "failed";
+        total?: number;
+        completed?: number;
+        elapsedMs?: number;
+        currentChapter?: number;
+        failedChapterNumber?: number;
+        error?: string;
+      } | null;
+      if (!payload || payload.sessionId !== activeAgentRun.sessionId) continue;
+      if (typeof payload.runId === "string" && payload.runId !== activeAgentRun.runId) continue;
+      const batchId = typeof payload.batchId === "string" ? payload.batchId : null;
+      const total = Number(payload.total ?? 0);
+      if (!batchId || !Number.isFinite(total) || total <= 0) continue;
+      latest.set(batchId, {
+        batchId,
+        status: payload.status ?? "progress",
+        total,
+        completed: Math.max(0, Number(payload.completed ?? 0)),
+        elapsedMs: Math.max(0, Number(payload.elapsedMs ?? 0)),
+        ...(Number.isFinite(Number(payload.currentChapter))
+          ? { currentChapter: Number(payload.currentChapter) }
+          : {}),
+        ...(Number.isFinite(Number(payload.failedChapterNumber))
+          ? { failedChapterNumber: Number(payload.failedChapterNumber) }
+          : {}),
+        ...(typeof payload.error === "string" && payload.error.trim()
+          ? { error: payload.error.trim() }
+          : {}),
+      });
+    }
+    return [...latest.values()];
+  }, [activeAgentRun, sse.messages]);
 
   useEffect(() => {
     const recent = sse.messages.at(-1);
     if (!recent) return;
 
-    const data = recent.data as { bookId?: string } | null;
-    if (data?.bookId !== bookId) return;
+    const data = recent.data as { bookId?: string; activeBookId?: string } | null;
+    const eventBookId = data?.bookId ?? data?.activeBookId;
+    if (eventBookId !== bookId) return;
 
-    if (recent.event === "write:start") {
+    const runData = recent.data as { sessionId?: string; runId?: string } | null;
+    if (recent.event === "agent:start" && typeof runData?.sessionId === "string" && typeof runData?.runId === "string") {
+      setActiveAgentRun({ sessionId: runData.sessionId, runId: runData.runId });
+    }
+    if (
+      (recent.event === "agent:complete" || recent.event === "agent:error" || recent.event === "agent:stopped")
+      && typeof runData?.sessionId === "string"
+      && typeof runData?.runId === "string"
+    ) {
+      setActiveAgentRun((current) =>
+        current && current.sessionId === runData.sessionId && current.runId === runData.runId
+          ? null
+          : current
+      );
+    }
+
+    if (recent.event === "write:start" || recent.event === "agent:start") {
       setWriteRequestPending(false);
       return;
     }
@@ -140,7 +473,33 @@ export function BookDetail({
   const handleWriteNext = async () => {
     setWriteRequestPending(true);
     try {
-      await postApi(`/books/${bookId}/write-next`);
+      await dispatchAgentInstruction(resolveBookAgentInstruction("write-next", { language: instructionLanguage }));
+    } catch (e) {
+      setWriteRequestPending(false);
+      alert(e instanceof Error ? e.message : "Failed");
+    }
+  };
+
+  const handleWriteBatch = async () => {
+    const input = window.prompt(
+      data?.book.language === "en"
+        ? "How many chapters to write continuously?"
+        : "请输入连续写作章节数",
+      "3",
+    );
+    if (input === null) return;
+    const count = Number(input.trim());
+    if (!Number.isInteger(count) || count < 1 || count > 20) {
+      alert(data?.book.language === "en" ? "Please enter an integer between 1 and 20." : "请输入 1 到 20 的整数。");
+      return;
+    }
+
+    setWriteRequestPending(true);
+    try {
+      const instruction = data?.book.language === "en"
+        ? `write ${count} chapters continuously`
+        : `连续写${count}章`;
+      await dispatchAgentInstruction(instruction);
     } catch (e) {
       setWriteRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
@@ -150,7 +509,7 @@ export function BookDetail({
   const handleDraft = async () => {
     setDraftRequestPending(true);
     try {
-      await postApi(`/books/${bookId}/draft`);
+      await postApi(`/books/${bookId}/draft`, runtimeModelPayload);
     } catch (e) {
       setDraftRequestPending(false);
       alert(e instanceof Error ? e.message : "Failed");
@@ -184,11 +543,11 @@ export function BookDetail({
     if (brief === null) return;
     setRewritingChapters((prev) => [...prev, chapterNum]);
     try {
-      await fetchJson(`/books/${bookId}/rewrite/${chapterNum}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brief: brief.trim() || undefined }),
-      });
+      await dispatchAgentInstruction(resolveBookAgentInstruction("rewrite", {
+        chapterNumber: chapterNum,
+        brief,
+        language: instructionLanguage,
+      }));
       refetch();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Rewrite failed");
@@ -207,11 +566,7 @@ export function BookDetail({
     if (brief === null) return;
     setRevisingChapters((prev) => [...prev, chapterNum]);
     try {
-      await fetchJson(`/books/${bookId}/revise/${chapterNum}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, brief: brief.trim() || undefined }),
-      });
+      await dispatchAgentInstruction(resolveReviseInstruction(chapterNum, mode, brief));
       refetch();
     } catch (e) {
       alert(e instanceof Error ? e.message : "Revision failed");
@@ -300,6 +655,10 @@ export function BookDetail({
   const currentStatus = settingsStatus ?? (book.status as BookStatus);
 
   const exportHref = `/api/v1/books/${bookId}/export?format=${exportFormat}${exportApprovedOnly ? "&approvedOnly=true" : ""}`;
+  const modelSelectValue = selectedService && selectedModel
+    ? JSON.stringify([selectedService, selectedModel])
+    : "";
+  const modelSelectorReady = !servicesLoading && groupedModels.length > 0;
 
   return (
     <div className="space-y-8 fade-in">
@@ -344,7 +703,45 @@ export function BookDetail({
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-col items-start md:items-end gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">模型</span>
+            {modelSelectorReady ? (
+              <select
+                value={modelSelectValue}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  let parsed: unknown;
+                  try {
+                    parsed = JSON.parse(raw);
+                  } catch {
+                    return;
+                  }
+                  const [service = "", model = ""] = Array.isArray(parsed) ? parsed : [];
+                  if (!service || !model) return;
+                  setSelectedService(service);
+                  setSelectedModel(model);
+                }}
+                className="px-2 py-1.5 text-xs rounded-lg border border-border/50 bg-secondary/30 outline-none min-w-[220px]"
+              >
+                {groupedModels.map((group) => (
+                  <optgroup key={group.service} label={group.label}>
+                    {group.models.map((model) => (
+                      <option key={`${group.service}:${model.id}`} value={JSON.stringify([group.service, model.id])}>
+                        {model.name ?? model.id}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            ) : (
+              <span className="text-xs text-muted-foreground/60 rounded-lg border border-border/40 px-2 py-1.5">
+                请先配置模型
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
           <button
             onClick={handleWriteNext}
             disabled={writing || drafting}
@@ -352,6 +749,14 @@ export function BookDetail({
           >
             {writing ? <div className="w-4 h-4 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Zap size={16} />}
             {writing ? t("dash.writing") : t("book.writeNext")}
+          </button>
+          <button
+            onClick={handleWriteBatch}
+            disabled={writing || drafting}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-bold bg-primary/10 text-primary rounded-xl hover:bg-primary/20 transition-all border border-primary/20 disabled:opacity-50"
+          >
+            <Zap size={14} />
+            {data?.book.language === "en" ? "Write Batch" : "连写"}
           </button>
           <button
             onClick={handleDraft}
@@ -369,25 +774,89 @@ export function BookDetail({
             {deleting ? <div className="w-4 h-4 border-2 border-destructive/20 border-t-destructive rounded-full animate-spin" /> : <Trash2 size={16} />}
             {deleting ? t("common.loading") : t("book.deleteBook")}
           </button>
+          </div>
         </div>
       </div>
 
-      {(writing || drafting || activity.lastError) && (
+      {(writing || drafting || activityErrorText) && (
         <div
           className={`rounded-2xl border px-4 py-3 text-sm ${
-            activity.lastError
+            activityErrorText
               ? "border-destructive/30 bg-destructive/5 text-destructive"
               : "border-primary/20 bg-primary/[0.04] text-foreground"
           }`}
         >
-          {activity.lastError ? (
-            <span>
-              {t("book.pipelineFailed")}: {activity.lastError}
+          {activityErrorText ? (
+            <span className="whitespace-pre-wrap">
+              {t("book.pipelineFailed")}: {activityErrorText}
             </span>
           ) : writing ? (
             <span>{t("book.pipelineWriting")}</span>
           ) : (
             <span>{t("book.pipelineDrafting")}</span>
+          )}
+        </div>
+      )}
+
+      {activeAgentRun && (realtimeAgentLines.length > 0 || realtimeBatchProgress.length > 0) && (
+        <div className="rounded-2xl border border-border/40 bg-card/60 px-4 py-3">
+          <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
+            流式过程（思考/正文）
+          </div>
+          {realtimeBatchProgress.length > 0 && (
+            <div className="mb-2 space-y-2">
+              {realtimeBatchProgress.map((batch) => (
+                <div key={batch.batchId} className="rounded-lg border border-border/40 bg-background/40 px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="font-semibold text-foreground/90">
+                      连写进度 {Math.min(batch.completed, batch.total)}/{batch.total}
+                    </span>
+                    <span className={`font-medium ${
+                      batch.status === "failed"
+                        ? "text-destructive"
+                        : batch.status === "completed"
+                          ? "text-green-600 dark:text-green-400"
+                          : "text-primary"
+                    }`}>
+                      {batch.status === "failed" ? "失败" : batch.status === "completed" ? "已完成" : "进行中"}
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1.5 rounded-full bg-secondary/70 overflow-hidden">
+                    <div
+                      className={`h-full transition-all ${
+                        batch.status === "failed"
+                          ? "bg-destructive"
+                          : batch.status === "completed"
+                            ? "bg-green-600 dark:bg-green-400"
+                            : "bg-primary"
+                      }`}
+                      style={{
+                        width: `${Math.max(0, Math.min(100, (batch.completed / Math.max(1, batch.total)) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+                    <span>耗时 {formatElapsedMs(batch.elapsedMs)}</span>
+                    {typeof batch.currentChapter === "number" && <span>当前章 {batch.currentChapter}</span>}
+                    {typeof batch.failedChapterNumber === "number" && <span>失败章 {batch.failedChapterNumber}</span>}
+                  </div>
+                  {batch.status === "failed" && batch.error && (
+                    <div className="mt-1 text-[11px] text-destructive break-words">
+                      {batch.error}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {realtimeAgentLines.length > 0 && (
+            <ul className="space-y-1 max-h-48 overflow-y-auto">
+              {realtimeAgentLines.map((line, index) => (
+                <li key={`${activeAgentRun.runId}-${index}`} className="text-xs leading-5 text-foreground/85 break-words">
+                  {line}
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       )}

@@ -3,6 +3,8 @@ import { fetchJson } from "../hooks/use-api";
 export interface ServiceDetailModelInfo {
   readonly id: string;
   readonly name?: string;
+  readonly enabled?: boolean;
+  readonly source?: "manual" | "detected";
 }
 
 export interface ServiceDetailDetectedConfig {
@@ -27,6 +29,56 @@ interface ServiceProbeResponse {
   readonly models?: ServiceDetailModelInfo[];
   readonly selectedModel?: string;
   readonly detected?: ServiceDetailDetectedConfig;
+  readonly error?: string;
+}
+
+function isModelDisabledInConfig(
+  modelId: string,
+  models: ReadonlyArray<ServiceDetailModelInfo> | undefined,
+): boolean {
+  if (!Array.isArray(models) || !modelId.trim()) return false;
+  const matched = models.filter((model) => model.id === modelId);
+  if (matched.length === 0) return false;
+  return matched.every((model) => model.enabled === false);
+}
+
+function resolvePersistedDefaultModel(args: {
+  readonly preferredModel?: string;
+  readonly probeSelectedModel?: string;
+  readonly detectedModel?: string;
+  readonly models?: ReadonlyArray<ServiceDetailModelInfo>;
+}): string | undefined {
+  const pick = (candidate: string | undefined): string | undefined => {
+    const id = candidate?.trim();
+    if (!id) return undefined;
+    if (isModelDisabledInConfig(id, args.models)) return undefined;
+    return id;
+  };
+
+  const fromPreferred = pick(args.preferredModel);
+  if (fromPreferred) return fromPreferred;
+
+  if (Array.isArray(args.models)) {
+    const firstEnabled = args.models.find((model) => model.id.trim().length > 0 && model.enabled !== false);
+    if (firstEnabled) return firstEnabled.id;
+  }
+
+  const fromProbe = pick(args.probeSelectedModel);
+  if (fromProbe) return fromProbe;
+
+  const fromDetected = pick(args.detectedModel);
+  if (fromDetected) return fromDetected;
+
+  return undefined;
+}
+
+export interface ServiceDetailSingleModelTestResult {
+  readonly ok: boolean;
+  readonly model: string;
+  readonly canConnect: boolean;
+  readonly elapsedMs: number;
+  readonly apiFormat: "chat" | "responses";
+  readonly stream: boolean;
   readonly error?: string;
 }
 
@@ -137,6 +189,9 @@ export async function saveServiceConfigWithValidation(args: {
   readonly baseUrl: string;
   readonly apiFormat: "chat" | "responses";
   readonly stream: boolean;
+  readonly modelMode?: "auto" | "manual" | "hybrid";
+  readonly preferredModel?: string;
+  readonly models?: ReadonlyArray<ServiceDetailModelInfo>;
   readonly temperature: string;
   readonly maxTokens: string;
   readonly detectedModel: string;
@@ -175,7 +230,15 @@ export async function saveServiceConfigWithValidation(args: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       service: args.effectiveServiceId,
-      ...(probeResult?.selectedModel ? { defaultModel: probeResult.selectedModel } : args.detectedModel ? { defaultModel: args.detectedModel } : {}),
+      ...(() => {
+        const defaultModel = resolvePersistedDefaultModel({
+          preferredModel: args.preferredModel,
+          probeSelectedModel: probeResult?.selectedModel,
+          detectedModel: args.detectedModel,
+          models: args.models,
+        });
+        return defaultModel ? { defaultModel } : {};
+      })(),
       services: [
         {
           service: args.isCustom ? "custom" : args.serviceId,
@@ -183,6 +246,24 @@ export async function saveServiceConfigWithValidation(args: {
           maxTokens: parseInt(args.maxTokens, 10),
           apiFormat: probeResult?.detected?.apiFormat ?? args.apiFormat,
           stream: typeof probeResult?.detected?.stream === "boolean" ? probeResult.detected.stream : args.stream,
+          ...(args.modelMode ? { modelMode: args.modelMode } : {}),
+          ...(() => {
+            const preferred = resolvePersistedDefaultModel({
+              preferredModel: args.preferredModel,
+              probeSelectedModel: probeResult?.selectedModel,
+              detectedModel: args.detectedModel,
+              models: args.models,
+            });
+            return preferred ? { preferredModel: preferred } : {};
+          })(),
+          ...(Array.isArray(args.models) ? {
+            models: args.models.map((model) => ({
+              id: model.id,
+              ...(model.name ? { name: model.name } : {}),
+              ...(typeof model.enabled === "boolean" ? { enabled: model.enabled } : {}),
+              ...(model.source ? { source: model.source } : {}),
+            })),
+          } : {}),
           ...(args.isCustom ? {
             name: args.resolvedCustomName,
             baseUrl: probeResult?.detected?.baseUrl ?? trimmedBaseUrl,
@@ -205,4 +286,31 @@ export async function saveServiceConfigWithValidation(args: {
     detectedModel: probeResult.selectedModel ?? "",
     detectedConfig: probeResult.detected ?? null,
   };
+}
+
+export async function testServiceModelForDetail(args: {
+  readonly serviceId: string;
+  readonly modelId: string;
+  readonly apiKey?: string;
+  readonly baseUrl?: string;
+  readonly apiFormat: "chat" | "responses";
+  readonly stream: boolean;
+  readonly fetchJsonImpl?: JsonFetcher;
+}): Promise<ServiceDetailSingleModelTestResult> {
+  const fetchJsonImpl = args.fetchJsonImpl ?? fetchJson;
+  const body = {
+    ...(args.apiKey?.trim() ? { apiKey: args.apiKey.trim() } : {}),
+    ...(args.baseUrl?.trim() ? { baseUrl: args.baseUrl.trim() } : {}),
+    apiFormat: args.apiFormat,
+    stream: args.stream,
+  };
+
+  return await fetchJsonImpl<ServiceDetailSingleModelTestResult>(
+    `/services/${encodeURIComponent(args.serviceId)}/models/${encodeURIComponent(args.modelId)}/test`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
 }

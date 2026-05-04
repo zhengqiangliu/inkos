@@ -1265,6 +1265,25 @@ describe("StateManager", () => {
       await expect(manager.rollbackToChapter(bookId, 99)).rejects.toThrow("Cannot restore snapshot");
     });
 
+    it("can rollback artifacts without snapshot restore when snapshot chain has gaps", async () => {
+      await setupRollbackBook();
+
+      const snapshotTargetDir = join(manager.bookDir(bookId), "story", "snapshots", "1");
+      await rm(snapshotTargetDir, { recursive: true, force: true });
+
+      const discarded = await manager.rollbackToChapterWithoutSnapshot(bookId, 1);
+      expect(discarded).toEqual([2, 3]);
+
+      const index = await manager.loadChapterIndex(bookId);
+      expect(index).toHaveLength(1);
+      expect(index[0]!.number).toBe(1);
+
+      await expect(stat(join(manager.bookDir(bookId), "chapters", "0002_Title_Two.md"))).rejects.toThrow();
+      await expect(stat(join(manager.bookDir(bookId), "chapters", "0003_Title_Three.md"))).rejects.toThrow();
+      await expect(stat(join(manager.bookDir(bookId), "story", "snapshots", "2"))).rejects.toThrow();
+      await expect(stat(join(manager.bookDir(bookId), "story", "snapshots", "3"))).rejects.toThrow();
+    });
+
     it("removes sqlite memory files when rolling back", async () => {
       await setupRollbackBook();
 
@@ -1273,6 +1292,8 @@ describe("StateManager", () => {
         writeFile(join(storyDir, "memory.db"), "stale db", "utf-8"),
         writeFile(join(storyDir, "memory.db-shm"), "stale shm", "utf-8"),
         writeFile(join(storyDir, "memory.db-wal"), "stale wal", "utf-8"),
+        writeFile(join(storyDir, "current_state_fact_sync.json"), "{\"lastSyncedChapter\":3}", "utf-8"),
+        writeFile(join(storyDir, "narrative_memory_sync.json"), "{\"lastSyncedChapter\":3}", "utf-8"),
       ]);
 
       await manager.rollbackToChapter(bookId, 1);
@@ -1280,6 +1301,8 @@ describe("StateManager", () => {
       await expect(stat(join(storyDir, "memory.db"))).rejects.toThrow();
       await expect(stat(join(storyDir, "memory.db-shm"))).rejects.toThrow();
       await expect(stat(join(storyDir, "memory.db-wal"))).rejects.toThrow();
+      await expect(stat(join(storyDir, "current_state_fact_sync.json"))).rejects.toThrow();
+      await expect(stat(join(storyDir, "narrative_memory_sync.json"))).rejects.toThrow();
     });
   });
 });

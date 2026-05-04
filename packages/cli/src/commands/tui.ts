@@ -1,5 +1,4 @@
 import { Command } from "commander";
-import { launchTui } from "../tui/app.js";
 
 export interface TuiCommandHooks {
   readonly launchTui?: (projectRoot: string) => Promise<void> | void;
@@ -13,6 +12,7 @@ export function createTuiCommand(hooks: TuiCommandHooks = {}): Command {
         await hooks.launchTui(process.cwd());
         return;
       }
+      const { launchTui } = await import("../tui/app.js");
       await launchTui(process.cwd());
     });
 }

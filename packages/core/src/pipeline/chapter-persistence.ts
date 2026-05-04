@@ -19,6 +19,7 @@ export async function persistChapterArtifacts(params: {
   readonly finalWordCount: number;
   readonly lengthWarnings: ReadonlyArray<string>;
   readonly lengthTelemetry?: LengthTelemetry;
+  readonly reviewNote?: string;
   readonly degradedIssues: ReadonlyArray<AuditIssue>;
   readonly tokenUsage?: ChapterPersistenceUsage;
   readonly loadChapterIndex: () => Promise<ReadonlyArray<ChapterMeta>>;
@@ -32,8 +33,9 @@ export async function persistChapterArtifacts(params: {
   readonly logSnapshotStage: () => void;
   readonly now?: () => string;
 }): Promise<{ readonly entry: ChapterMeta }> {
+  const commitTruth = params.status === "ready-for-review";
   await params.saveChapter();
-  if (params.status !== "state-degraded") {
+  if (commitTruth) {
     await params.saveTruthFiles();
   }
 
@@ -53,7 +55,7 @@ export async function persistChapterArtifacts(params: {
           params.auditResult.passed ? "ready-for-review" : "audit-failed",
           params.degradedIssues,
         )
-      : undefined,
+      : params.reviewNote,
     lengthTelemetry: params.lengthTelemetry,
     tokenUsage: params.tokenUsage,
   };
@@ -67,9 +69,9 @@ export async function persistChapterArtifacts(params: {
   const driftIssues = params.auditResult.issues.filter(
     (issue) => issue.severity === "critical" || issue.severity === "warning",
   );
-  await params.persistAuditDriftGuidance(params.status === "state-degraded" ? [] : driftIssues);
+  await params.persistAuditDriftGuidance(driftIssues);
 
-  if (params.status !== "state-degraded") {
+  if (commitTruth) {
     params.logSnapshotStage();
     await params.snapshotState();
     await params.syncCurrentStateFactHistory();

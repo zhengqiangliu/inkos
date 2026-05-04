@@ -23,12 +23,27 @@ const EraConstraintsSchema = z.object({
   region: z.string().optional(),
 }).optional();
 
+const DialogueQuotePolicySchema = z.object({
+  mode: z.enum(["auto", "force_double", "force_corner", "force_none"]).default("auto"),
+  strict: z.boolean().default(false),
+  autoNormalize: z.boolean().default(false),
+}).optional();
+
+const OpeningThreeChaptersSchema = z.object({
+  enabled: z.boolean().default(true),
+  applyInGovernedMode: z.boolean().default(true),
+  strict: z.boolean().default(true),
+  maxCharacters: z.number().int().min(3).max(8).default(5),
+}).optional();
+
 export const BookRulesSchema = z.object({
   version: z.string().default("1.0"),
   protagonist: ProtagonistSchema,
   genreLock: GenreLockSchema,
   numericalSystemOverrides: NumericalOverridesSchema,
   eraConstraints: EraConstraintsSchema,
+  dialogueQuotePolicy: DialogueQuotePolicySchema,
+  openingThreeChapters: OpeningThreeChaptersSchema,
   prohibitions: z.array(z.string()).default([]),
   chapterTypesOverride: z.array(z.string()).default([]),
   fatigueWordsOverride: z.array(z.string()).default([]),

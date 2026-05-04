@@ -2,36 +2,21 @@
 
 更新时间：2026-05-03
 
-## 任务清单
+## 本轮优化（去重与布局）
 
-- [x] 完成需求分析：将右侧面板从单一结构改为 Tab 架构
-- [x] 完成信息架构方案：5 个 Tab（章节 / 大纲 / 设定 / 审计修订 / 资产版本）
-- [x] 完成交互规则方案：默认 Tab、自动跳转、状态记忆、Badge 规则
-- [x] 完成空态文案方案：5 个 Tab 空态文案及主按钮建议
-- [x] 完成移动端方案：Drawer + Tab 顶栏 + 短文案策略
-
-- [x] 前端实现 `RightPanelTabs` 容器与 Tab 顶栏
-- [x] 前端实现 `章节` Tab 面板（列表、状态、快捷操作）
-- [x] 前端实现 `大纲` Tab 面板（主线/分卷/节拍）
-- [x] 前端实现 `设定` Tab 面板（分组、搜索、筛选）
-- [x] 前端实现 `审计修订` Tab 面板（维度分、记录、差异入口）
-- [x] 前端实现 `资产版本` Tab 面板（文件、快照、导出）
-
-- [x] 接入状态记忆：`studio.book.right-tab.{bookId}`
-- [x] 接入自动切换逻辑（审计完成切审计 Tab、设定冲突切设定 Tab）
-- [x] 接入 Tab Badge 数据源（运行中/失败/未发布变更）
-
-- [x] 联调与回归测试（桌面端）
-- [x] 联调与回归测试（移动端）
-- [x] 验收与发布说明更新
+- [x] 章节列表改为填充容器高度，列表区内部滚动
+- [x] 取消“审计修订”Tab，整合到“章节”Tab筛选（全部/待审/未通过）
+- [x] 资产Tab移除重复核心文件列表，改为版本与导出入口
+- [x] 大纲Tab移除重复核心文件块，仅保留大纲相关入口
+- [x] 回归验证（typecheck + 关键测试）通过
 
 ## 当前进度
 
-- 方案阶段：`100%`（已完成）
-- 开发阶段：`100%`（已完成）
-- 总体进度：`100%`
+- 本轮优化：`100%`（已完成）
+- 右侧面板整体：`100%`（已完成）
 
 ## 备注
 
-- 已完成全量回归：`pnpm -C packages/studio test`（32 files / 308 tests）通过。
-- 发布说明：`docs/studio-right-panel-tabs-release-notes.md`。
+- 验证命令：
+  - `pnpm -C packages/studio typecheck`
+  - `pnpm -C packages/studio test -- src/components/chat/__tests__/BookSidebar.test.ts src/components/sidebar/ChaptersSection.test.ts src/hooks/use-book-activity.test.ts`

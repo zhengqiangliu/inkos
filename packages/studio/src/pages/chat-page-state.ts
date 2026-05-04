@@ -9,6 +9,12 @@ export interface ChatPageModelGroup {
   readonly models: ReadonlyArray<ChatPageModelInfo>;
 }
 
+export interface AssistantPreviewState {
+  readonly shouldShowPreview: boolean;
+  readonly previewLabel: string;
+  readonly previewContent: string;
+}
+
 const BOOK_CREATE_SESSION_KEY = "inkos.book-create.session-id";
 
 export function getBookCreateSessionId(): string | null {
@@ -39,4 +45,39 @@ export function filterModelGroups(
       ),
     }))
     .filter((group) => group.models.length > 0);
+}
+
+export function resolveModelSelection(
+  groupedModels: ReadonlyArray<ChatPageModelGroup>,
+  selectedModel: string | null,
+  selectedService: string | null,
+): { model: string; service: string } | null {
+  if (groupedModels.length === 0) return null;
+
+  if (selectedModel && selectedService) {
+    const selectedGroup = groupedModels.find((group) => group.service === selectedService);
+    const exists = selectedGroup?.models.some((model) => model.id === selectedModel) ?? false;
+    if (exists) {
+      return { model: selectedModel, service: selectedService };
+    }
+  }
+
+  const first = groupedModels[0];
+  if (!first || first.models.length === 0) return null;
+  return { model: first.models[0]!.id, service: first.service };
+}
+
+export function resolveAssistantPreview(args: {
+  readonly content: string;
+  readonly hasAudit: boolean;
+}): AssistantPreviewState {
+  const hasContent = Boolean(args.content);
+  const previewLabel = args.hasAudit
+    ? (hasContent ? "正文流预览 / 审计结果" : "审计结果")
+    : "正文流预览";
+  return {
+    shouldShowPreview: hasContent || args.hasAudit,
+    previewLabel,
+    previewContent: hasContent ? args.content : "",
+  };
 }

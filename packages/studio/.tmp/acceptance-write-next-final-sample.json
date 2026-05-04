@@ -1,0 +1,146 @@
+{
+  "baseUrl": "http://localhost:4317",
+  "bookId": "诡异复苏-我在夜里斩神-白天送外卖-",
+  "projectRoot": "E:\\my-novel",
+  "sessionId": "1777143468713-1nw9tx",
+  "requestedSessionId": null,
+  "sessionCreated": true,
+  "commands": [
+    "write-next"
+  ],
+  "commandCount": 1,
+  "cases": [
+    {
+      "caseName": "write-next",
+      "runId": "write-next-20260425185748-nwkx1h",
+      "instruction": "写下一章",
+      "expectedChapters": [
+        28
+      ],
+      "startedAt": 1777143468770,
+      "endedAt": 1777143905720,
+      "elapsedMs": 436950,
+      "response": {
+        "status": 500,
+        "error": null,
+        "errorCode": "AGENT_ERROR",
+        "errorMessage": "LLM returned empty response from stream (usage=0+0)",
+        "persisted": false,
+        "addedChapterNumbers": [],
+        "addedChapterNumbersMatchExpected": false,
+        "missingChapterFiles": null,
+        "pass": false,
+        "bodyPreview": null
+      },
+      "artifacts": {
+        "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+        "perChapter": [
+          {
+            "chapter": 28,
+            "indexEntry": null,
+            "chapterFiles": [],
+            "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\28",
+            "snapshotExists": false,
+            "snapshotCurrentStateExists": false,
+            "snapshotPendingHooksExists": false,
+            "pass": false
+          }
+        ],
+        "pass": false
+      },
+      "sse": {
+        "endpoint": "http://localhost:4317/api/v1/events",
+        "eventCount": 3293,
+        "maxGapMs": 12028,
+        "maxGapFromEvent": "llm:progress",
+        "maxGapToEvent": "llm:progress",
+        "limitMs": 15000,
+        "pass": true,
+        "sampleEvents": [
+          {
+            "ts": 1777143468779,
+            "event": "thinking:start"
+          },
+          {
+            "ts": 1777143468779,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777143468779,
+            "event": "log"
+          },
+          {
+            "ts": 1777143468779,
+            "event": "thinking:delta"
+          },
+          {
+            "ts": 1777143468779,
+            "event": "tool:start"
+          },
+          {
+            "ts": 1777143468789,
+            "event": "log"
+          },
+          {
+            "ts": 1777143468816,
+            "event": "log"
+          },
+          {
+            "ts": 1777143468816,
+            "event": "log"
+          },
+          {
+            "ts": 1777143468822,
+            "event": "log"
+          },
+          {
+            "ts": 1777143480826,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777143492840,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777143504853,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777143516861,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777143528881,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777143540892,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777143552896,
+            "event": "llm:progress"
+          },
+          {
+            "ts": 1777143559113,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777143559113,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777143559113,
+            "event": "chapter:delta"
+          },
+          {
+            "ts": 1777143559113,
+            "event": "chapter:delta"
+          }
+        ]
+      },
+      "pass": false
+    }
+  ],
+  "overallPass": false
+}

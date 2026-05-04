@@ -7,6 +7,28 @@ interface ApiInvalidateDetail {
   readonly paths: ReadonlyArray<string>;
 }
 
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code?: string;
+  readonly details?: unknown;
+  readonly payload?: unknown;
+
+  constructor(args: {
+    readonly message: string;
+    readonly status: number;
+    readonly code?: string;
+    readonly details?: unknown;
+    readonly payload?: unknown;
+  }) {
+    super(args.message);
+    this.name = "ApiRequestError";
+    this.status = args.status;
+    this.code = args.code;
+    this.details = args.details;
+    this.payload = args.payload;
+  }
+}
+
 export function buildApiUrl(path: string): string | null {
   const normalized = String(path ?? "").trim();
   if (!normalized) return null;
@@ -59,28 +81,44 @@ export function invalidateApiPaths(paths: ReadonlyArray<string>): void {
   }));
 }
 
-async function readErrorMessage(res: Response): Promise<string> {
+async function readErrorPayload(res: Response): Promise<{
+  readonly message: string;
+  readonly code?: string;
+  readonly details?: unknown;
+  readonly payload?: unknown;
+}> {
   const contentType = res.headers.get("content-type") ?? "";
   if (contentType.includes("application/json")) {
     try {
-      const json = await res.json() as { error?: unknown };
+      const json = await res.json() as {
+        error?: unknown;
+        details?: unknown;
+      };
+      const payload = json as unknown;
       if (typeof json.error === "string" && json.error.trim()) {
-        return json.error;
+        return {
+          message: json.error,
+          ...(json.details !== undefined ? { details: json.details } : {}),
+          payload,
+        };
       }
-      if (
-        json.error &&
-        typeof json.error === "object" &&
-        "message" in json.error &&
-        typeof (json.error as { message?: unknown }).message === "string" &&
-        (json.error as { message: string }).message.trim()
-      ) {
-        return (json.error as { message: string }).message;
+      if (json.error && typeof json.error === "object") {
+        const err = json.error as { code?: unknown; message?: unknown };
+        const message = typeof err.message === "string" && err.message.trim()
+          ? err.message
+          : `${res.status} ${res.statusText}`.trim();
+        return {
+          message,
+          ...(typeof err.code === "string" && err.code.trim() ? { code: err.code } : {}),
+          ...(json.details !== undefined ? { details: json.details } : {}),
+          payload,
+        };
       }
     } catch {
       // fall through
     }
   }
-  return `${res.status} ${res.statusText}`.trim();
+  return { message: `${res.status} ${res.statusText}`.trim() };
 }
 
 export async function fetchJson<T>(
@@ -97,7 +135,14 @@ export async function fetchJson<T>(
   const res = await fetchImpl(url, init);
 
   if (!res.ok) {
-    throw new Error(await readErrorMessage(res));
+    const error = await readErrorPayload(res);
+    throw new ApiRequestError({
+      message: error.message,
+      status: res.status,
+      ...(error.code ? { code: error.code } : {}),
+      ...(error.details !== undefined ? { details: error.details } : {}),
+      ...(error.payload !== undefined ? { payload: error.payload } : {}),
+    });
   }
 
   if (res.status === 204) {

@@ -5,15 +5,73 @@ export interface ToolCall {
   readonly arguments: Record<string, unknown>;
 }
 
+export interface AuditSeverityCounts {
+  readonly critical: number;
+  readonly warning: number;
+  readonly info: number;
+}
+
+export type AuditFailureGate = "none" | "critical" | "score";
+
+export interface AuditDimensionCheck {
+  readonly dimension: string;
+  readonly status: "pass" | "warning" | "failed";
+  readonly evidence?: string;
+}
+
+export interface MessageAuditSummary {
+  readonly chapter: number;
+  readonly passed: boolean;
+  readonly issueCount: number;
+  readonly score: number;
+  readonly severityCounts?: AuditSeverityCounts;
+  readonly failureGate?: AuditFailureGate;
+  readonly summary?: string;
+  readonly report?: string;
+  readonly issues?: ReadonlyArray<string>;
+  readonly dimensionChecks?: ReadonlyArray<AuditDimensionCheck>;
+}
+
 export interface PipelineStage {
   label: string;
   status: "pending" | "active" | "completed";
+  activatedAt?: number;
   progress?: {
     status?: string;          // "thinking" | "streaming" | ...
     elapsedMs: number;
     totalChars: number;
     chineseChars: number;
   };
+}
+
+export interface BatchProgressState {
+  batchId: string;
+  status: "running" | "completed" | "failed";
+  total: number;
+  completed: number;
+  elapsedMs: number;
+  currentChapter?: number;
+  currentWords?: number;
+  failedChapterNumber?: number;
+  error?: string;
+}
+
+export interface AutoReviewProgressState {
+  enabled: boolean;
+  phase: "audit" | "revise";
+  round: number;
+  maxRounds: number;
+  final: boolean;
+  state?: "retrying" | "passed" | "failed-max-rounds" | "failed-single-audit";
+  stopReason?: string;
+  mode?: string;
+  strategyReason?: string;
+  passed?: boolean;
+  reviseRoundsUsed?: number;
+  failureGate?: AuditFailureGate;
+  failedDimensions?: ReadonlyArray<string>;
+  mustFixUnresolvedCount?: number;
+  mustFixTotalCount?: number;
 }
 
 export interface ToolExecution {
@@ -27,6 +85,11 @@ export interface ToolExecution {
   error?: string;
   stages?: PipelineStage[];
   logs?: string[];
+  previewText?: string;
+  previewChapterNumber?: number;
+  previewKind?: "patch";
+  batch?: BatchProgressState;
+  autoReview?: AutoReviewProgressState;
   startedAt: number;
   completedAt?: number;
 }
@@ -43,6 +106,7 @@ export interface Message {
   readonly content: string;
   readonly thinking?: string;
   readonly thinkingStreaming?: boolean;
+  readonly audit?: MessageAuditSummary;
   readonly timestamp: number;
   readonly toolCall?: ToolCall;
   readonly toolExecutions?: ToolExecution[];
@@ -53,6 +117,7 @@ export interface SessionMessage {
   readonly role: "user" | "assistant" | "system";
   readonly content: string;
   readonly thinking?: string;
+  readonly audit?: MessageAuditSummary;
   readonly timestamp: number;
 }
 
@@ -66,11 +131,19 @@ export interface SessionSummary {
 }
 
 export interface AgentResponse {
+  readonly runId?: string;
   readonly response?: string;
   readonly error?: string | { code?: string; message?: string };
   readonly details?: {
     readonly draftRaw?: string;
     readonly toolCall?: ToolCall;
+    readonly effects?: {
+      readonly writeNext?: {
+        readonly persisted?: boolean;
+        readonly addedChapterNumbers?: ReadonlyArray<number>;
+        readonly repairedChapterNumbers?: ReadonlyArray<number>;
+      };
+    };
   };
   readonly session?: {
     readonly sessionId?: string;
@@ -107,6 +180,8 @@ export interface ArtifactChapterMeta {
   readonly title: string;
   readonly status: string;
   readonly wordCount: number;
+  readonly auditIssues?: ReadonlyArray<string>;
+  readonly audit?: MessageAuditSummary;
 }
 
 export interface SessionRuntime {
@@ -116,6 +191,9 @@ export interface SessionRuntime {
   readonly messages: ReadonlyArray<Message>;
   readonly stream: EventSource | null;
   readonly isStreaming: boolean;
+  readonly isStopping: boolean;
+  readonly stoppedByUser: boolean;
+  readonly currentRunId: string | null;
   readonly lastError: string | null;
   readonly pendingBookArgs: Record<string, unknown> | null;
   // 仅前端存在、尚未持久化到磁盘的草稿会话。发送第一条消息时才调 POST /sessions 把它落盘。
@@ -164,6 +242,7 @@ export interface MessageActions {
   deleteSession: (sessionId: string) => Promise<void>;
   loadSessionDetail: (sessionId: string) => Promise<void>;
   sendMessage: (sessionId: string, text: string, activeBookId?: string) => Promise<void>;
+  stopMessage: (sessionId: string) => Promise<void>;
   setSelectedModel: (model: string, service: string) => void;
 }
 

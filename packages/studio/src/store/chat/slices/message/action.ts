@@ -3,20 +3,322 @@ import type {
   AgentResponse,
   ChatStore,
   MessageActions,
+  Message,
+  MessagePart,
   SessionResponse,
   SessionSummary,
 } from "../../types";
 import { fetchJson } from "../../../../hooks/use-api";
+import { withErrorGuidance } from "../../../../utils/error-guidance";
 import { attachSessionStreamListeners } from "./stream-events";
 import {
+  buildAgentRunId,
   bookKey,
   createSessionRuntime,
   deserializeMessages,
   extractErrorMessage,
+  isExplicitWriteNextCommand,
   mergeSessionIds,
   updateSession,
   upsertSessionSummary,
 } from "./runtime";
+
+function supportsEventSourceListeners(es: EventSource): es is EventSource & {
+  addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
+  removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
+} {
+  return typeof (es as { addEventListener?: unknown }).addEventListener === "function"
+    && typeof (es as { removeEventListener?: unknown }).removeEventListener === "function";
+}
+
+interface AgentRunStatusResponse {
+  readonly ok?: boolean;
+  readonly running?: boolean;
+  readonly sessionId?: string;
+  readonly runId?: string | null;
+  readonly startedAt?: number;
+  readonly aborted?: boolean;
+}
+
+async function waitForEventSourceReady(es: EventSource, timeoutMs = 1500): Promise<void> {
+  if (!supportsEventSourceListeners(es)) return;
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      es.removeEventListener("open", onOpen);
+      es.removeEventListener("error", onError);
+      clearTimeout(timer);
+    };
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+    const onOpen = () => finish(() => resolve());
+    const onError = () => finish(() => reject(new Error("SSE connection not ready")));
+    const timer = setTimeout(() => finish(() => reject(new Error("SSE connection timeout"))), timeoutMs);
+
+    es.addEventListener("open", onOpen);
+    es.addEventListener("error", onError);
+  });
+}
+
+async function waitForAgentTerminalEvent(
+  es: EventSource,
+  sessionId: string,
+  runId: string,
+  timeoutMs = 1200,
+): Promise<void> {
+  if (!supportsEventSourceListeners(es)) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const terminalEvents = ["agent:complete", "agent:error", "agent:stopped"] as const;
+
+    const cleanup = () => {
+      for (const eventName of terminalEvents) {
+        es.removeEventListener(eventName, onTerminal);
+      }
+      clearTimeout(timer);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const onTerminal = (event: MessageEvent) => {
+      try {
+        const data = event.data ? JSON.parse(event.data) : null;
+        if (!data || typeof data !== "object") return;
+        if ((data as { sessionId?: unknown }).sessionId !== sessionId) return;
+        if ((data as { runId?: unknown }).runId !== runId) return;
+        finish();
+      } catch {
+        // ignore malformed terminal payload and wait for timeout/next event
+      }
+    };
+    const timer = setTimeout(() => finish(), timeoutMs);
+    for (const eventName of terminalEvents) {
+      es.addEventListener(eventName, onTerminal);
+    }
+  });
+}
+
+function isTimeoutLikeError(error: unknown): boolean {
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw.toLowerCase();
+  return message.includes("timeout")
+    || message.includes("timed out")
+    || message.includes("请求超时")
+    || message.includes("后台可能仍在执行");
+}
+
+async function pollAgentRunningStatus(args: {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly retries?: number;
+  readonly intervalMs?: number;
+}): Promise<boolean> {
+  const retries = Math.max(1, Math.trunc(args.retries ?? 8));
+  const intervalMs = Math.max(120, Math.trunc(args.intervalMs ?? 800));
+  for (let i = 0; i < retries; i += 1) {
+    try {
+      const query = `/agent/status?sessionId=${encodeURIComponent(args.sessionId)}&runId=${encodeURIComponent(args.runId)}`;
+      const status = await fetchJson<AgentRunStatusResponse>(query, { method: "GET" });
+      if (status.running === true) {
+        return true;
+      }
+      if (status.running === false) {
+        return false;
+      }
+    } catch {
+      // Ignore status probe failures and continue retrying.
+    }
+    if (i < retries - 1) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+  return false;
+}
+
+function normalizeMissingChapterNumbers(details: unknown): number[] {
+  if (!details || typeof details !== "object") return [];
+  const writeIntegrity = (details as { writeIntegrity?: unknown }).writeIntegrity;
+  if (!writeIntegrity || typeof writeIntegrity !== "object") return [];
+  const missing = (writeIntegrity as { missingChapterFiles?: unknown }).missingChapterFiles;
+  if (!Array.isArray(missing)) return [];
+  return missing
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+}
+
+function normalizeIntegrityCounts(details: unknown): { beforeCount?: number; afterCount?: number } {
+  if (!details || typeof details !== "object") return {};
+  const writeIntegrity = (details as { writeIntegrity?: unknown }).writeIntegrity;
+  if (!writeIntegrity || typeof writeIntegrity !== "object") return {};
+  const beforeCountRaw = (writeIntegrity as { beforeCount?: unknown }).beforeCount;
+  const afterCountRaw = (writeIntegrity as { afterCount?: unknown }).afterCount;
+  const beforeCount = Number(beforeCountRaw);
+  const afterCount = Number(afterCountRaw);
+  return {
+    ...(Number.isFinite(beforeCount) ? { beforeCount } : {}),
+    ...(Number.isFinite(afterCount) ? { afterCount } : {}),
+  };
+}
+
+function normalizeDegradedWrite(details: unknown): {
+  degradedChapterNumbers: number[];
+  attempted: boolean;
+  attemptedChapterNumber?: number;
+  suggestion?: string;
+} {
+  if (!details || typeof details !== "object") {
+    return { degradedChapterNumbers: [], attempted: false };
+  }
+  const writeIntegrity = (details as { writeIntegrity?: unknown }).writeIntegrity;
+  const degradedFromIntegrity = writeIntegrity && typeof writeIntegrity === "object"
+    ? (writeIntegrity as { degradedChapterNumbers?: unknown }).degradedChapterNumbers
+    : undefined;
+  const degradedRecovery = (details as { degradedRecovery?: unknown }).degradedRecovery;
+  const degradedFromRecovery = degradedRecovery && typeof degradedRecovery === "object"
+    ? (degradedRecovery as { remainingDegradedChapterNumbers?: unknown }).remainingDegradedChapterNumbers
+    : undefined;
+  const chapterNumbers = Array.isArray(degradedFromRecovery)
+    ? degradedFromRecovery
+    : Array.isArray(degradedFromIntegrity)
+      ? degradedFromIntegrity
+      : [];
+  const normalizedChapterNumbers = chapterNumbers
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const attempted = degradedRecovery && typeof degradedRecovery === "object"
+    ? Boolean((degradedRecovery as { attempted?: unknown }).attempted)
+    : false;
+  const attemptedChapterNumberRaw = degradedRecovery && typeof degradedRecovery === "object"
+    ? (degradedRecovery as { attemptedChapterNumber?: unknown }).attemptedChapterNumber
+    : undefined;
+  const attemptedChapterNumber = Number(attemptedChapterNumberRaw);
+  const suggestionRaw = degradedRecovery && typeof degradedRecovery === "object"
+    ? (degradedRecovery as { suggestion?: unknown }).suggestion
+    : undefined;
+  return {
+    degradedChapterNumbers: normalizedChapterNumbers,
+    attempted,
+    ...(Number.isFinite(attemptedChapterNumber) && attemptedChapterNumber > 0
+      ? { attemptedChapterNumber }
+      : {}),
+    ...(typeof suggestionRaw === "string" && suggestionRaw.trim() ? { suggestion: suggestionRaw.trim() } : {}),
+  };
+}
+
+function mapExplicitWriteFailure(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const apiError = error as { name?: unknown; code?: unknown; details?: unknown };
+  if (apiError.name !== "ApiRequestError") return null;
+  const code = typeof apiError.code === "string" ? apiError.code : null;
+  if (code === "AGENT_WRITE_NOT_EXECUTED") {
+    return withErrorGuidance("写作失败：未触发写作器（writer），章节未生成。");
+  }
+  if (code === "AGENT_WRITE_NOT_PERSISTED") {
+    const missingChapterNumbers = normalizeMissingChapterNumbers(apiError.details);
+    if (missingChapterNumbers.length > 0) {
+      return withErrorGuidance(`写作失败：章节正文未落盘（第${missingChapterNumbers.join("、")}章）。`);
+    }
+    const { beforeCount, afterCount } = normalizeIntegrityCounts(apiError.details);
+    if (
+      typeof beforeCount === "number"
+      && typeof afterCount === "number"
+      && afterCount <= beforeCount
+    ) {
+      return withErrorGuidance("写作失败：未检测到新章节索引写入。");
+    }
+    return withErrorGuidance("写作失败：章节未完成落盘或索引更新。");
+  }
+  if (code === "AGENT_WRITE_DEGRADED") {
+    const degraded = normalizeDegradedWrite(apiError.details);
+    const chapterText = degraded.degradedChapterNumbers.length > 0
+      ? `第${degraded.degradedChapterNumbers.join("、")}章`
+      : "目标章节";
+    const recoveryText = degraded.attempted
+      ? `已自动尝试修复${degraded.attemptedChapterNumber ? `（第${degraded.attemptedChapterNumber}章）` : ""}但仍未恢复。`
+      : "未执行自动修复。";
+    return withErrorGuidance(
+      `写作降级：正文已落盘，但${chapterText}状态降级。${recoveryText}${degraded.suggestion ? ` ${degraded.suggestion}` : ""}`,
+    );
+  }
+  return null;
+}
+
+function finalizeDanglingToolStates(messages: ReadonlyArray<Message>, streamTs: number): ReadonlyArray<Message> {
+  const completedAt = Date.now();
+  return messages.map((message) => {
+    if (message.role !== "assistant" || message.timestamp !== streamTs || !message.parts?.length) {
+      return message;
+    }
+    let changed = false;
+    const parts: MessagePart[] = message.parts.map((part) => {
+      if (part.type !== "tool") return part;
+      if (part.execution.status !== "running" && part.execution.status !== "processing") return part;
+      changed = true;
+      return {
+        type: "tool" as const,
+        execution: {
+          ...part.execution,
+          status: "completed",
+          completedAt,
+          stages: part.execution.stages?.map((stage) =>
+            stage.status === "completed"
+              ? stage
+              : { ...stage, status: "completed" as const, progress: undefined },
+          ),
+          ...(part.execution.result
+            ? {}
+            : {
+                result: part.execution.logs?.at(-1)?.trim()
+                  || "completed",
+              }),
+        },
+      };
+    });
+    if (!changed) return message;
+    return {
+      ...message,
+      parts,
+      toolExecutions: parts
+        .filter((part): part is Extract<MessagePart, { type: "tool" }> => part.type === "tool")
+        .map((part) => part.execution),
+    };
+  });
+}
+
+function finalizeSessionStreamState(
+  set: Parameters<StateCreator<ChatStore, [], [], MessageActions>>[0],
+  sessionId: string,
+  streamTs: number,
+  streamEs: EventSource,
+  runId: string,
+): void {
+  set((state) => ({
+    sessions: updateSession(state.sessions, sessionId, (runtime) => {
+      const shouldFinalizeMessages = runtime.currentRunId === runId;
+      const shouldCloseStreamingFlags = runtime.currentRunId === runId;
+      return {
+        ...(shouldFinalizeMessages
+          ? { messages: finalizeDanglingToolStates(runtime.messages, streamTs) }
+          : {}),
+        ...(shouldCloseStreamingFlags
+          ? {
+              isStreaming: false,
+              isStopping: false,
+              currentRunId: null,
+            }
+          : {}),
+        stream: runtime.stream === streamEs ? null : runtime.stream,
+      };
+    }),
+  }));
+}
 
 export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions> = (set, get) => ({
   activateSession: (sessionId) =>
@@ -287,10 +589,50 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     }
   },
 
+  stopMessage: async (sessionId) => {
+    const session = get().sessions[sessionId];
+    if (!session) return;
+
+    const runId = session.currentRunId;
+    session.stream?.close();
+
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, () => ({
+        stream: null,
+        isStreaming: false,
+        isStopping: true,
+        stoppedByUser: true,
+        currentRunId: null,
+      })),
+    }));
+
+    if (!runId) {
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, () => ({ isStopping: false })),
+      }));
+      return;
+    }
+
+    try {
+      await fetchJson("/agent/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, runId }),
+      });
+    } catch {
+      // Ignore stop failures: local UI already switched to stopped state.
+    } finally {
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, () => ({ isStopping: false })),
+      }));
+    }
+  },
+
   sendMessage: async (sessionId, text, activeBookId) => {
     const trimmed = text.trim();
     const session = get().sessions[sessionId];
     if (!trimmed || !session || session.isStreaming) return;
+    const expectsPersistedWrite = Boolean(activeBookId && isExplicitWriteNextCommand(trimmed));
 
     if (!get().selectedModel) {
       get().addUserMessage(sessionId, trimmed);
@@ -328,12 +670,16 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
 
     const instruction = activeBookId ? trimmed : `/new ${trimmed}`;
     const streamTs = Date.now() + 1;
+    const runId = buildAgentRunId();
 
     set((state) => ({
       input: "",
       activeSessionId: sessionId,
       sessions: updateSession(state.sessions, sessionId, () => ({
         isStreaming: true,
+        isStopping: false,
+        stoppedByUser: false,
+        currentRunId: runId,
         lastError: null,
       })),
     }));
@@ -344,9 +690,17 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, () => ({ stream: streamEs })),
     }));
-    attachSessionStreamListeners({ sessionId, streamTs, streamEs, set, get });
+    attachSessionStreamListeners({ sessionId, runId, streamTs, streamEs, set, get });
 
     try {
+      // Reduce race window where early SSE events (tool:start/log/chapter:delta) are emitted
+      // before the browser stream is fully opened.
+      try {
+        await waitForEventSourceReady(streamEs, 1500);
+      } catch {
+        // Do not block request on flaky networks; runtime fallback handlers still recover.
+      }
+
       const data = await fetchJson<AgentResponse>("/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -354,21 +708,43 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           instruction,
           activeBookId,
           sessionId,
+          runId,
           model: get().selectedModel ?? undefined,
           service: get().selectedService ?? undefined,
         }),
       });
 
-      streamEs.close();
+      if (get().sessions[sessionId]?.currentRunId !== runId) {
+        return;
+      }
+      const persistedWrite = (data.details as {
+        effects?: { writeNext?: { persisted?: boolean } };
+      } | undefined)?.effects?.writeNext?.persisted === true;
+      if (expectsPersistedWrite && !persistedWrite) {
+        const writeError = withErrorGuidance("写作失败：未确认章节落盘（缺少 persisted 信号）。");
+        const hasStream = Boolean(
+          get().sessions[sessionId]?.messages.some(
+            (message) => message.timestamp === streamTs && message.role === "assistant",
+          ),
+        );
+        if (hasStream) {
+          get().replaceStreamWithError(sessionId, streamTs, writeError);
+        } else {
+          get().addErrorMessage(sessionId, writeError);
+        }
+        return;
+      }
 
       const finalContent = data.details?.draftRaw || data.response || "";
       const toolCall = data.details?.toolCall ?? undefined;
       const hasStream = Boolean(
-        get().sessions[sessionId]?.messages.some((message) => message.timestamp === streamTs),
+        get().sessions[sessionId]?.messages.some(
+          (message) => message.timestamp === streamTs && message.role === "assistant",
+        ),
       );
 
       if (data.error) {
-        const errorMessage = extractErrorMessage(data.error);
+        const errorMessage = withErrorGuidance(extractErrorMessage(data.error));
         if (hasStream) {
           get().replaceStreamWithError(sessionId, streamTs, errorMessage);
         } else {
@@ -400,7 +776,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           }));
         }
       } else {
-        const emptyMessage = "模型未返回文本内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。";
+        const emptyMessage = withErrorGuidance(
+          "模型未返回文本内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。",
+        );
         if (hasStream) {
           get().replaceStreamWithError(sessionId, streamTs, emptyMessage);
         } else {
@@ -408,10 +786,21 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         }
       }
     } catch (error) {
-      streamEs.close();
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (get().sessions[sessionId]?.currentRunId !== runId) {
+        return;
+      }
+      if (isTimeoutLikeError(error)) {
+        const stillRunning = await pollAgentRunningStatus({ sessionId, runId });
+        if (stillRunning && get().sessions[sessionId]?.currentRunId === runId) {
+          return;
+        }
+      }
+      const mappedWriteError = expectsPersistedWrite ? mapExplicitWriteFailure(error) : null;
+      const errorMessage = mappedWriteError ?? withErrorGuidance(error instanceof Error ? error.message : String(error));
       const hasStream = Boolean(
-        get().sessions[sessionId]?.messages.some((message) => message.timestamp === streamTs),
+        get().sessions[sessionId]?.messages.some(
+          (message) => message.timestamp === streamTs && message.role === "assistant",
+        ),
       );
       if (hasStream) {
         get().replaceStreamWithError(sessionId, streamTs, errorMessage);
@@ -419,12 +808,16 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         get().addErrorMessage(sessionId, errorMessage);
       }
     } finally {
-      set((state) => ({
-        sessions: updateSession(state.sessions, sessionId, (runtime) => ({
-          isStreaming: false,
-          stream: runtime.stream === streamEs ? null : runtime.stream,
-        })),
-      }));
+      const shouldWaitForTerminal = get().sessions[sessionId]?.currentRunId === runId;
+      if (shouldWaitForTerminal) {
+        try {
+          await waitForAgentTerminalEvent(streamEs, sessionId, runId, 1200);
+        } catch {
+          // no-op: timeout fallback still closes stream below
+        }
+      }
+      streamEs.close();
+      finalizeSessionStreamState(set, sessionId, streamTs, streamEs, runId);
     }
   },
 });

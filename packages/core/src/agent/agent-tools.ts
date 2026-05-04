@@ -44,7 +44,7 @@ function resolveToolBookId(
   paramsBookId: string | undefined,
   activeBookId: string | null,
 ): string {
-  const resolvedBookId = paramsBookId ?? activeBookId ?? undefined;
+  const resolvedBookId = normalizeBookIdInput(paramsBookId) ?? normalizeBookIdInput(activeBookId ?? undefined);
   if (!resolvedBookId) {
     throw new Error(`${toolName} requires bookId when there is no active book.`);
   }
@@ -56,21 +56,108 @@ function createDeterministicInteractionTools(pipeline: PipelineRunner, projectRo
   return createInteractionToolsFromDeps(pipeline, state);
 }
 
+type AuditSeverity = "critical" | "warning" | "info";
+
+function normalizeAuditSeverity(input: unknown): AuditSeverity {
+  const value = String(input ?? "").trim().toLowerCase();
+  if (value === "critical" || value === "error" || value === "严重") return "critical";
+  if (value === "warning" || value === "warn" || value === "警告") return "warning";
+  return "info";
+}
+
+function auditSeverityRank(severity: AuditSeverity): number {
+  if (severity === "critical") return 0;
+  if (severity === "warning") return 1;
+  return 2;
+}
+
+function estimateAuditScore(counts: Readonly<Record<AuditSeverity, number>>): number {
+  const raw = 100 - counts.critical * 35 - counts.warning * 12 - counts.info * 4;
+  return Math.max(0, Math.min(100, raw));
+}
+
+function formatAuditIssueLine(issue: { severity?: unknown; category?: unknown; description?: unknown }): string {
+  const severity = normalizeAuditSeverity(issue.severity);
+  const category = String(issue.category ?? "").trim();
+  const description = String(issue.description ?? "").trim();
+  const body = category && description
+    ? `${category}: ${description}`
+    : category || description || "未提供问题描述";
+  return `[${severity}] ${body}`;
+}
+
+function buildSubAgentAuditReport(args: {
+  readonly chapterNumber: number;
+  readonly passed: boolean;
+  readonly summary?: string;
+  readonly issues: ReadonlyArray<{ severity?: unknown; category?: unknown; description?: unknown }>;
+}): string {
+  const normalized = args.issues
+    .map((issue) => ({
+      severity: normalizeAuditSeverity(issue.severity),
+      category: String(issue.category ?? "").trim(),
+      description: String(issue.description ?? "").trim(),
+    }))
+    .sort((left, right) => auditSeverityRank(left.severity) - auditSeverityRank(right.severity));
+  const counts = normalized.reduce<Record<AuditSeverity, number>>(
+    (acc, issue) => {
+      acc[issue.severity] += 1;
+      return acc;
+    },
+    { critical: 0, warning: 0, info: 0 },
+  );
+  const score = estimateAuditScore(counts);
+  const issueCount = normalized.length;
+  const header = args.passed
+    ? issueCount > 0
+      ? `第${args.chapterNumber}章审计通过，发现${issueCount}项非阻断问题。`
+      : `第${args.chapterNumber}章审计通过。`
+    : `第${args.chapterNumber}章审计未通过，共${issueCount}项问题。`;
+
+  const lines = [header];
+  lines.push(`审计评分：${score}/100（严重 ${counts.critical} / 警告 ${counts.warning} / 提示 ${counts.info}）`);
+  const summary = args.summary?.trim();
+  if (summary) {
+    lines.push(`审计报告：${summary}`);
+  }
+  if (normalized.length > 0) {
+    const grouped: Record<AuditSeverity, string[]> = { critical: [], warning: [], info: [] };
+    for (const issue of normalized) {
+      grouped[issue.severity].push(formatAuditIssueLine(issue));
+    }
+    lines.push("问题清单：");
+    if (grouped.critical.length > 0) {
+      lines.push("严重：");
+      grouped.critical.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+    }
+    if (grouped.warning.length > 0) {
+      lines.push("警告：");
+      grouped.warning.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+    }
+    if (grouped.info.length > 0) {
+      lines.push("提示：");
+      grouped.info.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+    }
+  }
+  return lines.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // 1. SubAgentTool (sub_agent)
 // ---------------------------------------------------------------------------
 
 const SubAgentParams = Type.Object({
-  agent: Type.Union([
+  agent: Type.Optional(Type.Union([
     Type.Literal("architect"),
     Type.Literal("writer"),
     Type.Literal("auditor"),
     Type.Literal("reviser"),
     Type.Literal("exporter"),
-  ]),
-  instruction: Type.String({ description: "Natural language instruction for the sub-agent" }),
+  ])),
+  instruction: Type.Optional(Type.String({ description: "Natural language instruction for the sub-agent. Required for architect, optional for others." })),
   bookId: Type.Optional(Type.String({ description: "Book ID — required for all agents except architect" })),
   chapterNumber: Type.Optional(Type.Number({ description: "auditor/reviser: target chapter number. Omit to use the latest chapter." })),
+  chapterCount: Type.Optional(Type.Number({ description: "writer only: number of consecutive chapters to write. Default: 1." })),
   // -- architect params --
   title: Type.Optional(Type.String({ description: "architect only: explicit book title. Required when creating a book." })),
   genre: Type.Optional(Type.String({ description: "architect only: genre (xuanhuan, urban, mystery, romance, scifi, fantasy, wuxia, general, etc.)" })),
@@ -112,10 +199,59 @@ function deriveBookIdFromTitle(title: string): string {
     .slice(0, 30);
 }
 
+function normalizeBookIdInput(bookId: string | undefined): string | undefined {
+  if (bookId === undefined) return undefined;
+  const normalized = bookId.trim()
+    .replace(/^[\\/]+/, "")
+    .replace(/^books(?:[\\/]|$)/i, "");
+  if (!normalized) {
+    throw new Error("Invalid bookId: empty value.");
+  }
+  if (/[\\/]/.test(normalized)) {
+    throw new Error(`Invalid bookId "${bookId}". bookId must not contain path separators.`);
+  }
+  return normalized;
+}
+
+const REVISION_INTENT_RE = /(修订|重订|修改|改写|重写|润色|精修|polish|rewrite|rework|revise|spot-fix|anti-detect|fix)/i;
+const REWRITE_INTENT_RE = /(重写|rewrite|rework)/i;
+
+function inferSubAgentFromInstruction(instruction: string): Static<typeof SubAgentParams>["agent"] | undefined {
+  const text = instruction.trim().toLowerCase();
+  if (!text) return undefined;
+  if (/(导出|export|epub|\bmd\b|markdown|txt)/i.test(text)) return "exporter";
+  if (/(审计|审核|audit)/i.test(text)) return "auditor";
+  if (REVISION_INTENT_RE.test(text)) return "reviser";
+  if (/(继续写|写下一章|再来一章|continue|write next|next chapter)/i.test(text)) return "writer";
+  if (/(建书|创建|新书|create book|init book|architect)/i.test(text)) return "architect";
+  return undefined;
+}
+
+function inferChapterNumberFromInstruction(instruction: string): number | undefined {
+  const zh = instruction.match(/(?:第\s*)?(\d+)\s*章/);
+  if (zh?.[1]) return parseInt(zh[1], 10);
+  const en = instruction.match(/chapter\s*(\d+)/i);
+  if (en?.[1]) return parseInt(en[1], 10);
+  return undefined;
+}
+
+function inferChapterCountFromInstruction(instruction: string): number | undefined {
+  const zh = instruction.match(/(?:连续|连写|一口气写|再写|写)\s*(\d+)\s*章/);
+  if (zh?.[1]) return parseInt(zh[1], 10);
+  const en = instruction.match(/(?:write|continue)\s*(\d+)\s*chapters?/i);
+  if (en?.[1]) return parseInt(en[1], 10);
+  return undefined;
+}
+
+function inferRevisionModeFromInstruction(instruction: string): ReviseMode {
+  return REWRITE_INTENT_RE.test(instruction) ? "rewrite" : "spot-fix";
+}
+
 export function createSubAgentTool(
   pipeline: PipelineRunner,
   activeBookId: string | null,
   projectRoot?: string,
+  resolveTurnInstruction?: () => string | undefined,
 ): AgentTool<typeof SubAgentParams> {
   return {
     name: "sub_agent",
@@ -131,23 +267,53 @@ export function createSubAgentTool(
       _signal?: AbortSignal,
       onUpdate?: AgentToolUpdateCallback,
     ): Promise<AgentToolResult<undefined>> {
-      const { agent, instruction, bookId, title, chapterNumber, genre, platform, language, targetChapters, chapterWordCount, mode, format, approvedOnly } = params;
+      const { agent, instruction: rawInstruction, bookId, title, chapterNumber, chapterCount, genre, platform, language, targetChapters, chapterWordCount, mode, format, approvedOnly } = params;
+      const fallbackInstruction = resolveTurnInstruction?.()?.trim() ?? "";
+      const instruction = rawInstruction?.trim() || fallbackInstruction;
+      const resolvedAgent = agent ?? inferSubAgentFromInstruction(instruction);
+      const resolvedChapterNumber = chapterNumber ?? inferChapterNumberFromInstruction(instruction);
+      const resolvedChapterCount = chapterCount ?? inferChapterCountFromInstruction(instruction);
+      let resolvedBookId: string | undefined;
 
       const progress = (msg: string) => {
         onUpdate?.(textResult(msg));
       };
 
       try {
-        switch (agent) {
+        resolvedBookId = normalizeBookIdInput(bookId) ?? normalizeBookIdInput(activeBookId ?? undefined);
+      } catch (err: any) {
+        return textResult(err?.message ?? String(err));
+      }
+
+      try {
+        if (!rawInstruction?.trim() && instruction) {
+          progress("sub_agent call omitted instruction; recovered from current user request.");
+        }
+        if (!agent && resolvedAgent) {
+          progress(`sub_agent call omitted agent; inferred agent="${resolvedAgent}".`);
+        }
+        if (chapterNumber === undefined && resolvedChapterNumber !== undefined) {
+          progress(`sub_agent call omitted chapterNumber; inferred chapterNumber=${resolvedChapterNumber}.`);
+        }
+        if (chapterCount === undefined && resolvedChapterCount !== undefined) {
+          progress(`sub_agent call omitted chapterCount; inferred chapterCount=${resolvedChapterCount}.`);
+        }
+
+        if (!resolvedAgent) {
+          return textResult(
+            "Error: agent is required for sub_agent. Use one of: architect, writer, auditor, reviser, exporter.",
+          );
+        }
+        switch (resolvedAgent) {
           case "architect": {
-            if (activeBookId) {
+            if (resolvedBookId) {
               return textResult("当前已有书籍，不需要建书。如果你想创建新书，请先回到首页。");
             }
             const resolvedTitle = title?.trim();
             if (!resolvedTitle) {
               return textResult('Error: title is required for the architect agent.');
             }
-            const id = bookId || deriveBookIdFromTitle(resolvedTitle) || `book-${Date.now().toString(36)}`;
+            const id = normalizeBookIdInput(bookId) || deriveBookIdFromTitle(resolvedTitle) || `book-${Date.now().toString(36)}`;
             const now = new Date().toISOString();
             progress(`Starting architect for book "${id}"...`);
             await pipeline.initBook(
@@ -170,41 +336,90 @@ export function createSubAgentTool(
           }
 
           case "writer": {
-            if (!bookId) return textResult("Error: bookId is required for the writer agent.");
-            progress(`Writing next chapter for "${bookId}"...`);
-            const result = await pipeline.writeNextChapter(bookId, chapterWordCount);
-            progress(`Writer finished chapter for "${bookId}".`);
+            if (!resolvedBookId) return textResult("Error: bookId is required for the writer agent.");
+            if (instruction && resolvedChapterNumber !== undefined && REVISION_INTENT_RE.test(instruction)) {
+              const reroutedMode: ReviseMode = (mode as ReviseMode) ?? inferRevisionModeFromInstruction(instruction);
+              progress(
+                `Detected chapter-revision instruction; rerouting to reviser for chapter ${resolvedChapterNumber} (${reroutedMode}).`,
+              );
+              await pipeline.reviseDraft(resolvedBookId, resolvedChapterNumber, reroutedMode);
+              progress(`Revision complete for "${resolvedBookId}".`);
+              return textResult(
+                `Revision (${reroutedMode}) complete for "${resolvedBookId}" chapter ${resolvedChapterNumber}.`,
+              );
+            }
+            const batchCount = Math.max(1, resolvedChapterCount ?? 1);
+            if (batchCount === 1) {
+              progress(`Writing next chapter for "${resolvedBookId}"...`);
+              const result = await pipeline.writeNextChapter(resolvedBookId, chapterWordCount);
+              progress(`Writer finished chapter for "${resolvedBookId}".`);
+              return textResult(
+                `Chapter written for "${resolvedBookId}". ` +
+                `Word count: ${(result as any).wordCount ?? "unknown"}.`,
+              );
+            }
+
+            progress(`Writing ${batchCount} consecutive chapters for "${resolvedBookId}"...`);
+            let completed = 0;
+            let firstChapterNumber: number | null = null;
+            let lastChapterNumber: number | null = null;
+            let totalWords = 0;
+            while (completed < batchCount) {
+              try {
+                const result = await pipeline.writeNextChapter(resolvedBookId, chapterWordCount);
+                completed += 1;
+                const chapterNum = Number((result as any).chapterNumber ?? 0);
+                const words = Number((result as any).wordCount ?? 0);
+                if (firstChapterNumber === null && Number.isFinite(chapterNum) && chapterNum > 0) {
+                  firstChapterNumber = chapterNum;
+                }
+                if (Number.isFinite(chapterNum) && chapterNum > 0) {
+                  lastChapterNumber = chapterNum;
+                }
+                if (Number.isFinite(words) && words > 0) {
+                  totalWords += words;
+                }
+                progress(
+                  `Writer progress ${completed}/${batchCount}: chapter ${Number.isFinite(chapterNum) && chapterNum > 0 ? chapterNum : "unknown"} (${Number.isFinite(words) && words > 0 ? words : "unknown"} words).`,
+                );
+              } catch (error: any) {
+                const message = error instanceof Error ? error.message : String(error);
+                throw new Error(`Batch write failed after ${completed}/${batchCount} chapters: ${message}`);
+              }
+            }
+            progress(`Writer batch finished for "${resolvedBookId}".`);
             return textResult(
-              `Chapter written for "${bookId}". ` +
-              `Word count: ${(result as any).wordCount ?? "unknown"}.`,
+              `Batch write complete for "${resolvedBookId}": ${completed} chapters` +
+              (firstChapterNumber && lastChapterNumber ? ` (chapter ${firstChapterNumber}-${lastChapterNumber})` : "") +
+              (totalWords > 0 ? `, ${totalWords} words total.` : "."),
             );
           }
 
           case "auditor": {
-            if (!bookId) return textResult("Error: bookId is required for the auditor agent.");
-            progress(`Auditing chapter ${chapterNumber ?? "latest"} for "${bookId}"...`);
-            const audit = await pipeline.auditDraft(bookId, chapterNumber);
-            progress(`Audit complete for "${bookId}".`);
-            const issueLines = (audit.issues ?? [])
-              .map((i: any) => `[${i.severity}] ${i.description}`)
-              .join("\n");
-            return textResult(
-              `Audit chapter ${audit.chapterNumber}: ${audit.passed ? "PASSED" : "FAILED"}, ${(audit.issues ?? []).length} issue(s).` +
-              (issueLines ? `\n${issueLines}` : ""),
-            );
+            if (!resolvedBookId) return textResult("Error: bookId is required for the auditor agent.");
+            progress(`Auditing chapter ${resolvedChapterNumber ?? "latest"} for "${resolvedBookId}"...`);
+            const audit = await pipeline.auditDraft(resolvedBookId, resolvedChapterNumber);
+            const auditIssues = Array.isArray(audit.issues) ? audit.issues : [];
+            progress(`Audit complete for "${resolvedBookId}".`);
+            return textResult(buildSubAgentAuditReport({
+              chapterNumber: audit.chapterNumber ?? resolvedChapterNumber ?? 0,
+              passed: audit.passed,
+              summary: audit.summary,
+              issues: auditIssues,
+            }));
           }
 
           case "reviser": {
-            if (!bookId) return textResult("Error: bookId is required for the reviser agent.");
+            if (!resolvedBookId) return textResult("Error: bookId is required for the reviser agent.");
             const resolvedMode: ReviseMode = (mode as ReviseMode) ?? "spot-fix";
-            progress(`Revising "${bookId}" chapter ${chapterNumber ?? "latest"} in ${resolvedMode} mode...`);
-            await pipeline.reviseDraft(bookId, chapterNumber, resolvedMode);
-            progress(`Revision complete for "${bookId}".`);
-            return textResult(`Revision (${resolvedMode}) complete for "${bookId}" chapter ${chapterNumber ?? "latest"}.`);
+            progress(`Revising "${resolvedBookId}" chapter ${resolvedChapterNumber ?? "latest"} in ${resolvedMode} mode...`);
+            await pipeline.reviseDraft(resolvedBookId, resolvedChapterNumber, resolvedMode);
+            progress(`Revision complete for "${resolvedBookId}".`);
+            return textResult(`Revision (${resolvedMode}) complete for "${resolvedBookId}" chapter ${resolvedChapterNumber ?? "latest"}.`);
           }
 
           case "exporter": {
-            if (!bookId) return textResult("Error: bookId is required for the exporter agent.");
+            if (!resolvedBookId) return textResult("Error: bookId is required for the exporter agent.");
             if (!projectRoot) return textResult("Error: exporter requires projectRoot.");
             const inferredFormat = format ?? (/epub/i.test(instruction)
               ? "epub"
@@ -213,21 +428,24 @@ export function createSubAgentTool(
                 : "txt");
             const exportApprovedOnly = approvedOnly ?? /approved|已通过|通过章节/.test(instruction);
             const state = new StateManager(projectRoot);
-            const result = await writeExportArtifact(state, bookId, {
+            const result = await writeExportArtifact(state, resolvedBookId, {
               format: inferredFormat,
               approvedOnly: exportApprovedOnly,
             });
             return textResult(
-              `Exported "${bookId}": ${result.chaptersExported} chapters, ${result.totalWords} words → ${result.outputPath}`,
+              `Exported "${resolvedBookId}": ${result.chaptersExported} chapters, ${result.totalWords} words → ${result.outputPath}`,
             );
           }
 
           default:
-            return textResult(`Unknown agent: ${agent}`);
+            return textResult(`Unknown agent: ${resolvedAgent}`);
         }
       } catch (err: any) {
-        console.error(`[sub_agent] "${agent}" failed:`, err);
-        return textResult(`Sub-agent "${agent}" failed: ${err?.message ?? String(err)}`);
+        console.error(`[sub_agent] "${resolvedAgent}" failed:`, err);
+        if (err instanceof Error) {
+          throw err;
+        }
+        throw new Error(`Sub-agent "${resolvedAgent}" failed: ${err?.message ?? String(err)}`);
       }
     },
   };

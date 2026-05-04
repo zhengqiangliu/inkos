@@ -144,7 +144,11 @@ describe("persistChapterArtifacts", () => {
       baseStatus: "audit-failed",
       injectedIssues: ["[warning] state mismatch"],
     });
-    expect(persistAuditDriftGuidance).toHaveBeenCalledWith([]);
+    expect(persistAuditDriftGuidance).toHaveBeenCalledWith([
+      expect.objectContaining({
+        description: "audit issue",
+      }),
+    ]);
     expect(logSnapshotStage).not.toHaveBeenCalled();
     expect(snapshotState).not.toHaveBeenCalled();
     expect(syncCurrentStateFactHistory).not.toHaveBeenCalled();

@@ -46,12 +46,22 @@ import { join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
+import { countChapterLengthByLanguage } from "../utils/chapter-length.js";
+import {
+  AUDIT_PASS_SCORE_THRESHOLD,
+  clampAuditScore,
+  estimateAuditScoreFromSeverityCounts,
+  resolveAuditFailureGate,
+  resolveAuditPassedByScore,
+  type AuditFailureGate,
+  type AuditSeverityCounts,
+} from "../utils/audit-score.js";
 
 // -- Pipeline stage definitions per agent type --
 
 const PIPELINE_STAGES: Record<string, string[]> = {
   writer: [
-    "准备章节输入", "撰写章节草稿", "落盘最终章节",
+    "准备章节输入", "撰写章节草稿", "正文清洗与校验", "落盘最终章节",
     "生成最终真相文件", "校验真相文件变更", "同步记忆索引",
     "更新章节索引与快照",
   ],
@@ -61,6 +71,10 @@ const PIPELINE_STAGES: Record<string, string[]> = {
   ],
   reviser: [
     "加载修订上下文", "修订章节", "落盘修订结果",
+    "更新索引与快照",
+  ],
+  rewrite: [
+    "加载重写上下文", "重写章节", "落盘重写结果",
     "更新索引与快照",
   ],
   auditor: ["审计章节"],
@@ -73,6 +87,12 @@ const AGENT_LABELS: Record<string, string> = {
 const TOOL_LABELS: Record<string, string> = {
   read: "读取文件", edit: "编辑文件", grep: "搜索", ls: "列目录",
 };
+const WRITE_STAGE_HEARTBEAT_MS = 3_000;
+const MAX_STAGE_SILENCE_MS = 15_000;
+
+function resolveWriteStageHeartbeatMs(): number {
+  return Math.min(WRITE_STAGE_HEARTBEAT_MS, MAX_STAGE_SILENCE_MS);
+}
 
 function resolveToolLabel(tool: string, agent?: string): string {
   if (tool === "sub_agent" && agent) return AGENT_LABELS[agent] ?? agent;
@@ -85,6 +105,21 @@ function summarizeResult(result: unknown): string {
     const r = result as Record<string, unknown>;
     if (typeof r.content === "string") return r.content.slice(0, 200);
     if (typeof r.text === "string") return r.text.slice(0, 200);
+    if (Array.isArray(r.content)) {
+      const text = r.content
+        .filter((item): item is { type?: unknown; text?: unknown } => !!item && typeof item === "object")
+        .filter((item) => item.type === "text" && typeof item.text === "string")
+        .map((item) => String(item.text).trim())
+        .filter(Boolean)
+        .join("\n");
+      if (text) return text.slice(0, 200);
+    }
+    try {
+      const serialized = JSON.stringify(result);
+      if (serialized && serialized !== "{}") return serialized.slice(0, 200);
+    } catch {
+      // ignore stringify errors and fall back below
+    }
   }
   return String(result).slice(0, 200);
 }
@@ -94,12 +129,1822 @@ function extractToolError(result: unknown): string {
   if (result && typeof result === "object") {
     const r = result as Record<string, unknown>;
     if (typeof r.content === "string") return r.content.slice(0, 500);
+    if (typeof r.text === "string") return r.text.slice(0, 500);
     if (r.content && Array.isArray(r.content)) {
       const textPart = r.content.find((c: any) => c.type === "text");
       if (textPart) return (textPart as any).text?.slice(0, 500) ?? "";
     }
+    try {
+      const serialized = JSON.stringify(result);
+      if (serialized && serialized !== "{}") return serialized.slice(0, 500);
+    } catch {
+      // ignore stringify errors and fall back below
+    }
   }
   return String(result).slice(0, 500);
+}
+
+function shouldSuppressStageHeartbeatLog(message: string): boolean {
+  return /（进行中\s*\d+s）|\(\d+s elapsed\)/i.test(message);
+}
+
+function inferChapterNumberFromText(message: string): number | undefined {
+  const zhMatch = message.match(/第\s*(\d+)\s*章/i);
+  if (zhMatch?.[1]) {
+    const value = Number(zhMatch[1]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const zhSectionMatch = message.match(/章节\s*(\d+)/i);
+  if (zhSectionMatch?.[1]) {
+    const value = Number(zhSectionMatch[1]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const enMatch = message.match(/\bchapter\s*(\d+)\b/i);
+  if (enMatch?.[1]) {
+    const value = Number(enMatch[1]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
+}
+
+function hasLogContextPrefix(message: string): boolean {
+  return /^\[run:[^\]]+\]/i.test(message);
+}
+
+function withLogContext(args: {
+  readonly message: string;
+  readonly runId?: string;
+  readonly chapterNumber?: number;
+}): { message: string; chapterNumber?: number } {
+  const raw = args.message.trim();
+  if (!raw) return { message: args.message };
+  if (hasLogContextPrefix(raw)) {
+    const chapterNumber = inferChapterNumberFromText(raw);
+    return Number.isFinite(chapterNumber) && (chapterNumber ?? 0) > 0
+      ? { message: raw, chapterNumber }
+      : { message: raw };
+  }
+  const chapterNumber = Number.isFinite(args.chapterNumber)
+    ? Number(args.chapterNumber)
+    : inferChapterNumberFromText(raw);
+  const context = [
+    args.runId ? `[run:${args.runId}]` : null,
+    Number.isFinite(chapterNumber) && (chapterNumber ?? 0) > 0 ? `[chapter:${chapterNumber}]` : null,
+  ].filter(Boolean).join("");
+  return {
+    message: context ? `${context} ${raw}` : raw,
+    ...(Number.isFinite(chapterNumber) && (chapterNumber ?? 0) > 0 ? { chapterNumber } : {}),
+  };
+}
+
+function extractToolUpdateText(partialResult: unknown): string | null {
+  if (typeof partialResult === "string") {
+    const text = partialResult.trim();
+    return text.length > 0 ? text : null;
+  }
+  if (!partialResult || typeof partialResult !== "object") return null;
+  const payload = partialResult as { text?: unknown; content?: unknown };
+  if (typeof payload.text === "string") {
+    const text = payload.text.trim();
+    if (text) return text;
+  }
+  if (typeof payload.content === "string") {
+    const text = payload.content.trim();
+    if (text) return text;
+  }
+  if (Array.isArray(payload.content)) {
+    const text = payload.content
+      .filter((item): item is { type?: unknown; text?: unknown } => !!item && typeof item === "object")
+      .filter((item) => item.type === "text" && typeof item.text === "string")
+      .map((item) => String(item.text).trim())
+      .filter(Boolean)
+      .join("\n");
+    return text || null;
+  }
+  return null;
+}
+
+type AuditSeverity = "critical" | "warning" | "info";
+type ReviewEntry = "write-next" | "write-target" | "rewrite";
+
+interface NormalizedAuditIssue {
+  readonly severity: AuditSeverity;
+  readonly text: string;
+}
+
+function normalizeAuditSeverity(raw: unknown): AuditSeverity {
+  if (typeof raw !== "string") return "info";
+  const value = raw.trim().toLowerCase();
+  if (value === "critical" || value === "error" || value === "严重" || value === "高危") return "critical";
+  if (value === "warning" || value === "warn" || value === "警告" || value === "中危") return "warning";
+  return "info";
+}
+
+function auditSeverityRank(severity: AuditSeverity): number {
+  if (severity === "critical") return 0;
+  if (severity === "warning") return 1;
+  return 2;
+}
+
+function parseAuditIssueText(raw: string): NormalizedAuditIssue | null {
+  const line = raw.trim();
+  if (!line) return null;
+  const match = line.match(/^\[([^\]]+)\]\s*(.+)$/);
+  if (!match?.[1] || !match[2]) {
+    return { severity: "info", text: line };
+  }
+  const severity = normalizeAuditSeverity(match[1]);
+  const text = match[2].trim();
+  if (!text) return null;
+  return { severity, text };
+}
+
+function normalizeAuditIssue(issue: unknown): NormalizedAuditIssue | null {
+  if (!issue || typeof issue !== "object") return null;
+  const payload = issue as {
+    severity?: unknown;
+    category?: unknown;
+    description?: unknown;
+  };
+  const severity = normalizeAuditSeverity(payload.severity);
+  const category = typeof payload.category === "string" && payload.category.trim()
+    ? payload.category.trim()
+    : "";
+  const description = typeof payload.description === "string" && payload.description.trim()
+    ? payload.description.trim()
+    : "";
+  if (!description) return null;
+  return {
+    severity,
+    text: category ? `${category}: ${description}` : description,
+  };
+}
+
+function formatAuditIssueText(issue: NormalizedAuditIssue): string {
+  return `[${issue.severity}] ${issue.text}`;
+}
+
+function buildAuditIssueTexts(issues: unknown, limit = 24): string[] {
+  if (!Array.isArray(issues)) return [];
+  const normalized = issues
+    .map((issue) => normalizeAuditIssue(issue))
+    .filter((issue): issue is NormalizedAuditIssue => Boolean(issue))
+    .sort((left, right) => auditSeverityRank(left.severity) - auditSeverityRank(right.severity));
+  return normalized.slice(0, limit).map((issue) => formatAuditIssueText(issue));
+}
+
+function countAuditIssueSeverities(issueTexts: ReadonlyArray<string>): AuditSeverityCounts {
+  let critical = 0;
+  let warning = 0;
+  let info = 0;
+  for (const item of issueTexts) {
+    const parsed = parseAuditIssueText(item);
+    if (!parsed) continue;
+    if (parsed.severity === "critical") critical += 1;
+    else if (parsed.severity === "warning") warning += 1;
+    else info += 1;
+  }
+  return { critical, warning, info };
+}
+
+function countAuditIssueSeveritiesFromIssues(issues: unknown): AuditSeverityCounts {
+  if (!Array.isArray(issues)) return { critical: 0, warning: 0, info: 0 };
+  let critical = 0;
+  let warning = 0;
+  let info = 0;
+  for (const issue of issues) {
+    const normalized = normalizeAuditIssue(issue);
+    if (!normalized) continue;
+    if (normalized.severity === "critical") critical += 1;
+    else if (normalized.severity === "warning") warning += 1;
+    else info += 1;
+  }
+  return { critical, warning, info };
+}
+
+function describeAuditFailureGate(gate: AuditFailureGate): string | null {
+  if (gate === "score") {
+    return `失败原因：score gate 未通过（阈值 ${AUDIT_PASS_SCORE_THRESHOLD}/100）。`;
+  }
+  if (gate === "critical") {
+    return "失败原因：critical 问题门禁未通过。";
+  }
+  return null;
+}
+
+function resolveDisplayFailureGate(args: {
+  readonly passed: boolean;
+  readonly score: number;
+  readonly severityCounts: AuditSeverityCounts;
+}): AuditFailureGate {
+  if (args.passed) return "none";
+  if (args.severityCounts.critical > 0) return "critical";
+  if (args.score < AUDIT_PASS_SCORE_THRESHOLD) return "score";
+  return "critical";
+}
+
+function resolveWriterReviewEntry(targetChapterNumber: number | null): ReviewEntry {
+  return targetChapterNumber === null ? "write-next" : "write-target";
+}
+
+interface IssueClassCounts {
+  structural: number;
+  textual: number;
+}
+
+interface ReviewMetricsCounter {
+  total: number;
+  firstPass: number;
+  passWithinOneRevise: number;
+  failedMaxRounds: number;
+  structuralIssues: number;
+  textualIssues: number;
+}
+
+interface ReviewMetricsSnapshot {
+  fpr0: number;
+  fpr1: number;
+  failed_max_rounds_rate: number;
+  structural_ratio: number;
+  sample_size: number;
+}
+
+interface ReviewMetricsBookStore {
+  overall: ReviewMetricsCounter;
+  byEntry: Record<ReviewEntry, ReviewMetricsCounter>;
+}
+
+const STRUCTURAL_ISSUE_HINTS = [
+  "结构", "卷纲", "主线", "支线", "伏笔", "回收", "世界观", "设定",
+  "连续性", "一致性", "时间线", "时间轴", "账本", "数值", "境界",
+  "状态", "角色关系", "人物关系", "前后矛盾", "上下文矛盾",
+];
+
+function createReviewMetricsCounter(): ReviewMetricsCounter {
+  return {
+    total: 0,
+    firstPass: 0,
+    passWithinOneRevise: 0,
+    failedMaxRounds: 0,
+    structuralIssues: 0,
+    textualIssues: 0,
+  };
+}
+
+function createReviewMetricsBookStore(): ReviewMetricsBookStore {
+  return {
+    overall: createReviewMetricsCounter(),
+    byEntry: {
+      "write-next": createReviewMetricsCounter(),
+      "write-target": createReviewMetricsCounter(),
+      rewrite: createReviewMetricsCounter(),
+    },
+  };
+}
+
+function safePercent(numerator: number, denominator: number): number {
+  if (!Number.isFinite(denominator) || denominator <= 0) return 0;
+  return Math.round((Math.max(0, numerator) / denominator) * 100);
+}
+
+function classifyIssueTextForMetrics(issueText: string): "structural" | "textual" {
+  const normalized = issueText.trim().toLowerCase();
+  if (!normalized) return "textual";
+  if (STRUCTURAL_ISSUE_HINTS.some((hint) => normalized.includes(hint.toLowerCase()))) {
+    return "structural";
+  }
+  return "textual";
+}
+
+function deriveIssueClassCountsFromIssueTexts(issueTexts: ReadonlyArray<string>): IssueClassCounts {
+  let structural = 0;
+  let textual = 0;
+  for (const raw of issueTexts) {
+    const issueText = typeof raw === "string" ? raw.trim() : "";
+    if (!issueText) continue;
+    if (classifyIssueTextForMetrics(issueText) === "structural") structural += 1;
+    else textual += 1;
+  }
+  return { structural, textual };
+}
+
+function normalizeIssueClassCounts(issueClassCounts?: Readonly<{ structural: number; textual: number }>): IssueClassCounts | null {
+  if (!issueClassCounts) return null;
+  const structural = Number(issueClassCounts.structural);
+  const textual = Number(issueClassCounts.textual);
+  if (!Number.isFinite(structural) || !Number.isFinite(textual)) return null;
+  return {
+    structural: Math.max(0, Math.trunc(structural)),
+    textual: Math.max(0, Math.trunc(textual)),
+  };
+}
+
+function applyReviewMetricsObservation(counter: ReviewMetricsCounter, args: {
+  passed: boolean;
+  reviseRoundsUsed: number;
+  finalState: "passed" | "failed-max-rounds" | "failed-single-audit";
+  issueClassCounts?: Readonly<{ structural: number; textual: number }>;
+  issueTexts?: ReadonlyArray<string>;
+}): void {
+  counter.total += 1;
+  if (args.passed && args.reviseRoundsUsed === 0) counter.firstPass += 1;
+  if (args.passed && args.reviseRoundsUsed <= 1) counter.passWithinOneRevise += 1;
+  if (args.finalState === "failed-max-rounds") counter.failedMaxRounds += 1;
+  const classCounts = normalizeIssueClassCounts(args.issueClassCounts)
+    ?? deriveIssueClassCountsFromIssueTexts(args.issueTexts ?? []);
+  counter.structuralIssues += classCounts.structural;
+  counter.textualIssues += classCounts.textual;
+}
+
+function reviewMetricsSnapshotFromCounter(counter: ReviewMetricsCounter): ReviewMetricsSnapshot {
+  const structuralTotal = counter.structuralIssues + counter.textualIssues;
+  return {
+    fpr0: safePercent(counter.firstPass, counter.total),
+    fpr1: safePercent(counter.passWithinOneRevise, counter.total),
+    failed_max_rounds_rate: safePercent(counter.failedMaxRounds, counter.total),
+    structural_ratio: safePercent(counter.structuralIssues, structuralTotal),
+    sample_size: counter.total,
+  };
+}
+
+function buildAuditReportText(args: {
+  readonly chapterNumber: number;
+  readonly passed: boolean;
+  readonly issueCount: number;
+  readonly summary?: string;
+  readonly issueTexts?: ReadonlyArray<string>;
+  readonly severityCounts?: AuditSeverityCounts;
+  readonly failureGate?: AuditFailureGate;
+}): string {
+  const issueTexts = (args.issueTexts ?? [])
+    .map((item) => parseAuditIssueText(item ?? ""))
+    .filter((item): item is NormalizedAuditIssue => Boolean(item))
+    .sort((left, right) => auditSeverityRank(left.severity) - auditSeverityRank(right.severity))
+    .map((item) => formatAuditIssueText(item));
+  const issueCount = args.issueCount > 0 ? args.issueCount : issueTexts.length;
+  const severityCounts = args.severityCounts ?? countAuditIssueSeverities(issueTexts);
+  const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+  const header = args.passed
+    ? issueCount > 0
+      ? `第${args.chapterNumber}章审计通过，发现${issueCount}项非阻断问题。`
+      : `第${args.chapterNumber}章审计通过。`
+    : `第${args.chapterNumber}章审计未通过，共${issueCount}项问题。`;
+  const lines = [header];
+  lines.push(`审计评分：${score}/100（严重 ${severityCounts.critical} / 警告 ${severityCounts.warning} / 提示 ${severityCounts.info}）`);
+  if (!args.passed) {
+    const gateLine = describeAuditFailureGate(args.failureGate ?? "none");
+    if (gateLine) lines.push(gateLine);
+  }
+  const summary = args.summary?.trim();
+  if (summary) {
+    lines.push(`审计报告：${summary}`);
+  }
+  lines.push(...buildAuditIssueListLines(issueTexts));
+  return lines.join("\n");
+}
+
+function buildAuditIssueListLines(issueTexts: ReadonlyArray<string>): string[] {
+  if (issueTexts.length === 0) return [];
+  const grouped: Record<AuditSeverity, string[]> = { critical: [], warning: [], info: [] };
+  issueTexts.forEach((item) => {
+    const parsed = parseAuditIssueText(item);
+    if (!parsed) return;
+    grouped[parsed.severity].push(formatAuditIssueText(parsed));
+  });
+  const lines: string[] = ["问题清单："];
+  if (grouped.critical.length > 0) {
+    lines.push("严重：");
+    grouped.critical.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+  }
+  if (grouped.warning.length > 0) {
+    lines.push("警告：");
+    grouped.warning.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+  }
+  if (grouped.info.length > 0) {
+    lines.push("提示：");
+    grouped.info.forEach((item, index) => lines.push(`${index + 1}. ${item}`));
+  }
+  return lines;
+}
+
+function normalizeDimensionChecks(value: unknown): ReadonlyArray<{
+  dimension: string;
+  status: "pass" | "warning" | "failed";
+  evidence?: string;
+}> {
+  type AuditDimensionCheck = {
+    dimension: string;
+    status: "pass" | "warning" | "failed";
+    evidence?: string;
+  };
+  if (!Array.isArray(value)) return [];
+  const normalized: AuditDimensionCheck[] = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const payload = item as { dimension?: unknown; status?: unknown; evidence?: unknown };
+      const dimension = typeof payload.dimension === "string" ? payload.dimension.trim() : "";
+      if (!dimension) return null;
+      const status = payload.status === "pass" || payload.status === "warning" || payload.status === "failed"
+        ? payload.status
+        : null;
+      if (!status) return null;
+      const evidence = typeof payload.evidence === "string" && payload.evidence.trim()
+        ? payload.evidence.trim()
+        : undefined;
+      return {
+        dimension,
+        status,
+        ...(evidence ? { evidence } : {}),
+      };
+    })
+    .filter((item): item is AuditDimensionCheck => item !== null);
+  return normalized;
+}
+
+function normalizePrimaryIssueClass(value: unknown): "none" | "structural" | "textual" | "mixed" | undefined {
+  return value === "none" || value === "structural" || value === "textual" || value === "mixed"
+    ? value
+    : undefined;
+}
+
+function derivePrimaryIssueClassFromCounts(counts: Readonly<{ structural: number; textual: number }>): "none" | "structural" | "textual" | "mixed" {
+  if (counts.structural <= 0 && counts.textual <= 0) return "none";
+  if (counts.structural > 0 && counts.textual <= 0) return "structural";
+  if (counts.structural <= 0 && counts.textual > 0) return "textual";
+  return "mixed";
+}
+
+interface NormalizedReviseAuditSummary {
+  readonly passed: boolean;
+  readonly score: number;
+  readonly issueCount: number;
+  readonly severityCounts: AuditSeverityCounts;
+  readonly failureGate: AuditFailureGate;
+  readonly dimensionChecks?: ReadonlyArray<{
+    dimension: string;
+    status: "pass" | "warning" | "failed";
+    evidence?: string;
+  }>;
+  readonly issueClassCounts?: Readonly<{
+    structural: number;
+    textual: number;
+  }>;
+  readonly primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
+  readonly summary?: string;
+  readonly issueTexts: ReadonlyArray<string>;
+  readonly report: string;
+}
+
+type PipelineAuditDraftResult = Awaited<ReturnType<PipelineRunner["auditDraft"]>>;
+type PipelineReviseDraftResult = Awaited<ReturnType<PipelineRunner["reviseDraft"]>>;
+
+const AUTO_REVISE_MAX_ROUNDS = 2;
+const AUTO_REVISE_MODE = "spot-fix" as const;
+const AUTO_REVISE_MODES = ["polish", "rewrite", "rework", "spot-fix", "anti-detect"] as const;
+type AutoReviseMode = typeof AUTO_REVISE_MODES[number];
+const STRUCTURAL_STAGNATION_MIN_UNRESOLVED = 2;
+const STRUCTURAL_STAGNATION_SCORE_DELTA_THRESHOLD = 1;
+
+function parseBooleanLike(input: unknown): boolean | null {
+  if (typeof input === "boolean") return input;
+  if (typeof input !== "string") return null;
+  const normalized = input.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return null;
+}
+
+function resolveUnifiedReviewLoopEnabled(config: ProjectConfig): boolean {
+  const envOverride = parseBooleanLike(process.env.INKOS_UNIFIED_REVIEW_LOOP);
+  if (envOverride !== null) return envOverride;
+  const raw = config as unknown as {
+    unifiedReviewLoop?: unknown;
+    autoReview?: { unifiedReviewLoop?: unknown } | unknown;
+  };
+  const topLevel = parseBooleanLike(raw.unifiedReviewLoop);
+  if (topLevel !== null) return topLevel;
+  if (raw.autoReview && typeof raw.autoReview === "object") {
+    const nested = parseBooleanLike((raw.autoReview as { unifiedReviewLoop?: unknown }).unifiedReviewLoop);
+    if (nested !== null) return nested;
+  }
+  return true;
+}
+
+function resolveAutoReviewPolicy(config: ProjectConfig): {
+  enabled: boolean;
+  maxReviseRounds: number;
+  reviseMode: AutoReviseMode;
+  stagnation: {
+    minUnresolvedStructuralIssues: number;
+    scoreDeltaThreshold: number;
+  };
+} {
+  if (!resolveUnifiedReviewLoopEnabled(config)) {
+    return {
+      enabled: false,
+      maxReviseRounds: 0,
+      reviseMode: AUTO_REVISE_MODE,
+      stagnation: {
+        minUnresolvedStructuralIssues: STRUCTURAL_STAGNATION_MIN_UNRESOLVED,
+        scoreDeltaThreshold: STRUCTURAL_STAGNATION_SCORE_DELTA_THRESHOLD,
+      },
+    };
+  }
+  const raw = (config as unknown as { autoReview?: unknown }).autoReview;
+  if (!raw || typeof raw !== "object") {
+    return {
+      enabled: true,
+      maxReviseRounds: AUTO_REVISE_MAX_ROUNDS,
+      reviseMode: AUTO_REVISE_MODE,
+      stagnation: {
+        minUnresolvedStructuralIssues: STRUCTURAL_STAGNATION_MIN_UNRESOLVED,
+        scoreDeltaThreshold: STRUCTURAL_STAGNATION_SCORE_DELTA_THRESHOLD,
+      },
+    };
+  }
+  const payload = raw as {
+    enabled?: unknown;
+    maxReviseRounds?: unknown;
+    reviseMode?: unknown;
+    stagnation?: {
+      minUnresolvedStructuralIssues?: unknown;
+      scoreDeltaThreshold?: unknown;
+    } | unknown;
+  };
+  const enabled = typeof payload.enabled === "boolean" ? payload.enabled : true;
+  const parsedRounds = Number(payload.maxReviseRounds);
+  const maxReviseRounds = Number.isFinite(parsedRounds)
+    ? Math.max(0, Math.min(5, Math.trunc(parsedRounds)))
+    : AUTO_REVISE_MAX_ROUNDS;
+  const reviseMode = AUTO_REVISE_MODES.includes(payload.reviseMode as AutoReviseMode)
+    ? payload.reviseMode as AutoReviseMode
+    : AUTO_REVISE_MODE;
+  const stagnationRaw = payload.stagnation && typeof payload.stagnation === "object"
+    ? payload.stagnation as { minUnresolvedStructuralIssues?: unknown; scoreDeltaThreshold?: unknown }
+    : {};
+  const minUnresolvedParsed = Number(stagnationRaw.minUnresolvedStructuralIssues);
+  const scoreDeltaThresholdParsed = Number(stagnationRaw.scoreDeltaThreshold);
+  const stagnation = {
+    minUnresolvedStructuralIssues: Number.isFinite(minUnresolvedParsed)
+      ? Math.max(1, Math.min(10, Math.trunc(minUnresolvedParsed)))
+      : STRUCTURAL_STAGNATION_MIN_UNRESOLVED,
+    scoreDeltaThreshold: Number.isFinite(scoreDeltaThresholdParsed)
+      ? Math.max(0, Math.min(10, Math.trunc(scoreDeltaThresholdParsed)))
+      : STRUCTURAL_STAGNATION_SCORE_DELTA_THRESHOLD,
+  };
+  return { enabled, maxReviseRounds, reviseMode, stagnation };
+}
+
+interface NormalizedAuditDraftSummary extends NormalizedReviseAuditSummary {
+  readonly chapterNumber: number;
+  readonly raw: PipelineAuditDraftResult;
+}
+
+const AUTO_REVIEW_FINAL_NOTE_PREFIX = "[auto-review-final]";
+
+function buildAutoReviewFinalNote(args: {
+  finalState: "failed-max-rounds" | "failed-single-audit";
+  stopReason?: string;
+  audit: Pick<NormalizedAuditDraftSummary, "score" | "issueCount" | "summary">;
+}): string {
+  const summaryText = typeof args.audit.summary === "string" ? args.audit.summary.trim() : "";
+  const summarySegment = summaryText
+    ? `；摘要：${summaryText.slice(0, 180)}`
+    : "";
+  const reasonText = args.stopReason?.trim()
+    || (args.finalState === "failed-max-rounds"
+      ? "达到自动修订轮次上限，仍未通过审计"
+      : "单次审计未通过");
+  return `${AUTO_REVIEW_FINAL_NOTE_PREFIX} 自动审计未通过（${reasonText}）；评分 ${args.audit.score}/100；问题 ${args.audit.issueCount} 项${summarySegment}`;
+}
+
+function stripAutoReviewFinalNote(reviewNote: string): string {
+  return reviewNote
+    .split(/\r?\n/u)
+    .filter((line) => !line.trim().startsWith(AUTO_REVIEW_FINAL_NOTE_PREFIX))
+    .join("\n")
+    .trim();
+}
+
+async function persistAutoReviewTerminalNote(args: {
+  state: StateManager;
+  bookId: string;
+  chapterNumber: number;
+  finalState: "passed" | "failed-max-rounds" | "failed-single-audit";
+  stopReason?: string;
+  finalAudit: NormalizedAuditDraftSummary;
+}): Promise<void> {
+  const indexRaw = await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]);
+  const index = normalizeChapterIndexEntries(indexRaw);
+  if (index.length === 0) return;
+  const nowIso = new Date().toISOString();
+  let changed = false;
+  const updated = index.map((entry) => {
+    const chapterNumber = Number(entry?.number);
+    if (!Number.isFinite(chapterNumber) || chapterNumber !== args.chapterNumber) return entry;
+    const currentRaw = typeof entry.reviewNote === "string" ? entry.reviewNote : "";
+    const current = currentRaw.trim();
+    const stripped = stripAutoReviewFinalNote(current);
+    const nextNote = args.finalState === "passed"
+      ? stripped
+      : (() => {
+          const autoNote = buildAutoReviewFinalNote({
+            finalState: args.finalState,
+            stopReason: args.stopReason,
+            audit: args.finalAudit,
+          });
+          return stripped.length > 0 ? `${stripped}\n${autoNote}` : autoNote;
+        })();
+    if (nextNote === current) return entry;
+    changed = true;
+    return {
+      ...entry,
+      ...(nextNote.length > 0 ? { reviewNote: nextNote } : { reviewNote: undefined }),
+      updatedAt: nowIso,
+    };
+  });
+  if (changed) {
+    await args.state.saveChapterIndex(args.bookId, updated as any);
+  }
+}
+
+interface AutoAuditCycleResult {
+  readonly chapterNumber: number;
+  readonly audits: ReadonlyArray<NormalizedAuditDraftSummary>;
+  readonly revisions: ReadonlyArray<{
+    readonly round: number;
+    readonly reviseResult: PipelineReviseDraftResult;
+    readonly reviseAudit: NormalizedReviseAuditSummary | null;
+    readonly basisIssueTexts: ReadonlyArray<string>;
+    readonly fixedIssues: ReadonlyArray<string>;
+    readonly issueResolutions: ReadonlyArray<{
+      readonly issueId: string;
+      readonly issue: string;
+      readonly outcome: "resolved" | "unresolved";
+      readonly fixDelta?: string;
+    }>;
+    readonly mustFixOutcomes: ReadonlyArray<{
+      readonly issueId: string;
+      readonly outcome: "resolved" | "partial" | "unresolved";
+      readonly reason?: string;
+    }>;
+  }>;
+  readonly finalAudit: NormalizedAuditDraftSummary;
+  readonly stoppedByMaxRounds: boolean;
+  readonly maxReviseRounds: number;
+  readonly stopReason?: string;
+}
+
+interface UnifiedReviewLoopAutoReviewPayload {
+  readonly enabled: boolean;
+  readonly maxReviseRounds: number;
+  readonly reviseRoundsUsed: number;
+  readonly auditRounds: number;
+  readonly stoppedByMaxRounds: boolean;
+  readonly finalState: "passed" | "failed-max-rounds" | "failed-single-audit";
+  readonly stopReason?: string;
+  readonly revisions: ReadonlyArray<{
+    readonly round: number;
+    readonly applied: boolean;
+    readonly status: string;
+    readonly wordCount: number;
+    readonly fixedIssues: ReadonlyArray<string>;
+    readonly issueResolutions: ReadonlyArray<{
+      readonly issueId: string;
+      readonly issue: string;
+      readonly outcome: "resolved" | "unresolved";
+      readonly fixDelta?: string;
+    }>;
+    readonly mustFixOutcomes: ReadonlyArray<{
+      readonly issueId: string;
+      readonly outcome: "resolved" | "partial" | "unresolved";
+      readonly reason?: string;
+    }>;
+  }>;
+}
+
+interface UnifiedReviewLoopResult {
+  readonly finalAudit: NormalizedAuditDraftSummary;
+  readonly autoReview: UnifiedReviewLoopAutoReviewPayload;
+}
+
+function resolveUnifiedReviewFinalState(cycle: AutoAuditCycleResult): "passed" | "failed-max-rounds" | "failed-single-audit" {
+  if (cycle.finalAudit.passed) return "passed";
+  return cycle.stoppedByMaxRounds ? "failed-max-rounds" : "failed-single-audit";
+}
+
+function buildUnifiedAutoReviewPayload(args: {
+  enabled: boolean;
+  maxReviseRounds: number;
+  cycle: AutoAuditCycleResult;
+}): UnifiedReviewLoopAutoReviewPayload {
+  const finalState = resolveUnifiedReviewFinalState(args.cycle);
+  return {
+    enabled: args.enabled,
+    maxReviseRounds: args.cycle.maxReviseRounds ?? args.maxReviseRounds,
+    reviseRoundsUsed: args.cycle.revisions.length,
+    auditRounds: args.cycle.audits.length,
+    stoppedByMaxRounds: args.cycle.stoppedByMaxRounds,
+    finalState,
+    ...(args.cycle.stoppedByMaxRounds && !args.cycle.finalAudit.passed
+      ? { stopReason: args.cycle.stopReason?.trim() || "达到自动修订轮次上限，仍未通过审计" }
+      : {}),
+    revisions: args.cycle.revisions.map((entry) => ({
+      round: entry.round,
+      applied: entry.reviseResult.applied,
+      status: entry.reviseResult.status,
+      wordCount: entry.reviseResult.wordCount,
+      fixedIssues: entry.fixedIssues,
+      issueResolutions: entry.issueResolutions,
+      mustFixOutcomes: entry.mustFixOutcomes,
+    })),
+  };
+}
+
+const STRUCTURAL_AUDIT_SIGNALS = [
+  "volume_outline",
+  "卷纲",
+  "大纲偏离",
+  "hook debt",
+  "伏笔债务",
+  "paragraph-shape",
+  "读者期待管理",
+  "篇幅控制",
+  "length control",
+  "资源账本",
+  "ledger",
+  "状态卡",
+  "评分门禁",
+  "score gate",
+];
+
+function hasStructuralAuditSignals(audit: Pick<NormalizedAuditDraftSummary, "issueTexts">): boolean {
+  if (audit.issueTexts.length === 0) return false;
+  const merged = audit.issueTexts.join("\n").toLowerCase();
+  return STRUCTURAL_AUDIT_SIGNALS.some((signal) => merged.includes(signal));
+}
+
+function resolveAdaptiveMaxReviseRounds(
+  configuredMaxRounds: number,
+  audit: Pick<NormalizedAuditDraftSummary, "severityCounts" | "issueTexts">,
+): number {
+  if (configuredMaxRounds <= 0) return 0;
+  let resolved = configuredMaxRounds;
+  if (audit.severityCounts.warning >= 4 || hasStructuralAuditSignals(audit)) {
+    resolved = Math.max(resolved, 4);
+  }
+  if (audit.severityCounts.critical >= 2) {
+    resolved = Math.max(resolved, 5);
+  }
+  return Math.max(0, Math.min(5, resolved));
+}
+
+function resolveAdaptiveReviseMode(
+  configuredMode: AutoReviseMode,
+  audit: Pick<NormalizedAuditDraftSummary, "issueTexts">,
+  reviseRound: number,
+  options?: {
+    forceRewrite?: boolean;
+  },
+): AutoReviseMode {
+  if (options?.forceRewrite) return "rewrite";
+  if (configuredMode !== "spot-fix") return configuredMode;
+  if (!hasStructuralAuditSignals(audit)) return "spot-fix";
+  return reviseRound <= 1 ? "rework" : "rewrite";
+}
+
+function hasFailedOutlineDeviationDimension(
+  audit: Pick<NormalizedAuditDraftSummary, "dimensionChecks">,
+): boolean {
+  if (!Array.isArray(audit.dimensionChecks) || audit.dimensionChecks.length === 0) return false;
+  return audit.dimensionChecks.some((item) => {
+    if (!item || item.status !== "failed") return false;
+    const normalized = String(item.dimension ?? "").trim().toLowerCase();
+    return normalized.includes("大纲偏离")
+      || normalized.includes("卷纲")
+      || normalized.includes("outline deviation")
+      || normalized.includes("outline alignment");
+  });
+}
+
+function normalizeIssueTextForCompare(issueText: string): string {
+  return issueText
+    .replace(/^\[[^\]]+\]\s*/u, "")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function isStructuralIssueText(issueText: string): boolean {
+  const normalized = normalizeIssueTextForCompare(issueText);
+  if (!normalized) return false;
+  if (classifyIssueTextForMetrics(normalized) === "structural") return true;
+  return STRUCTURAL_AUDIT_SIGNALS.some((signal) => normalized.includes(signal.toLowerCase()));
+}
+
+function buildStructuralStagnationOverrideIssues(
+  unresolvedIssues: ReadonlyArray<string>,
+): AutoReviewStructuredIssue[] {
+  const dedup = new Map<string, string>();
+  for (const issue of unresolvedIssues) {
+    const normalized = normalizeIssueTextForCompare(issue);
+    if (!normalized) continue;
+    if (!dedup.has(normalized)) dedup.set(normalized, issue.trim());
+  }
+  const topIssues = Array.from(dedup.values()).slice(0, 3);
+  if (topIssues.length === 0) return [];
+  return topIssues.map((description) => ({
+    severity: "critical",
+    category: "outline_alignment",
+    description,
+    suggestion: "连续多轮未收敛。必须先列出本章事件链并逐条对齐卷纲/状态卡/时间线，再执行结构级重写，不可仅做措辞微调。",
+  }));
+}
+
+function detectStructuralStagnation(args: {
+  basisAudit: Pick<NormalizedAuditDraftSummary, "issueTexts" | "score" | "issueCount">;
+  previousAudit?: Pick<NormalizedAuditDraftSummary, "score" | "issueCount">;
+  previousRevision?: {
+    issueResolutions: ReadonlyArray<{
+      issue: string;
+      outcome: "resolved" | "unresolved";
+    }>;
+  };
+  minUnresolvedStructuralIssues: number;
+  scoreDeltaThreshold: number;
+}): {
+  stalled: boolean;
+  unresolvedStructuralIssues: string[];
+} {
+  if (!args.previousRevision || !args.previousAudit) {
+    return { stalled: false, unresolvedStructuralIssues: [] };
+  }
+  const unresolvedStructuralIssues = args.previousRevision.issueResolutions
+    .filter((item) => item.outcome === "unresolved" && isStructuralIssueText(item.issue))
+    .map((item) => item.issue.trim())
+    .filter((item) => item.length > 0);
+  if (unresolvedStructuralIssues.length < args.minUnresolvedStructuralIssues) {
+    return { stalled: false, unresolvedStructuralIssues };
+  }
+  if (!hasStructuralAuditSignals(args.basisAudit)) {
+    return { stalled: false, unresolvedStructuralIssues };
+  }
+  const scoreDelta = args.basisAudit.score - args.previousAudit.score;
+  const issueDelta = args.basisAudit.issueCount - args.previousAudit.issueCount;
+  const stalled = scoreDelta <= args.scoreDeltaThreshold && issueDelta >= 0;
+  return { stalled, unresolvedStructuralIssues };
+}
+
+function buildReviseStrategyReason(args: {
+  configuredMode: AutoReviseMode;
+  resolvedMode: AutoReviseMode;
+  reviseRound: number;
+  stagnationStalled: boolean;
+  failedOutlineDeviationDimension: boolean;
+  unresolvedIssueCountFromPrevRound: number;
+  failureGate: AuditFailureGate;
+  hasFailedDimensions: boolean;
+  overrideIssueCount: number;
+}): string {
+  if (args.failedOutlineDeviationDimension && args.resolvedMode === "rewrite") {
+    return "检测到大纲偏离检测未通过，已直接升级为 rewrite 执行结构级修复。";
+  }
+  if (args.stagnationStalled) {
+    return "检测到结构问题连续未收敛，已升级为 rewrite 并注入结构化修订约束。";
+  }
+  if (args.configuredMode === "spot-fix" && args.resolvedMode === "rework") {
+    return "检测到结构性审计信号，首轮由 spot-fix 升级为 rework。";
+  }
+  if (args.configuredMode === "spot-fix" && args.resolvedMode === "rewrite" && args.reviseRound > 1) {
+    return "结构信号持续存在，已从轻量修订升级为 rewrite。";
+  }
+  if (args.failureGate === "score") {
+    return "评分门禁未通过，本轮优先修复高影响问题并提升总分。";
+  }
+  if (args.hasFailedDimensions) {
+    return "存在 failed 维度，本轮优先对齐对应维度约束。";
+  }
+  if (args.unresolvedIssueCountFromPrevRound > 0) {
+    return "上轮存在未收敛问题，本轮优先闭环未解决项。";
+  }
+  if (args.overrideIssueCount > 0) {
+    return "根据审计优先级重排问题顺序，执行定向修订。";
+  }
+  return "按当前模式执行常规修订。";
+}
+
+interface AutoReviewStructuredIssue {
+  readonly severity: "critical" | "warning" | "info";
+  readonly category: string;
+  readonly description: string;
+  readonly suggestion: string;
+}
+
+function extractStructuredIssuesFromAudit(audit: NormalizedAuditDraftSummary): AutoReviewStructuredIssue[] {
+  const rawIssues = (audit.raw as { issues?: unknown } | null)?.issues;
+  if (!Array.isArray(rawIssues)) return [];
+  const issues: AutoReviewStructuredIssue[] = [];
+  for (const issue of rawIssues) {
+    if (!issue || typeof issue !== "object") continue;
+    const row = issue as {
+      severity?: unknown;
+      category?: unknown;
+      description?: unknown;
+      suggestion?: unknown;
+    };
+    const severity = row.severity === "critical" || row.severity === "warning" || row.severity === "info"
+      ? row.severity
+      : "warning";
+    const description = typeof row.description === "string" ? row.description.trim() : "";
+    if (!description) continue;
+    issues.push({
+      severity,
+      category: typeof row.category === "string" ? row.category : "",
+      description,
+      suggestion: typeof row.suggestion === "string" ? row.suggestion : "",
+    });
+  }
+  return issues;
+}
+
+function buildPrioritizedOverrideIssuesForRevise(
+  currentAudit: NormalizedAuditDraftSummary,
+  previousRevision?: {
+    issueResolutions: Array<{
+      issue: string;
+      outcome: "resolved" | "unresolved";
+    }>;
+  },
+): AutoReviewStructuredIssue[] {
+  const issues = extractStructuredIssuesFromAudit(currentAudit);
+  if (issues.length === 0 || !previousRevision || previousRevision.issueResolutions.length === 0) {
+    return issues;
+  }
+  const unresolvedKeys = new Set(
+    previousRevision.issueResolutions
+      .filter((item) => item.outcome === "unresolved")
+      .map((item) => normalizeIssueTextForCompare(item.issue)),
+  );
+  if (unresolvedKeys.size === 0) {
+    return issues;
+  }
+
+  const prioritized: AutoReviewStructuredIssue[] = [];
+  const remaining: AutoReviewStructuredIssue[] = [];
+  for (const issue of issues) {
+    const normalized = normalizeIssueTextForCompare(issue.description);
+    if (unresolvedKeys.has(normalized)) prioritized.push(issue);
+    else remaining.push(issue);
+  }
+  if (prioritized.length === 0) {
+    return issues;
+  }
+  return [...prioritized, ...remaining];
+}
+
+function buildAutoReviewIssueId(index: number): string {
+  return `ISSUE-${String(index + 1).padStart(2, "0")}`;
+}
+
+function parseFixedIssueLine(raw: string): { issueId: string | null; text: string } {
+  const line = raw.trim();
+  if (!line) return { issueId: null, text: "" };
+  const match = line.match(/^-?\s*\[(ISSUE-\d{2})\]\s*(.+)$/i);
+  if (!match) return { issueId: null, text: line };
+  return {
+    issueId: String(match[1]).toUpperCase(),
+    text: String(match[2]).trim(),
+  };
+}
+
+function collectUnresolvedIssueIdsFromRevision(
+  previousRevision?: {
+    issueResolutions: ReadonlyArray<{
+      issueId: string;
+      outcome: "resolved" | "unresolved";
+    }>;
+  },
+): string[] {
+  if (!previousRevision || previousRevision.issueResolutions.length === 0) return [];
+  return previousRevision.issueResolutions
+    .filter((item) => item.outcome === "unresolved" && typeof item.issueId === "string")
+    .map((item) => item.issueId.trim().toUpperCase())
+    .filter((item) => /^ISSUE-\d{2}$/u.test(item));
+}
+
+function computeMustFixFirstIssueIds(params: {
+  basisAudit: Pick<NormalizedAuditDraftSummary, "issueTexts" | "failureGate" | "dimensionChecks">;
+  unresolvedIssueIdsFromPrevRound: ReadonlyArray<string>;
+}): string[] {
+  const mustFix = new Set<string>();
+  for (const id of params.unresolvedIssueIdsFromPrevRound) {
+    if (/^ISSUE-\d{2}$/u.test(id)) mustFix.add(id);
+  }
+  const issueMeta = params.basisAudit.issueTexts.map((issueText, index) => ({
+    issueId: buildAutoReviewIssueId(index),
+    parsed: parseAuditIssueText(issueText),
+  }));
+  for (const item of issueMeta) {
+    if (item.parsed?.severity === "critical") {
+      mustFix.add(item.issueId);
+    }
+  }
+  if (params.basisAudit.failureGate === "score") {
+    for (const item of issueMeta) {
+      if (item.parsed && (item.parsed.severity === "critical" || item.parsed.severity === "warning")) {
+        mustFix.add(item.issueId);
+      }
+    }
+  }
+  if (Array.isArray(params.basisAudit.dimensionChecks) && params.basisAudit.dimensionChecks.some((item) => item.status === "failed")) {
+    for (const item of issueMeta) {
+      if (item.parsed && item.parsed.severity !== "info") {
+        mustFix.add(item.issueId);
+      }
+    }
+  }
+  const ordered = Array.from(mustFix.values());
+  ordered.sort((left, right) => left.localeCompare(right));
+  return ordered;
+}
+
+function normalizeIssueClassCountsForReviseContext(
+  value: unknown,
+): { structural: number; textual: number } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const payload = value as { structural?: unknown; textual?: unknown };
+  const structural = Number(payload.structural ?? 0);
+  const textual = Number(payload.textual ?? 0);
+  if (!Number.isFinite(structural) || !Number.isFinite(textual)) return undefined;
+  return {
+    structural: Math.max(0, Math.trunc(structural)),
+    textual: Math.max(0, Math.trunc(textual)),
+  };
+}
+
+function buildMustFixOutcomes(params: {
+  mustFixFirstIssueIds: ReadonlyArray<string>;
+  issueResolutions: ReadonlyArray<{
+    issueId: string;
+    outcome: "resolved" | "unresolved";
+    fixDelta?: string;
+  }>;
+}): Array<{
+  issueId: string;
+  outcome: "resolved" | "partial" | "unresolved";
+  reason?: string;
+}> {
+  if (params.mustFixFirstIssueIds.length === 0) return [];
+  const resolutionById = new Map(
+    params.issueResolutions.map((item) => [item.issueId, item] as const),
+  );
+  return params.mustFixFirstIssueIds.map((issueId) => {
+    const resolution = resolutionById.get(issueId);
+    if (!resolution) {
+      return {
+        issueId,
+        outcome: "unresolved" as const,
+        reason: "未在问题映射中命中，需人工复核",
+      };
+    }
+    if (resolution.outcome === "resolved") {
+      return {
+        issueId,
+        outcome: "resolved" as const,
+        ...(resolution.fixDelta ? { reason: resolution.fixDelta } : {}),
+      };
+    }
+    if (resolution.fixDelta) {
+      return {
+        issueId,
+        outcome: "partial" as const,
+        reason: resolution.fixDelta,
+      };
+    }
+    return {
+      issueId,
+      outcome: "unresolved" as const,
+      reason: "审计复核仍未通过",
+    };
+  });
+}
+
+function buildFixDeltaLookup(fixedIssues: ReadonlyArray<string>): {
+  byId: Map<string, string>;
+  orderedUnbound: string[];
+} {
+  const byId = new Map<string, string>();
+  const orderedUnbound: string[] = [];
+  for (const raw of fixedIssues) {
+    const parsed = parseFixedIssueLine(raw);
+    if (!parsed.text) continue;
+    if (!parsed.issueId) {
+      orderedUnbound.push(parsed.text);
+      continue;
+    }
+    const existing = byId.get(parsed.issueId);
+    byId.set(parsed.issueId, existing ? `${existing} | ${parsed.text}` : parsed.text);
+  }
+  return { byId, orderedUnbound };
+}
+
+function buildAutoReviewAuditEventState(params: {
+  round: number;
+  maxReviseRounds: number;
+  passed: boolean;
+  stopReason?: string;
+}): {
+  autoReviewFinal: boolean;
+  autoReviewState: "retrying" | "passed" | "failed-max-rounds" | "failed-single-audit";
+  autoReviewStopReason?: string;
+} {
+  const { round, maxReviseRounds, passed } = params;
+  if (maxReviseRounds <= 0) {
+    return {
+      autoReviewFinal: true,
+      autoReviewState: passed ? "passed" : "failed-single-audit",
+    };
+  }
+  if (passed) {
+    return {
+      autoReviewFinal: true,
+      autoReviewState: "passed",
+    };
+  }
+  if (round <= maxReviseRounds) {
+    return {
+      autoReviewFinal: false,
+      autoReviewState: "retrying",
+    };
+  }
+  return {
+    autoReviewFinal: true,
+    autoReviewState: "failed-max-rounds",
+    autoReviewStopReason: params.stopReason?.trim() || "达到自动修订轮次上限，仍未通过审计",
+  };
+}
+
+function buildSingleAuditAutoReviewPayload(passed: boolean): UnifiedReviewLoopAutoReviewPayload {
+  return {
+    enabled: false,
+    maxReviseRounds: 0,
+    reviseRoundsUsed: 0,
+    auditRounds: 1,
+    stoppedByMaxRounds: false,
+    finalState: passed ? "passed" : "failed-single-audit",
+    revisions: [],
+  };
+}
+
+function normalizeAuditDraftSummary(
+  auditResult: PipelineAuditDraftResult,
+): NormalizedAuditDraftSummary {
+  const issueTexts = buildAuditIssueTexts(auditResult.issues);
+  const severityCounts = countAuditIssueSeveritiesFromIssues(auditResult.issues);
+  const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+  const issueCount = Array.isArray(auditResult.issues) ? auditResult.issues.length : issueTexts.length;
+  const summary = typeof auditResult.summary === "string" && auditResult.summary.trim()
+    ? auditResult.summary.trim()
+    : undefined;
+  const chapterNumber = Number.isFinite(Number(auditResult.chapterNumber))
+    ? Math.max(1, Math.trunc(Number(auditResult.chapterNumber)))
+    : 1;
+  const basePassed = Boolean(auditResult.passed);
+  const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
+  const failureGate = resolveAuditFailureGate({
+    basePassed,
+    score,
+    severityCounts,
+    passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+  });
+  const dimensionChecks = normalizeDimensionChecks(
+    (auditResult as { dimensionChecks?: unknown }).dimensionChecks,
+  );
+  const payload = auditResult as {
+    issueClassCounts?: unknown;
+    primaryIssueClass?: unknown;
+  };
+  const rawClassCounts = payload.issueClassCounts;
+  const classCountsFromPayload = rawClassCounts && typeof rawClassCounts === "object"
+    ? {
+        structural: Number((rawClassCounts as { structural?: unknown }).structural ?? 0),
+        textual: Number((rawClassCounts as { textual?: unknown }).textual ?? 0),
+      }
+    : null;
+  const validClassCountsFromPayload = classCountsFromPayload
+    && Number.isFinite(classCountsFromPayload.structural)
+    && Number.isFinite(classCountsFromPayload.textual)
+    ? {
+        structural: Math.max(0, Math.trunc(classCountsFromPayload.structural)),
+        textual: Math.max(0, Math.trunc(classCountsFromPayload.textual)),
+      }
+    : undefined;
+  const derivedClassCounts = deriveIssueClassCountsFromIssueTexts(issueTexts);
+  const issueClassCounts = validClassCountsFromPayload ?? derivedClassCounts;
+  const primaryIssueClass = normalizePrimaryIssueClass(payload.primaryIssueClass)
+    ?? derivePrimaryIssueClassFromCounts(issueClassCounts);
+  return {
+    chapterNumber,
+    passed,
+    score,
+    issueCount: Math.max(0, issueCount),
+    severityCounts,
+    failureGate,
+    ...(dimensionChecks.length > 0 ? { dimensionChecks } : {}),
+    issueClassCounts,
+    primaryIssueClass,
+    summary,
+    issueTexts,
+    report: buildAuditReportText({
+      chapterNumber,
+      passed,
+      issueCount: Math.max(0, issueCount),
+      summary,
+      issueTexts,
+      severityCounts,
+      failureGate,
+    }),
+    raw: auditResult,
+  };
+}
+
+async function runAuditWithAutoRevise(args: {
+  readonly pipeline: PipelineRunner;
+  readonly bookId: string;
+  readonly chapterNumber: number;
+  readonly maxReviseRounds?: number;
+  readonly reviseMode?: AutoReviseMode;
+  readonly stagnationPolicy?: {
+    minUnresolvedStructuralIssues: number;
+    scoreDeltaThreshold: number;
+  };
+  readonly onAuditStart?: (payload: { round: number; maxReviseRounds: number }) => void | Promise<void>;
+  readonly onAuditComplete?: (payload: {
+    round: number;
+    maxReviseRounds: number;
+    audit: NormalizedAuditDraftSummary;
+    latestRevisionMustFixOutcomes?: ReadonlyArray<{
+      issueId: string;
+      outcome: "resolved" | "partial" | "unresolved";
+      reason?: string;
+    }>;
+    latestRevisionMustFixTotalCount?: number;
+    latestRevisionMustFixUnresolvedCount?: number;
+  }) => void | Promise<void>;
+  readonly onReviseStart?: (payload: {
+    round: number;
+    maxReviseRounds: number;
+    mode: AutoReviseMode;
+    strategyReason?: string;
+  }) => void | Promise<void>;
+  readonly onReviseComplete?: (payload: {
+    round: number;
+    maxReviseRounds: number;
+    mode: AutoReviseMode;
+    reviseResult: PipelineReviseDraftResult;
+    reviseAudit: NormalizedReviseAuditSummary | null;
+  }) => void | Promise<void>;
+}): Promise<AutoAuditCycleResult> {
+  const configuredMaxReviseRounds = Number.isFinite(Number(args.maxReviseRounds))
+    ? Math.max(0, Math.trunc(Number(args.maxReviseRounds)))
+    : AUTO_REVISE_MAX_ROUNDS;
+  const configuredReviseMode = args.reviseMode ?? AUTO_REVISE_MODE;
+  let effectiveMaxReviseRounds = configuredMaxReviseRounds;
+
+  const audits: NormalizedAuditDraftSummary[] = [];
+  const revisions: Array<{
+    round: number;
+    reviseResult: PipelineReviseDraftResult;
+    reviseAudit: NormalizedReviseAuditSummary | null;
+    basisIssueTexts: string[];
+    fixedIssues: string[];
+    issueResolutions: Array<{
+      issueId: string;
+      issue: string;
+      outcome: "resolved" | "unresolved";
+      fixDelta?: string;
+    }>;
+    mustFixFirstIssueIds: string[];
+    mustFixOutcomes: Array<{
+      issueId: string;
+      outcome: "resolved" | "partial" | "unresolved";
+      reason?: string;
+    }>;
+  }> = [];
+
+  let auditRound = 1;
+  await args.onAuditStart?.({ round: auditRound, maxReviseRounds: effectiveMaxReviseRounds });
+  let currentAudit = normalizeAuditDraftSummary(
+    await args.pipeline.auditDraft(args.bookId, args.chapterNumber),
+  );
+  effectiveMaxReviseRounds = resolveAdaptiveMaxReviseRounds(configuredMaxReviseRounds, currentAudit);
+  audits.push(currentAudit);
+  await args.onAuditComplete?.({
+    round: auditRound,
+    maxReviseRounds: effectiveMaxReviseRounds,
+    audit: currentAudit,
+  });
+  if (currentAudit.passed) {
+    return {
+      chapterNumber: currentAudit.chapterNumber,
+      audits,
+      revisions,
+      finalAudit: currentAudit,
+      stoppedByMaxRounds: false,
+      maxReviseRounds: effectiveMaxReviseRounds,
+    };
+  }
+
+  let structuralStagnationObserved = false;
+  for (let reviseRound = 1; reviseRound <= effectiveMaxReviseRounds; reviseRound += 1) {
+    const basisAudit = currentAudit;
+    const previousRevision = revisions.length > 0 ? revisions[revisions.length - 1] : undefined;
+    const previousAudit = audits.length > 1 ? audits[audits.length - 2] : undefined;
+    const stagnation = detectStructuralStagnation({
+      basisAudit,
+      previousAudit,
+      previousRevision: previousRevision
+        ? { issueResolutions: previousRevision.issueResolutions.map((item) => ({ issue: item.issue, outcome: item.outcome })) }
+        : undefined,
+      minUnresolvedStructuralIssues: args.stagnationPolicy?.minUnresolvedStructuralIssues
+        ?? STRUCTURAL_STAGNATION_MIN_UNRESOLVED,
+      scoreDeltaThreshold: args.stagnationPolicy?.scoreDeltaThreshold
+        ?? STRUCTURAL_STAGNATION_SCORE_DELTA_THRESHOLD,
+    });
+    const reviseMode = resolveAdaptiveReviseMode(
+      configuredReviseMode,
+      basisAudit,
+      reviseRound,
+      {
+        forceRewrite: stagnation.stalled || hasFailedOutlineDeviationDimension(basisAudit),
+      },
+    );
+    const prioritizedOverrideIssues = previousRevision
+      ? buildPrioritizedOverrideIssuesForRevise(
+        basisAudit,
+        { issueResolutions: previousRevision.issueResolutions.map((item) => ({ issue: item.issue, outcome: item.outcome })) },
+      )
+      : [];
+    const structuralStagnationOverrides = stagnation.stalled
+      ? buildStructuralStagnationOverrideIssues(stagnation.unresolvedStructuralIssues)
+      : [];
+    if (stagnation.stalled) {
+      structuralStagnationObserved = true;
+    }
+    const mergedOverrideIssues = structuralStagnationOverrides.length > 0
+      ? [...structuralStagnationOverrides, ...prioritizedOverrideIssues]
+      : prioritizedOverrideIssues;
+    const unresolvedIssueIdsFromPrevRound = collectUnresolvedIssueIdsFromRevision(previousRevision);
+    const mustFixFirstIssueIds = computeMustFixFirstIssueIds({
+      basisAudit,
+      unresolvedIssueIdsFromPrevRound,
+    });
+    const issueClassCountsForContext = normalizeIssueClassCountsForReviseContext(
+      (basisAudit as { issueClassCounts?: unknown }).issueClassCounts,
+    );
+    const primaryIssueClassForContext = normalizePrimaryIssueClass(
+      (basisAudit as { primaryIssueClass?: unknown }).primaryIssueClass,
+    );
+    const reviseContext = {
+      failureGate: basisAudit.failureGate,
+      score: basisAudit.score,
+      passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+      unresolvedIssueIdsFromPrevRound,
+      ...(mustFixFirstIssueIds.length > 0 ? { mustFixFirstIssueIds } : {}),
+      ...(Array.isArray(basisAudit.dimensionChecks) && basisAudit.dimensionChecks.length > 0
+        ? { dimensionChecks: basisAudit.dimensionChecks }
+        : {}),
+      ...(issueClassCountsForContext
+        ? { issueClassCounts: issueClassCountsForContext }
+        : {}),
+      ...(primaryIssueClassForContext
+        ? { primaryIssueClass: primaryIssueClassForContext }
+        : {}),
+    };
+    const strategyReason = buildReviseStrategyReason({
+      configuredMode: configuredReviseMode,
+      resolvedMode: reviseMode,
+      reviseRound,
+      stagnationStalled: stagnation.stalled,
+      failedOutlineDeviationDimension: hasFailedOutlineDeviationDimension(basisAudit),
+      unresolvedIssueCountFromPrevRound: unresolvedIssueIdsFromPrevRound.length,
+      failureGate: basisAudit.failureGate,
+      hasFailedDimensions: Array.isArray(basisAudit.dimensionChecks)
+        && basisAudit.dimensionChecks.some((item) => item.status === "failed"),
+      overrideIssueCount: mergedOverrideIssues.length,
+    });
+    await args.onReviseStart?.({
+      round: reviseRound,
+      maxReviseRounds: effectiveMaxReviseRounds,
+      mode: reviseMode,
+      strategyReason,
+    });
+    const reviseResult = mergedOverrideIssues.length > 0
+      ? await args.pipeline.reviseDraft(
+        args.bookId,
+        args.chapterNumber,
+        reviseMode,
+        { overrideIssues: mergedOverrideIssues, reviseContext },
+      )
+      : await args.pipeline.reviseDraft(
+        args.bookId,
+        args.chapterNumber,
+        reviseMode,
+        { reviseContext },
+      );
+    const reviseAudit = normalizeReviseAuditSummary(
+      (reviseResult as { audit?: unknown }).audit,
+      args.chapterNumber,
+      reviseResult.status !== "audit-failed",
+    );
+    const fixedIssues = Array.isArray(reviseResult.fixedIssues)
+      ? reviseResult.fixedIssues.map((item) => String(item).trim()).filter((item) => item.length > 0)
+      : [];
+    const revisionEntry = {
+      round: reviseRound,
+      reviseResult,
+      reviseAudit,
+      basisIssueTexts: [...basisAudit.issueTexts],
+      fixedIssues,
+      issueResolutions: [] as Array<{
+        issueId: string;
+        issue: string;
+        outcome: "resolved" | "unresolved";
+        fixDelta?: string;
+      }>,
+      mustFixFirstIssueIds,
+      mustFixOutcomes: [] as Array<{
+        issueId: string;
+        outcome: "resolved" | "partial" | "unresolved";
+        reason?: string;
+      }>,
+    };
+    revisions.push(revisionEntry);
+    await args.onReviseComplete?.({
+      round: reviseRound,
+      maxReviseRounds: effectiveMaxReviseRounds,
+      mode: reviseMode,
+      reviseResult,
+      reviseAudit,
+    });
+
+    auditRound = reviseRound + 1;
+    await args.onAuditStart?.({ round: auditRound, maxReviseRounds: effectiveMaxReviseRounds });
+    currentAudit = normalizeAuditDraftSummary(
+      await args.pipeline.auditDraft(args.bookId, args.chapterNumber),
+    );
+    const postIssueKeys = new Set(currentAudit.issueTexts.map((issue) => normalizeIssueTextForCompare(issue)));
+    const fixDeltaLookup = buildFixDeltaLookup(revisionEntry.fixedIssues);
+    let fallbackUnboundIndex = 0;
+    revisionEntry.issueResolutions = revisionEntry.basisIssueTexts.map((issue, issueIndex) => {
+      const issueId = buildAutoReviewIssueId(issueIndex);
+      const unresolved = postIssueKeys.has(normalizeIssueTextForCompare(issue));
+      const idBoundDelta = fixDeltaLookup.byId.get(issueId);
+      const fallbackDelta = !idBoundDelta && !unresolved
+        ? fixDeltaLookup.orderedUnbound[fallbackUnboundIndex]
+        : undefined;
+      if (!idBoundDelta && !unresolved && fallbackDelta) {
+        fallbackUnboundIndex += 1;
+      }
+      return {
+        issueId,
+        issue,
+        outcome: unresolved ? "unresolved" : "resolved",
+        ...((idBoundDelta ?? fallbackDelta) ? { fixDelta: idBoundDelta ?? fallbackDelta } : {}),
+      };
+    });
+    revisionEntry.mustFixOutcomes = buildMustFixOutcomes({
+      mustFixFirstIssueIds: revisionEntry.mustFixFirstIssueIds,
+      issueResolutions: revisionEntry.issueResolutions,
+    });
+    audits.push(currentAudit);
+    const latestRevisionMustFixOutcomes = revisionEntry.mustFixOutcomes;
+    const latestRevisionMustFixTotalCount = latestRevisionMustFixOutcomes.length;
+    const latestRevisionMustFixUnresolvedCount = latestRevisionMustFixOutcomes.filter((item) => item.outcome !== "resolved").length;
+    await args.onAuditComplete?.({
+      round: auditRound,
+      maxReviseRounds: effectiveMaxReviseRounds,
+      audit: currentAudit,
+      latestRevisionMustFixOutcomes,
+      latestRevisionMustFixTotalCount,
+      latestRevisionMustFixUnresolvedCount,
+    });
+    if (currentAudit.passed) {
+      return {
+        chapterNumber: currentAudit.chapterNumber,
+        audits,
+        revisions,
+        finalAudit: currentAudit,
+        stoppedByMaxRounds: false,
+        maxReviseRounds: effectiveMaxReviseRounds,
+      };
+    }
+  }
+
+  return {
+    chapterNumber: currentAudit.chapterNumber,
+    audits,
+    revisions,
+    finalAudit: currentAudit,
+    stoppedByMaxRounds: true,
+    maxReviseRounds: effectiveMaxReviseRounds,
+    ...(structuralStagnationObserved
+      ? { stopReason: "达到自动修订轮次上限，且结构性问题持续未收敛，请先人工重构章节主线并对齐卷纲后再审计" }
+      : {}),
+  };
+}
+
+async function runUnifiedReviewLoop(args: {
+  readonly state: StateManager;
+  readonly pipeline: PipelineRunner;
+  readonly bookId: string;
+  readonly chapterNumber: number;
+  readonly entry?: ReviewEntry;
+  readonly onFinalized?: (payload: {
+    entry: ReviewEntry;
+    finalAudit: NormalizedAuditDraftSummary;
+    autoReview: UnifiedReviewLoopAutoReviewPayload;
+  }) => void | Promise<void>;
+  readonly autoReviewPolicy: {
+    enabled: boolean;
+    maxReviseRounds: number;
+    reviseMode: AutoReviseMode;
+    stagnation: {
+      minUnresolvedStructuralIssues: number;
+      scoreDeltaThreshold: number;
+    };
+  };
+  readonly onAuditStart?: (payload: { round: number; maxReviseRounds: number }) => void | Promise<void>;
+  readonly onAuditComplete?: (payload: {
+    round: number;
+    maxReviseRounds: number;
+    audit: NormalizedAuditDraftSummary;
+    latestRevisionMustFixOutcomes?: ReadonlyArray<{
+      issueId: string;
+      outcome: "resolved" | "partial" | "unresolved";
+      reason?: string;
+    }>;
+    latestRevisionMustFixTotalCount?: number;
+    latestRevisionMustFixUnresolvedCount?: number;
+  }) => void | Promise<void>;
+  readonly onReviseStart?: (payload: {
+    round: number;
+    maxReviseRounds: number;
+    mode: AutoReviseMode;
+    strategyReason?: string;
+  }) => void | Promise<void>;
+  readonly onReviseComplete?: (payload: {
+    round: number;
+    maxReviseRounds: number;
+    mode: AutoReviseMode;
+    reviseResult: PipelineReviseDraftResult;
+    reviseAudit: NormalizedReviseAuditSummary | null;
+  }) => void | Promise<void>;
+}): Promise<UnifiedReviewLoopResult> {
+  const entry = args.entry ?? "rewrite";
+  const runSingleAudit = !args.autoReviewPolicy.enabled || args.autoReviewPolicy.maxReviseRounds <= 0;
+  if (runSingleAudit) {
+    await args.onAuditStart?.({ round: 1, maxReviseRounds: 0 });
+    const normalized = normalizeAuditDraftSummary(
+      await args.pipeline.auditDraft(args.bookId, args.chapterNumber),
+    );
+    await args.onAuditComplete?.({ round: 1, maxReviseRounds: 0, audit: normalized });
+    await persistAutoReviewTerminalNote({
+      state: args.state,
+      bookId: args.bookId,
+      chapterNumber: normalized.chapterNumber,
+      finalState: normalized.passed ? "passed" : "failed-single-audit",
+      finalAudit: normalized,
+    });
+    const autoReview: UnifiedReviewLoopAutoReviewPayload = {
+      enabled: args.autoReviewPolicy.enabled,
+      maxReviseRounds: 0,
+      reviseRoundsUsed: 0,
+      auditRounds: 1,
+      stoppedByMaxRounds: false,
+      finalState: normalized.passed ? "passed" : "failed-single-audit",
+      revisions: [],
+    };
+    await args.onFinalized?.({
+      entry,
+      finalAudit: normalized,
+      autoReview,
+    });
+    return {
+      finalAudit: normalized,
+      autoReview,
+    };
+  }
+
+  const cycle = await runAuditWithAutoRevise({
+    pipeline: args.pipeline,
+    bookId: args.bookId,
+    chapterNumber: args.chapterNumber,
+    maxReviseRounds: args.autoReviewPolicy.maxReviseRounds,
+    reviseMode: args.autoReviewPolicy.reviseMode,
+    stagnationPolicy: args.autoReviewPolicy.stagnation,
+    onAuditStart: args.onAuditStart,
+    onAuditComplete: args.onAuditComplete,
+    onReviseStart: args.onReviseStart,
+    onReviseComplete: args.onReviseComplete,
+  });
+  const finalState = resolveUnifiedReviewFinalState(cycle);
+  await persistAutoReviewTerminalNote({
+    state: args.state,
+    bookId: args.bookId,
+    chapterNumber: cycle.finalAudit.chapterNumber,
+    finalState,
+    ...(finalState === "failed-max-rounds"
+      ? { stopReason: cycle.stopReason?.trim() || "达到自动修订轮次上限，仍未通过审计" }
+      : {}),
+    finalAudit: cycle.finalAudit,
+  });
+  const autoReview = buildUnifiedAutoReviewPayload({
+    enabled: args.autoReviewPolicy.enabled,
+    maxReviseRounds: args.autoReviewPolicy.maxReviseRounds,
+    cycle,
+  });
+  await args.onFinalized?.({
+    entry,
+    finalAudit: cycle.finalAudit,
+    autoReview,
+  });
+  return {
+    finalAudit: cycle.finalAudit,
+    autoReview,
+  };
+}
+
+function normalizeReviseAuditSummary(
+  audit: unknown,
+  chapterNumber: number,
+  fallbackPassed?: boolean,
+): NormalizedReviseAuditSummary | null {
+  if (!audit || typeof audit !== "object") return null;
+  const payload = audit as {
+    passed?: unknown;
+    score?: unknown;
+    issueCount?: unknown;
+    severityCounts?: unknown;
+    dimensionChecks?: unknown;
+    issueClassCounts?: unknown;
+    primaryIssueClass?: unknown;
+    summary?: unknown;
+    issues?: unknown;
+    report?: unknown;
+  };
+  const issueTexts = buildAuditIssueTexts(payload.issues);
+  const rawCounts = payload.severityCounts;
+  const fromPayloadCounts = rawCounts && typeof rawCounts === "object"
+    ? {
+        critical: Number((rawCounts as { critical?: unknown }).critical ?? 0),
+        warning: Number((rawCounts as { warning?: unknown }).warning ?? 0),
+        info: Number((rawCounts as { info?: unknown }).info ?? 0),
+      }
+    : null;
+  const validPayloadCounts = fromPayloadCounts
+    && Number.isFinite(fromPayloadCounts.critical)
+    && Number.isFinite(fromPayloadCounts.warning)
+    && Number.isFinite(fromPayloadCounts.info)
+    ? {
+        critical: Math.max(0, Math.trunc(fromPayloadCounts.critical)),
+        warning: Math.max(0, Math.trunc(fromPayloadCounts.warning)),
+        info: Math.max(0, Math.trunc(fromPayloadCounts.info)),
+      }
+    : null;
+  const severityCounts = validPayloadCounts ?? countAuditIssueSeverities(issueTexts);
+  const rawClassCounts = payload.issueClassCounts;
+  const fromPayloadClassCounts = rawClassCounts && typeof rawClassCounts === "object"
+    ? {
+        structural: Number((rawClassCounts as { structural?: unknown }).structural ?? 0),
+        textual: Number((rawClassCounts as { textual?: unknown }).textual ?? 0),
+      }
+    : null;
+  const validClassCounts = fromPayloadClassCounts
+    && Number.isFinite(fromPayloadClassCounts.structural)
+    && Number.isFinite(fromPayloadClassCounts.textual)
+    ? {
+        structural: Math.max(0, Math.trunc(fromPayloadClassCounts.structural)),
+        textual: Math.max(0, Math.trunc(fromPayloadClassCounts.textual)),
+      }
+    : undefined;
+  const primaryIssueClass = payload.primaryIssueClass === "none"
+    || payload.primaryIssueClass === "structural"
+    || payload.primaryIssueClass === "textual"
+    || payload.primaryIssueClass === "mixed"
+    ? payload.primaryIssueClass
+    : undefined;
+  const issueCount = Number.isFinite(Number(payload.issueCount))
+    ? Math.max(0, Math.trunc(Number(payload.issueCount)))
+    : issueTexts.length;
+  const basePassed = typeof payload.passed === "boolean"
+    ? payload.passed
+    : (typeof fallbackPassed === "boolean" ? fallbackPassed : issueCount === 0);
+  const score = Number.isFinite(Number(payload.score))
+    ? clampAuditScore(Number(payload.score))
+    : estimateAuditScoreFromSeverityCounts(severityCounts);
+  const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
+  const failureGate = resolveAuditFailureGate({
+    basePassed,
+    score,
+    severityCounts,
+    passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+  });
+  const summary = typeof payload.summary === "string" && payload.summary.trim()
+    ? payload.summary.trim()
+    : undefined;
+  const report = typeof payload.report === "string" && payload.report.trim()
+    ? payload.report.trim()
+    : buildAuditReportText({
+        chapterNumber,
+        passed,
+        issueCount,
+        summary,
+        issueTexts,
+        severityCounts,
+        failureGate,
+      });
+  const dimensionChecks = normalizeDimensionChecks(payload.dimensionChecks);
+  return {
+    passed,
+    score,
+    issueCount,
+    severityCounts,
+    failureGate,
+    ...(dimensionChecks.length > 0 ? { dimensionChecks } : {}),
+    ...(validClassCounts ? { issueClassCounts: validClassCounts } : {}),
+    ...(primaryIssueClass ? { primaryIssueClass } : {}),
+    summary,
+    issueTexts,
+    report,
+  };
+}
+
+function normalizeWriteAuditSummary(
+  auditResult: unknown,
+  chapterNumber: number,
+): NormalizedReviseAuditSummary | null {
+  if (!auditResult || typeof auditResult !== "object") return null;
+  const payload = auditResult as {
+    passed?: unknown;
+    issues?: unknown;
+    summary?: unknown;
+    dimensionChecks?: unknown;
+  };
+  const issueTexts = buildAuditIssueTexts(payload.issues);
+  const severityCounts = countAuditIssueSeverities(issueTexts);
+  const issueCount = issueTexts.length;
+  const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+  const basePassed = typeof payload.passed === "boolean" ? payload.passed : issueCount === 0;
+  const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
+  const failureGate = resolveAuditFailureGate({
+    basePassed,
+    score,
+    severityCounts,
+    passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+  });
+  const summary = typeof payload.summary === "string" && payload.summary.trim()
+    ? payload.summary.trim()
+    : undefined;
+  const dimensionChecks = normalizeDimensionChecks(payload.dimensionChecks);
+  return {
+    passed,
+    score,
+    issueCount,
+    severityCounts,
+    failureGate,
+    ...(dimensionChecks.length > 0 ? { dimensionChecks } : {}),
+    summary,
+    issueTexts,
+    report: buildAuditReportText({
+      chapterNumber,
+      passed,
+      issueCount,
+      summary,
+      issueTexts,
+      severityCounts,
+      failureGate,
+    }),
+  };
+}
+
+function emitSyntheticDraftDeltas(args: {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly text: string;
+}): void {
+  const text = args.text;
+  if (!text) return;
+  const chunkSize = 120;
+  for (let i = 0; i < text.length; i += chunkSize) {
+    const chunk = text.slice(i, i + chunkSize);
+    if (!chunk) continue;
+    broadcast("draft:delta", {
+      sessionId: args.sessionId,
+      runId: args.runId,
+      text: chunk,
+    });
+  }
 }
 
 interface CollectedToolExec {
@@ -109,11 +1954,68 @@ interface CollectedToolExec {
   label: string;
   status: "running" | "completed" | "error";
   args?: Record<string, unknown>;
+  logs?: string[];
   result?: string;
   error?: string;
   stages?: Array<{ label: string; status: "pending" | "completed" }>;
   startedAt: number;
   completedAt?: number;
+}
+
+interface BatchProgressState {
+  batchId: string;
+  total: number;
+  completed: number;
+  startedAt: number;
+  currentChapter?: number;
+}
+
+interface ChapterIndexEntryLike {
+  number: number;
+  title?: string;
+  status?: string;
+  wordCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  [key: string]: unknown;
+}
+
+interface PersistCheckTelemetry {
+  status: "started" | "completed";
+  beforeCount: number;
+  afterCount?: number;
+  addedChapterNumbers?: number[];
+  missingChapterFiles?: number[];
+  persisted?: boolean;
+}
+
+interface PersistRepairTelemetry {
+  status: "started" | "completed" | "failed" | "skipped";
+  repairedChapterNumbers: number[];
+  reason?: string;
+}
+
+interface WritePersistenceRepairResult {
+  status: "completed" | "failed" | "skipped";
+  repairedChapterNumbers: number[];
+  reason?: string;
+}
+
+interface WritePersistenceCheckResult {
+  persisted: boolean;
+  beforeCount: number;
+  afterCount: number;
+  addedChapterNumbers: number[];
+  missingChapterFiles: number[];
+  repair: WritePersistenceRepairResult;
+}
+
+interface WriteDegradedRecoveryResult {
+  attempted: boolean;
+  attemptedChapterNumber?: number;
+  recovered: boolean;
+  remainingDegradedChapterNumbers: number[];
+  reason?: string;
 }
 
 // --- Event bus for SSE ---
@@ -123,16 +2025,66 @@ const subscribers = new Set<EventHandler>();
 const bookCreateStatus = new Map<string, { status: "creating" | "error"; error?: string }>();
 
 // 内存缓存：service -> 模型列表 + 更新时间戳；避免每次 sidebar 挂载时都打真实 LLM /models
-const modelListCache = new Map<string, { models: Array<{ id: string; name: string }>; at: number }>();
+const modelListCache = new Map<string, { models: Array<{ id: string; name: string; source?: "manual" | "detected" }>; at: number }>();
+
+interface InFlightAgentRun {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly controller: AbortController;
+  readonly startedAt: number;
+}
+
+const inFlightAgentRunsByRunId = new Map<string, InFlightAgentRun>();
+const inFlightAgentRunIdBySession = new Map<string, string>();
+const chapterDeltaSequenceByRunId = new Map<string, number>();
+
+function createAgentRunId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function registerInFlightAgentRun(sessionId: string, runId: string, controller: AbortController): void {
+  inFlightAgentRunsByRunId.set(runId, {
+    sessionId,
+    runId,
+    controller,
+    startedAt: Date.now(),
+  });
+  inFlightAgentRunIdBySession.set(sessionId, runId);
+}
+
+function clearInFlightAgentRun(sessionId: string, runId: string): void {
+  const activeRunId = inFlightAgentRunIdBySession.get(sessionId);
+  if (activeRunId === runId) {
+    inFlightAgentRunIdBySession.delete(sessionId);
+  }
+  inFlightAgentRunsByRunId.delete(runId);
+  chapterDeltaSequenceByRunId.delete(runId);
+}
+
+function nextChapterDeltaSequence(runId: string): number {
+  const next = (chapterDeltaSequenceByRunId.get(runId) ?? 0) + 1;
+  chapterDeltaSequenceByRunId.set(runId, next);
+  return next;
+}
 
 interface ServiceConfigEntry {
   service: string;
   name?: string;
+  models?: ServiceModelEntry[];
+  modelMode?: "auto" | "manual" | "hybrid";
+  preferredModel?: string;
   baseUrl?: string;
   temperature?: number;
   maxTokens?: number;
   apiFormat?: "chat" | "responses";
   stream?: boolean;
+}
+
+interface ServiceModelEntry {
+  id: string;
+  name?: string;
+  enabled?: boolean;
+  source?: "manual" | "detected";
 }
 
 type LLMConfigSource = "env" | "studio";
@@ -176,11 +2128,32 @@ function serviceConfigKey(entry: ServiceConfigEntry): string {
   return entry.service === "custom" ? `custom:${entry.name ?? "Custom"}` : entry.service;
 }
 
+function normalizeServiceModels(raw: unknown): ServiceModelEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+    .map((entry) => ({
+      id: typeof entry.id === "string" ? entry.id.trim() : "",
+      ...(typeof entry.name === "string" && entry.name.trim().length > 0 ? { name: entry.name.trim() } : {}),
+      ...(typeof entry.enabled === "boolean" ? { enabled: entry.enabled } : {}),
+      ...(entry.source === "manual" || entry.source === "detected" ? { source: entry.source as "manual" | "detected" } : {}),
+    }))
+    .filter((entry) => entry.id.length > 0);
+}
+
+function normalizeServiceModelsField(raw: unknown): { models: ServiceModelEntry[] } | Record<string, never> {
+  if (!Array.isArray(raw)) return {};
+  return { models: normalizeServiceModels(raw) };
+}
+
 function normalizeServiceEntry(serviceId: string, value: Record<string, unknown>): ServiceConfigEntry {
   if (serviceId.startsWith("custom:")) {
     return {
       service: "custom",
       name: decodeURIComponent(serviceId.slice("custom:".length)),
+      ...normalizeServiceModelsField(value.models),
+      ...(typeof value.modelMode === "string" && ["auto", "manual", "hybrid"].includes(value.modelMode) ? { modelMode: value.modelMode as "auto" | "manual" | "hybrid" } : {}),
+      ...(typeof value.preferredModel === "string" && value.preferredModel.length > 0 ? { preferredModel: value.preferredModel } : {}),
       ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
       ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
       ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
@@ -193,6 +2166,9 @@ function normalizeServiceEntry(serviceId: string, value: Record<string, unknown>
     return {
       service: "custom",
       ...(typeof value.name === "string" && value.name.length > 0 ? { name: value.name } : {}),
+      ...normalizeServiceModelsField(value.models),
+      ...(typeof value.modelMode === "string" && ["auto", "manual", "hybrid"].includes(value.modelMode) ? { modelMode: value.modelMode as "auto" | "manual" | "hybrid" } : {}),
+      ...(typeof value.preferredModel === "string" && value.preferredModel.length > 0 ? { preferredModel: value.preferredModel } : {}),
       ...(typeof value.baseUrl === "string" && value.baseUrl.length > 0 ? { baseUrl: value.baseUrl } : {}),
       ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
       ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
@@ -203,6 +2179,9 @@ function normalizeServiceEntry(serviceId: string, value: Record<string, unknown>
 
   return {
     service: serviceId,
+    ...normalizeServiceModelsField(value.models),
+    ...(typeof value.modelMode === "string" && ["auto", "manual", "hybrid"].includes(value.modelMode) ? { modelMode: value.modelMode as "auto" | "manual" | "hybrid" } : {}),
+    ...(typeof value.preferredModel === "string" && value.preferredModel.length > 0 ? { preferredModel: value.preferredModel } : {}),
     ...(typeof value.temperature === "number" ? { temperature: value.temperature } : {}),
     ...(typeof value.maxTokens === "number" ? { maxTokens: value.maxTokens } : {}),
     ...(value.apiFormat === "chat" || value.apiFormat === "responses" ? { apiFormat: value.apiFormat } : {}),
@@ -221,6 +2200,9 @@ function normalizeServiceConfig(raw: unknown): ServiceConfigEntry[] {
       .map((entry) => ({
         service: typeof entry.service === "string" && entry.service.length > 0 ? entry.service : "custom",
         ...(typeof entry.name === "string" && entry.name.length > 0 ? { name: entry.name } : {}),
+        ...normalizeServiceModelsField(entry.models),
+        ...(typeof entry.modelMode === "string" && ["auto", "manual", "hybrid"].includes(entry.modelMode) ? { modelMode: entry.modelMode as "auto" | "manual" | "hybrid" } : {}),
+        ...(typeof entry.preferredModel === "string" && entry.preferredModel.length > 0 ? { preferredModel: entry.preferredModel } : {}),
         ...(typeof entry.baseUrl === "string" && entry.baseUrl.length > 0 ? { baseUrl: entry.baseUrl } : {}),
         ...(typeof entry.temperature === "number" ? { temperature: entry.temperature } : {}),
         ...(typeof entry.maxTokens === "number" ? { maxTokens: entry.maxTokens } : {}),
@@ -244,6 +2226,501 @@ function mergeServiceConfig(existing: ServiceConfigEntry[], updates: ServiceConf
     merged.set(serviceConfigKey(update), update);
   }
   return [...merged.values()];
+}
+
+function dedupeModelsById(
+  models: Array<{ id: string; name: string; source?: "manual" | "detected" }>,
+): Array<{ id: string; name: string; source?: "manual" | "detected" }> {
+  const seen = new Set<string>();
+  const result: Array<{ id: string; name: string; source?: "manual" | "detected" }> = [];
+  for (const model of models) {
+    const id = model.id.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    result.push({ ...model, id });
+  }
+  return result;
+}
+
+function composeEffectiveModels(args: {
+  mode: "auto" | "manual" | "hybrid";
+  manualModels: Array<{ id: string; name: string; source?: "manual" | "detected" }>;
+  detectedModels: Array<{ id: string; name: string; source?: "manual" | "detected" }>;
+  disabledModelIds?: ReadonlySet<string>;
+}): Array<{ id: string; name: string; source?: "manual" | "detected" }> {
+  const disabledModelIds = args.disabledModelIds ?? new Set<string>();
+  const manualModels = dedupeModelsById(args.manualModels)
+    .filter((model) => !disabledModelIds.has(model.id));
+  const detectedModels = dedupeModelsById(args.detectedModels)
+    .filter((model) => !disabledModelIds.has(model.id));
+
+  if (args.mode === "manual") {
+    return manualModels;
+  }
+  if (args.mode === "auto") {
+    return detectedModels;
+  }
+  return dedupeModelsById([...manualModels, ...detectedModels]);
+}
+
+function isReasonerLikeModel(modelId: string): boolean {
+  const normalized = modelId.trim().toLowerCase();
+  if (!normalized) return false;
+  if (/(reasoner|reasoning|thinking)/i.test(normalized)) return true;
+  if (/\bdeepseek-r1\b/i.test(normalized)) return true;
+  if (/\bo1\b|\bo3\b|\bo4-mini-high\b/i.test(normalized)) return true;
+  return false;
+}
+
+function isWriteInstruction(instruction: string): boolean {
+  const text = instruction.trim();
+  if (!text) return false;
+  if (/(审计|审核|audit|修订|重写|rewrite|revise|polish|rework|spot-fix|anti-detect)/i.test(text)) {
+    return false;
+  }
+  return /(写下一章|下一章|连写|连续写|写第?\d+章|write next|next chapter|write\s+\d+\s+chapters?)/i.test(text);
+}
+
+type DeterministicAgentAction =
+  | { kind: "write-next" }
+  | { kind: "write-batch"; chapterCount: number }
+  | { kind: "write-target-chapter"; chapterNumber: number }
+  | { kind: "audit"; chapterNumber: number }
+  | { kind: "audit-latest" }
+  | { kind: "audit-impacted" }
+  | {
+      kind: "revise";
+      chapterNumber: number;
+      mode: "spot-fix" | "polish" | "rework" | "anti-detect" | "rewrite";
+    }
+  | {
+      kind: "revise-batch";
+      startChapter: number;
+      endChapter: number;
+      chapterCount: number;
+      mode: "rewrite";
+    }
+  | { kind: "rewrite-batch"; startChapter: number; endChapter: number; chapterCount: number }
+  | { kind: "rewrite"; chapterNumber: number }
+  | { kind: "repair-persistence"; chapterNumber?: number };
+
+function extractChapterNumberFromInstruction(text: string): number | null {
+  const normalizedText = normalizeChineseChapterNumerals(text);
+  const zhWithDi = normalizedText.match(/第\s*(\d+)\s*章/i);
+  if (zhWithDi?.[1]) {
+    const value = parseInt(zhWithDi[1], 10);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const zhBare = normalizedText.match(/(?:^|\s)(\d+)\s*章(?:\s|$|[。.!！?？])/i);
+  if (zhBare?.[1]) {
+    const value = parseInt(zhBare[1], 10);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const en = normalizedText.match(/chapter\s*(\d+)/i);
+  if (en?.[1]) {
+    const value = parseInt(en[1], 10);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+function parseChineseNumeralToken(input: string): number | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) {
+    const direct = Number.parseInt(raw, 10);
+    return Number.isFinite(direct) && direct > 0 ? direct : null;
+  }
+  if (!/^[零〇一二三四五六七八九十百千万两]+$/.test(raw)) return null;
+  const digitMap: Record<string, number> = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+  };
+  const unitMap: Record<string, number> = {
+    "十": 10,
+    "百": 100,
+    "千": 1000,
+    "万": 10000,
+  };
+  let total = 0;
+  let section = 0;
+  let current = 0;
+  for (const ch of raw) {
+    if (Object.prototype.hasOwnProperty.call(digitMap, ch)) {
+      current = digitMap[ch]!;
+      continue;
+    }
+    const unit = unitMap[ch];
+    if (!unit) return null;
+    if (unit === 10000) {
+      section = (section + (current || 0)) * 10000;
+      total += section;
+      section = 0;
+      current = 0;
+      continue;
+    }
+    section += (current || 1) * unit;
+    current = 0;
+  }
+  const value = total + section + current;
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function normalizeChineseChapterNumerals(input: string): string {
+  return input.replace(
+    /第\s*([零〇一二三四五六七八九十百千万两\d]+)\s*章/gi,
+    (full, token: string) => {
+      const parsed = parseChineseNumeralToken(token);
+      return parsed && parsed > 0 ? `第${parsed}章` : full;
+    },
+  );
+}
+
+function isRepairPersistenceInstruction(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  const mentionsIndex = /(索引|index(?:\.json)?|chapter\s*index)/i.test(normalized);
+  const mentionsPersist = /(落库|落盘|落地|正文文件|chapter file|persist(?:ed|ence)?)/i.test(normalized);
+  const asksRepair = /(修复|补齐|补全|重建|创建|同步|恢复|校验|检查|没有|缺失|丢失|不存在|未落|没落)/i.test(normalized);
+  return asksRepair && (mentionsIndex || mentionsPersist);
+}
+
+function hasBlockedToolCallMarker(text: string): boolean {
+  if (!text.trim()) return false;
+  return /tool_call\s*\[\s*blocked\s*\]/i.test(text)
+    || /<\/?\s*minimax:tool_call\b/i.test(text)
+    || /<\/?\s*[^>\s]*tool_call[^>]*>/i.test(text);
+}
+
+function parseDeterministicReviseMode(text: string): "spot-fix" | "polish" | "rework" | "anti-detect" {
+  if (/(anti-detect|去ai味|去ai|反检测)/i.test(text)) return "anti-detect";
+  if (/(polish|润色|精修)/i.test(text)) return "polish";
+  if (/(rework|改写)/i.test(text)) return "rework";
+  return "spot-fix";
+}
+
+function parseDeterministicAgentAction(instruction: string): DeterministicAgentAction | null {
+  const text = normalizeChineseChapterNumerals(instruction.trim());
+  if (!text) return null;
+
+  if (/^(写下一章|下一章|write next(?: chapter)?|next chapter)$/i.test(text)) {
+    return { kind: "write-next" };
+  }
+
+  const zhBatch = text.match(/^(?:连写|连续写)\s*(\d+)\s*章$/i);
+  if (zhBatch?.[1]) {
+    const chapterCount = parseInt(zhBatch[1], 10);
+    if (Number.isFinite(chapterCount) && chapterCount > 0) {
+      if (chapterCount === 1) return { kind: "write-next" };
+      return { kind: "write-batch", chapterCount };
+    }
+  }
+  const enBatch = text.match(/^(?:write|continue)\s*(\d+)\s*chapters?(?:\s+continuously)?$/i);
+  if (enBatch?.[1]) {
+    const chapterCount = parseInt(enBatch[1], 10);
+    if (Number.isFinite(chapterCount) && chapterCount > 1) {
+      return { kind: "write-batch", chapterCount };
+    }
+  }
+
+  const zhWriteTarget = text.match(/^写(?:第)?\s*(\d+)\s*章[。.!！?？]?$/i);
+  if (zhWriteTarget?.[1]) {
+    const chapterNumber = parseInt(zhWriteTarget[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      // "写N章" is ambiguous in Chinese.
+      // Keep small N as batch shorthand for historical behavior ("写2章"),
+      // and treat larger N as a target chapter command ("写17章").
+      if (!/第/i.test(text) && chapterNumber <= 9) {
+        if (chapterNumber === 1) return { kind: "write-next" };
+        return { kind: "write-batch", chapterCount: chapterNumber };
+      }
+      return { kind: "write-target-chapter", chapterNumber };
+    }
+  }
+
+  const zhAudit = text.match(/^(?:审计|审核)(?:第)?\s*(\d+)\s*章[。.!！?？]?$/i);
+  if (zhAudit?.[1]) {
+    const chapterNumber = parseInt(zhAudit[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return { kind: "audit", chapterNumber };
+    }
+  }
+  const enAudit = text.match(/^audit\s*(?:chapter)?\s*(\d+)\b(?:\s+.*)?$/i);
+  if (enAudit?.[1]) {
+    const chapterNumber = parseInt(enAudit[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return { kind: "audit", chapterNumber };
+    }
+  }
+  if (/^(?:审计|审核|audit|review)(?:[。.!！?？])?$/i.test(text)) {
+    return { kind: "audit-latest" };
+  }
+  if (/^(?:批量)?审计(?:受影响|待复核)(?:章节)?(?:[。.!！?？,，、；;:：]?\s*.*)?$/i.test(text)) {
+    return { kind: "audit-impacted" };
+  }
+  if (/^(?:audit|review)\s*(?:impacted|affected|pending review)\s*chapters?(?:\s+.*)?$/i.test(text)) {
+    return { kind: "audit-impacted" };
+  }
+
+  if (isRepairPersistenceInstruction(text)) {
+    const chapterNumber = extractChapterNumberFromInstruction(text);
+    return chapterNumber
+      ? { kind: "repair-persistence", chapterNumber }
+      : { kind: "repair-persistence" };
+  }
+
+  const zhRevise = text.match(/^(?:(?:审计|审核)\s*并\s*)?(?:修订|修正|润色|精修|改写|修复)(?:第)?\s*(\d+)\s*章(?:[。.!！?？,，、；;:：]?\s*.*)?$/i);
+  if (zhRevise?.[1]) {
+    const chapterNumber = parseInt(zhRevise[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return {
+        kind: "revise",
+        chapterNumber,
+        mode: parseDeterministicReviseMode(text),
+      };
+    }
+  }
+  const enRevise = text.match(/^(?:revise|polish|spot-fix|anti-detect)\s*(?:chapter)?\s*(\d+)(?:\s+.*)?$/i);
+  if (enRevise?.[1]) {
+    const chapterNumber = parseInt(enRevise[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return {
+        kind: "revise",
+        chapterNumber,
+        mode: parseDeterministicReviseMode(text),
+      };
+    }
+  }
+
+  const zhRewriteBatchDestructive = text.match(
+    /^重写(?:第)?\s*(\d+)\s*(?:章)?\s*(?:-|~|～|到|至)\s*(?:第)?\s*(\d+)\s*章(?:并|且)?(?:回滚|撤销|删除)后续(?:章节)?(?:[。.!！?？,，、；;:：]?\s*.*)?$/i,
+  );
+  if (zhRewriteBatchDestructive?.[1] && zhRewriteBatchDestructive?.[2]) {
+    const startChapter = parseInt(zhRewriteBatchDestructive[1], 10);
+    const endChapter = parseInt(zhRewriteBatchDestructive[2], 10);
+    if (
+      Number.isFinite(startChapter)
+      && Number.isFinite(endChapter)
+      && startChapter > 0
+      && endChapter >= startChapter
+    ) {
+      if (startChapter === endChapter) {
+        return { kind: "rewrite", chapterNumber: startChapter };
+      }
+      return {
+        kind: "rewrite-batch",
+        startChapter,
+        endChapter,
+        chapterCount: endChapter - startChapter + 1,
+      };
+    }
+  }
+  const enRewriteBatchDestructive = text.match(
+    /^(?:rewrite|rework)\s*(?:chapters?)?\s*(\d+)\s*(?:-|to)\s*(\d+)\s*(?:and|with)?\s*(?:rollback|delete|remove)\s*(?:following|subsequent)\s*(?:chapters?)?(?:\s+.*)?$/i,
+  );
+  if (enRewriteBatchDestructive?.[1] && enRewriteBatchDestructive?.[2]) {
+    const startChapter = parseInt(enRewriteBatchDestructive[1], 10);
+    const endChapter = parseInt(enRewriteBatchDestructive[2], 10);
+    if (
+      Number.isFinite(startChapter)
+      && Number.isFinite(endChapter)
+      && startChapter > 0
+      && endChapter >= startChapter
+    ) {
+      if (startChapter === endChapter) {
+        return { kind: "rewrite", chapterNumber: startChapter };
+      }
+      return {
+        kind: "rewrite-batch",
+        startChapter,
+        endChapter,
+        chapterCount: endChapter - startChapter + 1,
+      };
+    }
+  }
+
+  const zhRewriteSingleDestructive = text.match(
+    /^重写(?:第)?\s*(\d+)\s*章(?:并|且)?(?:回滚|撤销|删除)后续(?:章节)?(?:[。.!！?？,，、；;:：]?\s*.*)?$/i,
+  );
+  if (zhRewriteSingleDestructive?.[1]) {
+    const chapterNumber = parseInt(zhRewriteSingleDestructive[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return { kind: "rewrite", chapterNumber };
+    }
+  }
+  const zhRewriteFromChapterDestructive = text.match(
+    /^从第\s*(\d+)\s*章开始重写后续(?:章节)?(?:[。.!！?？,，、；;:：]?\s*.*)?$/i,
+  );
+  if (zhRewriteFromChapterDestructive?.[1]) {
+    const chapterNumber = parseInt(zhRewriteFromChapterDestructive[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return { kind: "rewrite", chapterNumber };
+    }
+  }
+  const enRewriteSingleDestructive = text.match(
+    /^(?:rewrite|rework)\s*(?:chapter)?\s*(\d+)\s*(?:and|with)?\s*(?:rollback|delete|remove)\s*(?:following|subsequent)\s*(?:chapters?)?(?:\s+.*)?$/i,
+  );
+  if (enRewriteSingleDestructive?.[1]) {
+    const chapterNumber = parseInt(enRewriteSingleDestructive[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return { kind: "rewrite", chapterNumber };
+    }
+  }
+
+  const zhRewriteBatch = text.match(
+    /^重写(?:第)?\s*(\d+)\s*(?:章)?\s*(?:-|~|～|到|至)\s*(?:第)?\s*(\d+)\s*章(?:[。.!！?？,，、；;:：]?\s*.*)?$/i,
+  );
+  if (zhRewriteBatch?.[1] && zhRewriteBatch?.[2]) {
+    const startChapter = parseInt(zhRewriteBatch[1], 10);
+    const endChapter = parseInt(zhRewriteBatch[2], 10);
+    if (
+      Number.isFinite(startChapter)
+      && Number.isFinite(endChapter)
+      && startChapter > 0
+      && endChapter >= startChapter
+    ) {
+      if (startChapter === endChapter) {
+        return { kind: "revise", chapterNumber: startChapter, mode: "rewrite" };
+      }
+      return {
+        kind: "revise-batch",
+        startChapter,
+        endChapter,
+        chapterCount: endChapter - startChapter + 1,
+        mode: "rewrite",
+      };
+    }
+  }
+  const enRewriteBatch = text.match(
+    /^(?:rewrite|rework)\s*(?:chapters?)?\s*(\d+)\s*(?:-|to)\s*(\d+)(?:\s+.*)?$/i,
+  );
+  if (enRewriteBatch?.[1] && enRewriteBatch?.[2]) {
+    const startChapter = parseInt(enRewriteBatch[1], 10);
+    const endChapter = parseInt(enRewriteBatch[2], 10);
+    if (
+      Number.isFinite(startChapter)
+      && Number.isFinite(endChapter)
+      && startChapter > 0
+      && endChapter >= startChapter
+    ) {
+      if (startChapter === endChapter) {
+        return { kind: "revise", chapterNumber: startChapter, mode: "rewrite" };
+      }
+      return {
+        kind: "revise-batch",
+        startChapter,
+        endChapter,
+        chapterCount: endChapter - startChapter + 1,
+        mode: "rewrite",
+      };
+    }
+  }
+
+  const zhRewrite = text.match(/^重写(?:第)?\s*(\d+)\s*章(?:[。.!！?？,，、；;:：]?\s*.*)?$/i);
+  if (zhRewrite?.[1]) {
+    const chapterNumber = parseInt(zhRewrite[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return { kind: "revise", chapterNumber, mode: "rewrite" };
+    }
+  }
+  const enRewrite = text.match(/^(?:rewrite|rework)\s*(?:chapter)?\s*(\d+)(?:\s+.*)?$/i);
+  if (enRewrite?.[1]) {
+    const chapterNumber = parseInt(enRewrite[1], 10);
+    if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+      return { kind: "revise", chapterNumber, mode: "rewrite" };
+    }
+  }
+
+  return null;
+}
+
+async function resolveAuditTargetChapterNumber(args: {
+  state: StateManager;
+  bookId: string;
+  explicitChapterNumber?: number;
+}): Promise<number> {
+  if (typeof args.explicitChapterNumber === "number" && Number.isFinite(args.explicitChapterNumber) && args.explicitChapterNumber > 0) {
+    return Math.trunc(args.explicitChapterNumber);
+  }
+  const index = await args.state.loadChapterIndex(args.bookId).catch(() => [] as Array<{ number?: unknown }>);
+  const indexedNumbers = index
+    .map((item) => Number(item.number))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => Math.trunc(value));
+  if (indexedNumbers.length > 0) {
+    return Math.max(...indexedNumbers);
+  }
+  const nextChapter = await args.state.getNextChapterNumber(args.bookId).catch(() => 1);
+  const latestChapter = Number.isFinite(Number(nextChapter)) ? Math.trunc(Number(nextChapter)) - 1 : 0;
+  if (latestChapter > 0) return latestChapter;
+  throw new Error("No chapters to audit.");
+}
+
+function pickFastWriterModelFromEntry(
+  entry: ServiceConfigEntry | undefined,
+  currentModel: string,
+): string | null {
+  const enabledModels = normalizeServiceModels(entry?.models ?? [])
+    .filter((model) => model.enabled !== false)
+    .map((model) => model.id.trim())
+    .filter(Boolean);
+  if (enabledModels.length === 0) return null;
+  const candidates = enabledModels.filter((id) => !isReasonerLikeModel(id) && id !== currentModel);
+  if (candidates.length === 0) return null;
+  const prioritized = [...candidates].sort((left, right) => {
+    const score = (value: string): number => {
+      const lower = value.toLowerCase();
+      let result = 0;
+      if (/(chat|turbo|flash|mini|haiku|sonnet|gpt-4o|gpt-4\.1|deepseek-chat)/i.test(lower)) result += 5;
+      if (/(instruct|base|embedding|rerank|vision)/i.test(lower)) result -= 3;
+      return result;
+    };
+    return score(right) - score(left);
+  });
+  return prioritized[0] ?? null;
+}
+
+function resolveFastWriterModelSelection(args: {
+  readonly services: ReadonlyArray<ServiceConfigEntry>;
+  readonly currentModel?: string;
+  readonly preferredServiceKey?: string;
+}): { serviceKey: string; model: string } | null {
+  const currentModel = args.currentModel?.trim();
+  if (!currentModel || !isReasonerLikeModel(currentModel)) return null;
+  const normalizedServices = [...args.services];
+  if (normalizedServices.length === 0) return null;
+
+  const pickByModelMembership = (entry: ServiceConfigEntry): boolean => {
+    const models = normalizeServiceModels(entry.models ?? []);
+    if (models.some((model) => model.id.trim() === currentModel)) return true;
+    if (entry.preferredModel?.trim() === currentModel) return true;
+    return false;
+  };
+
+  const preferred = args.preferredServiceKey
+    ? normalizedServices.find((entry) => serviceConfigKey(entry) === args.preferredServiceKey)
+    : undefined;
+  const matched = preferred
+    ?? normalizedServices.find((entry) => pickByModelMembership(entry))
+    ?? normalizedServices[0];
+  if (!matched) return null;
+
+  const fastModel = pickFastWriterModelFromEntry(matched, currentModel);
+  if (!fastModel) return null;
+  return {
+    serviceKey: serviceConfigKey(matched),
+    model: fastModel,
+  };
 }
 
 async function loadRawConfig(root: string): Promise<Record<string, unknown>> {
@@ -420,6 +2897,1076 @@ async function fetchModelsFromServiceBaseUrl(
   }
 }
 
+function elapsedSince(startedAt: number): number {
+  return Math.max(1, Date.now() - startedAt);
+}
+
+function parseChapterFileNumber(fileName: string): number | null {
+  const match = fileName.match(/^(\d+)_.*\.md$/i);
+  if (!match?.[1]) return null;
+  const chapterNumber = parseInt(match[1], 10);
+  if (!Number.isFinite(chapterNumber) || chapterNumber <= 0) return null;
+  return chapterNumber;
+}
+
+function normalizeChapterIndexEntries(index: unknown): ChapterIndexEntryLike[] {
+  if (!Array.isArray(index)) return [];
+  return index.filter((entry): entry is ChapterIndexEntryLike => Boolean(entry) && typeof entry === "object");
+}
+
+function uniqueSortedChapterNumbers(values: ReadonlyArray<number>): number[] {
+  return [...new Set(
+    values
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0),
+  )].sort((left, right) => left - right);
+}
+
+const REWRITE_IMPACT_NOTE_PREFIX = "[rewrite-impact]";
+
+interface RewriteImpactSummary {
+  affectedChapterNumbers: number[];
+  affectedCount: number;
+  startChapter?: number;
+  endChapter?: number;
+}
+
+interface RewriteRiskSummary {
+  rollbackTarget: number;
+  discardedChapterNumbers: number[];
+  discardedCount: number;
+  message: string;
+}
+
+interface NonDestructiveRewriteBaseline {
+  pivotChapter: number;
+  downstreamIndexChapterNumbers: number[];
+  downstreamFileChapterNumbers: number[];
+  downstreamSnapshotChapterNumbers: number[];
+}
+
+interface NonDestructiveRewriteRegression {
+  missingIndexChapterNumbers: number[];
+  missingFileChapterNumbers: number[];
+  missingSnapshotChapterNumbers: number[];
+}
+
+function isRewriteImpactNote(note: unknown): boolean {
+  return typeof note === "string" && note.trim().startsWith(REWRITE_IMPACT_NOTE_PREFIX);
+}
+
+function isTruthyToggle(value: string | undefined): boolean {
+  if (typeof value !== "string") return false;
+  return /^(1|true|yes|on)$/i.test(value.trim());
+}
+
+function isDestructiveRewriteEnabled(): boolean {
+  return isTruthyToggle(process.env.INKOS_ENABLE_DESTRUCTIVE_REWRITE);
+}
+
+function assertDestructiveRewriteEnabled(): void {
+  if (isDestructiveRewriteEnabled()) return;
+  throw new ApiError(
+    403,
+    "AGENT_DESTRUCTIVE_REWRITE_DISABLED",
+    "危险重写模式默认关闭（仅高级用户可用）。请先设置环境变量 INKOS_ENABLE_DESTRUCTIVE_REWRITE=true 并重启 Studio。",
+  );
+}
+
+function buildRewriteImpactNote(pivotChapter: number): string {
+  return `${REWRITE_IMPACT_NOTE_PREFIX} 上游第${pivotChapter}章已重写，请复核本章与上游衔接。`;
+}
+
+function formatRewriteImpactSummary(summary: RewriteImpactSummary): string {
+  if (summary.affectedCount <= 0) {
+    return "后续章节已保留，当前没有需要标记的受影响章节。";
+  }
+  const startChapter = summary.startChapter ?? summary.affectedChapterNumbers[0];
+  const endChapter = summary.endChapter ?? summary.affectedChapterNumbers.at(-1);
+  if (!startChapter || !endChapter) {
+    return "后续章节已保留，已标记受影响章节为待复核。";
+  }
+  if (startChapter === endChapter) {
+    return `后续章节已保留，已将第${startChapter}章标记为待复核（共1章）。`;
+  }
+  return `后续章节已保留，已将第${startChapter}-${endChapter}章标记为待复核（共${summary.affectedCount}章）。`;
+}
+
+function buildRewriteRiskMessage(summary: RewriteRiskSummary): string {
+  if (summary.discardedCount <= 0) {
+    return `风险提示：将回滚到第${summary.rollbackTarget}章，当前未检测到会被删除的后续章节。`;
+  }
+  const first = summary.discardedChapterNumbers[0];
+  const last = summary.discardedChapterNumbers.at(-1);
+  if (first && last && first !== last) {
+    return `风险提示：将回滚到第${summary.rollbackTarget}章，预计删除第${first}-${last}章（共${summary.discardedCount}章）。`;
+  }
+  const only = first ?? summary.discardedChapterNumbers[0];
+  return `风险提示：将回滚到第${summary.rollbackTarget}章，预计删除第${only ?? "?"}章（共${summary.discardedCount}章）。`;
+}
+
+function compactInstructionForAuditLog(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 220);
+}
+
+async function collectRewriteImpactChapterNumbers(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+}): Promise<number[]> {
+  const indexRaw = await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]);
+  const index = normalizeChapterIndexEntries(indexRaw);
+  return uniqueSortedChapterNumbers(
+    index
+      .map((entry) => {
+        const chapterNumber = Number(entry?.number);
+        if (!Number.isFinite(chapterNumber) || chapterNumber <= 0) return NaN;
+        return isRewriteImpactNote(entry.reviewNote) ? chapterNumber : NaN;
+      })
+      .filter((value) => Number.isFinite(value) && value > 0),
+  );
+}
+
+async function clearRewriteImpactNotes(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly chapterNumbers: ReadonlyArray<number>;
+}): Promise<void> {
+  const normalizedTargets = new Set(uniqueSortedChapterNumbers(args.chapterNumbers));
+  if (normalizedTargets.size === 0) return;
+  const indexRaw = await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]);
+  const index = normalizeChapterIndexEntries(indexRaw);
+  if (index.length === 0) return;
+  const nowIso = new Date().toISOString();
+  let changed = false;
+  const updated = index.map((entry) => {
+    const chapterNumber = Number(entry?.number);
+    if (!Number.isFinite(chapterNumber) || chapterNumber <= 0 || !normalizedTargets.has(chapterNumber)) {
+      return entry;
+    }
+    if (!isRewriteImpactNote(entry.reviewNote)) return entry;
+    const { reviewNote: _ignore, ...rest } = entry;
+    changed = true;
+    return {
+      ...rest,
+      updatedAt: nowIso,
+    };
+  });
+  if (changed) {
+    await args.state.saveChapterIndex(args.bookId, updated as any);
+  }
+}
+
+async function buildRewriteRiskSummary(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly rollbackTarget: number;
+}): Promise<RewriteRiskSummary> {
+  const indexRaw = await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]);
+  return buildRewriteRiskSummaryFromIndex({
+    index: normalizeChapterIndexEntries(indexRaw),
+    rollbackTarget: args.rollbackTarget,
+  });
+}
+
+function buildRewriteRiskSummaryFromIndex(args: {
+  readonly index: ReadonlyArray<ChapterIndexEntryLike>;
+  readonly rollbackTarget: number;
+}): RewriteRiskSummary {
+  const discardedChapterNumbers = uniqueSortedChapterNumbers(
+    args.index
+      .map((entry) => Number(entry?.number))
+      .filter((chapterNumber) => Number.isFinite(chapterNumber) && chapterNumber > args.rollbackTarget),
+  );
+  const summary: RewriteRiskSummary = {
+    rollbackTarget: args.rollbackTarget,
+    discardedChapterNumbers,
+    discardedCount: discardedChapterNumbers.length,
+    message: "",
+  };
+  summary.message = buildRewriteRiskMessage(summary);
+  return summary;
+}
+
+async function collectChapterFileNumbers(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly minimumChapterNumber: number;
+}): Promise<number[]> {
+  const chaptersDir = join(args.state.bookDir(args.bookId), "chapters");
+  const files = await readdir(chaptersDir).catch(() => [] as string[]);
+  return uniqueSortedChapterNumbers(
+    files
+      .map((fileName) => parseChapterFileNumber(fileName) ?? NaN)
+      .filter((chapterNumber) => Number.isFinite(chapterNumber) && chapterNumber > args.minimumChapterNumber),
+  );
+}
+
+async function collectSnapshotChapterNumbers(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly minimumChapterNumber: number;
+}): Promise<number[]> {
+  const snapshotsDir = join(args.state.bookDir(args.bookId), "story", "snapshots");
+  const snapshotDirs = await readdir(snapshotsDir).catch(() => [] as string[]);
+  return uniqueSortedChapterNumbers(
+    snapshotDirs
+      .map((segment) => Number.parseInt(segment, 10))
+      .filter((chapterNumber) => Number.isFinite(chapterNumber) && chapterNumber > args.minimumChapterNumber),
+  );
+}
+
+async function buildNonDestructiveRewriteBaseline(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly pivotChapter: number;
+  readonly beforeIndex?: ReadonlyArray<ChapterIndexEntryLike>;
+}): Promise<NonDestructiveRewriteBaseline> {
+  const beforeIndex = normalizeChapterIndexEntries(
+    args.beforeIndex ?? await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]),
+  );
+  const downstreamIndexChapterNumbers = uniqueSortedChapterNumbers(
+    beforeIndex
+      .map((entry) => Number(entry?.number))
+      .filter((chapterNumber) => Number.isFinite(chapterNumber) && chapterNumber > args.pivotChapter),
+  );
+  const [downstreamFileChapterNumbers, downstreamSnapshotChapterNumbers] = await Promise.all([
+    collectChapterFileNumbers({
+      state: args.state,
+      bookId: args.bookId,
+      minimumChapterNumber: args.pivotChapter,
+    }),
+    collectSnapshotChapterNumbers({
+      state: args.state,
+      bookId: args.bookId,
+      minimumChapterNumber: args.pivotChapter,
+    }),
+  ]);
+  return {
+    pivotChapter: args.pivotChapter,
+    downstreamIndexChapterNumbers,
+    downstreamFileChapterNumbers,
+    downstreamSnapshotChapterNumbers,
+  };
+}
+
+async function detectNonDestructiveRewriteRegression(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly baseline: NonDestructiveRewriteBaseline;
+  readonly afterIndex?: ReadonlyArray<ChapterIndexEntryLike>;
+}): Promise<NonDestructiveRewriteRegression> {
+  const afterIndex = normalizeChapterIndexEntries(
+    args.afterIndex ?? await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]),
+  );
+  const afterIndexNumbers = new Set(
+    afterIndex
+      .map((entry) => Number(entry?.number))
+      .filter((chapterNumber) => Number.isFinite(chapterNumber) && chapterNumber > args.baseline.pivotChapter),
+  );
+  const [afterFileChapterNumbers, afterSnapshotChapterNumbers] = await Promise.all([
+    collectChapterFileNumbers({
+      state: args.state,
+      bookId: args.bookId,
+      minimumChapterNumber: args.baseline.pivotChapter,
+    }),
+    collectSnapshotChapterNumbers({
+      state: args.state,
+      bookId: args.bookId,
+      minimumChapterNumber: args.baseline.pivotChapter,
+    }),
+  ]);
+  const afterFileNumbers = new Set(afterFileChapterNumbers);
+  const afterSnapshotNumbers = new Set(afterSnapshotChapterNumbers);
+  return {
+    missingIndexChapterNumbers: args.baseline.downstreamIndexChapterNumbers
+      .filter((chapterNumber) => !afterIndexNumbers.has(chapterNumber)),
+    missingFileChapterNumbers: args.baseline.downstreamFileChapterNumbers
+      .filter((chapterNumber) => !afterFileNumbers.has(chapterNumber)),
+    missingSnapshotChapterNumbers: args.baseline.downstreamSnapshotChapterNumbers
+      .filter((chapterNumber) => !afterSnapshotNumbers.has(chapterNumber)),
+  };
+}
+
+function formatChapterNumberList(chapterNumbers: ReadonlyArray<number>): string {
+  return chapterNumbers.map((chapterNumber) => `第${chapterNumber}章`).join("、");
+}
+
+function createNonDestructiveRewriteRegressionError(args: {
+  readonly regression: NonDestructiveRewriteRegression;
+}): ApiError {
+  const reasons: string[] = [];
+  if (args.regression.missingIndexChapterNumbers.length > 0) {
+    reasons.push(`章节索引缺失：${formatChapterNumberList(args.regression.missingIndexChapterNumbers)}`);
+  }
+  if (args.regression.missingFileChapterNumbers.length > 0) {
+    reasons.push(`章节正文缺失：${formatChapterNumberList(args.regression.missingFileChapterNumbers)}`);
+  }
+  if (args.regression.missingSnapshotChapterNumbers.length > 0) {
+    reasons.push(`章节快照缺失：${formatChapterNumberList(args.regression.missingSnapshotChapterNumbers)}`);
+  }
+  return new ApiError(
+    409,
+    "AGENT_REWRITE_CONSISTENCY_REGRESSION",
+    `非破坏重写一致性校验失败：${reasons.join("；")}。请先修复后再继续。`,
+  );
+}
+
+async function enforceNonDestructiveRewriteConsistency(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly baseline: NonDestructiveRewriteBaseline;
+  readonly afterIndex?: ReadonlyArray<ChapterIndexEntryLike>;
+}): Promise<void> {
+  const regression = await detectNonDestructiveRewriteRegression({
+    state: args.state,
+    bookId: args.bookId,
+    baseline: args.baseline,
+    afterIndex: args.afterIndex,
+  });
+  if (
+    regression.missingIndexChapterNumbers.length === 0
+    && regression.missingFileChapterNumbers.length === 0
+    && regression.missingSnapshotChapterNumbers.length === 0
+  ) {
+    return;
+  }
+  throw createNonDestructiveRewriteRegressionError({ regression });
+}
+
+async function markDownstreamChaptersForReview(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly pivotChapter: number;
+  readonly rewrittenStartChapter: number;
+  readonly rewrittenEndChapter: number;
+}): Promise<RewriteImpactSummary> {
+  const indexRaw = await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]);
+  const index = normalizeChapterIndexEntries(indexRaw);
+  if (index.length === 0) {
+    return {
+      affectedChapterNumbers: [],
+      affectedCount: 0,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const impactNote = buildRewriteImpactNote(args.pivotChapter);
+  const affectedChapterNumbers: number[] = [];
+  let changed = false;
+
+  const updated = index.map((entry) => {
+    const chapterNumber = Number(entry?.number);
+    if (!Number.isFinite(chapterNumber) || chapterNumber <= 0) return entry;
+    const reviewNote = typeof entry.reviewNote === "string" ? entry.reviewNote.trim() : "";
+
+    if (chapterNumber >= args.rewrittenStartChapter && chapterNumber <= args.rewrittenEndChapter) {
+      if (isRewriteImpactNote(reviewNote)) {
+        const { reviewNote: _ignore, ...rest } = entry;
+        changed = true;
+        return { ...rest, updatedAt: nowIso };
+      }
+      return entry;
+    }
+
+    if (chapterNumber > args.pivotChapter) {
+      affectedChapterNumbers.push(chapterNumber);
+      if (reviewNote !== impactNote) {
+        changed = true;
+        return {
+          ...entry,
+          reviewNote: impactNote,
+          updatedAt: nowIso,
+        };
+      }
+    }
+    return entry;
+  });
+
+  if (changed) {
+    await args.state.saveChapterIndex(args.bookId, updated as any);
+  }
+
+  const uniqueAffected = uniqueSortedChapterNumbers(affectedChapterNumbers);
+  return {
+    affectedChapterNumbers: uniqueAffected,
+    affectedCount: uniqueAffected.length,
+    ...(uniqueAffected.length > 0
+      ? { startChapter: uniqueAffected[0], endChapter: uniqueAffected.at(-1) }
+      : {}),
+  };
+}
+
+function detectDegradedChapterNumbersFromIndex(args: {
+  readonly index: ReadonlyArray<ChapterIndexEntryLike>;
+  readonly chapterNumbers: ReadonlyArray<number>;
+}): number[] {
+  const chapterSet = new Set(uniqueSortedChapterNumbers(args.chapterNumbers));
+  if (chapterSet.size === 0) return [];
+  const degraded = new Set<number>();
+  for (const entry of args.index) {
+    const chapterNumber = Number(entry?.number);
+    if (!Number.isFinite(chapterNumber) || chapterNumber <= 0 || !chapterSet.has(chapterNumber)) continue;
+    const status = typeof entry?.status === "string" ? entry.status.trim().toLowerCase() : "";
+    if (status === "state-degraded") {
+      degraded.add(chapterNumber);
+    }
+  }
+  return [...degraded].sort((left, right) => left - right);
+}
+
+async function findDegradedChapterNumbers(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly chapterNumbers: ReadonlyArray<number>;
+}): Promise<number[]> {
+  const indexRaw = await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]);
+  const index = normalizeChapterIndexEntries(indexRaw);
+  return detectDegradedChapterNumbersFromIndex({
+    index,
+    chapterNumbers: args.chapterNumbers,
+  });
+}
+
+async function tryAutoRecoverDegradedWrite(args: {
+  readonly pipeline: PipelineRunner;
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly chapterNumbers: ReadonlyArray<number>;
+  readonly log: (message: string, level?: "info" | "warning" | "error") => void;
+}): Promise<WriteDegradedRecoveryResult> {
+  const initialDegraded = await findDegradedChapterNumbers({
+    state: args.state,
+    bookId: args.bookId,
+    chapterNumbers: args.chapterNumbers,
+  });
+  if (initialDegraded.length === 0) {
+    return {
+      attempted: false,
+      recovered: true,
+      remainingDegradedChapterNumbers: [],
+    };
+  }
+
+  const attemptedChapterNumber = initialDegraded.at(-1);
+  if (!attemptedChapterNumber) {
+    return {
+      attempted: false,
+      recovered: false,
+      remainingDegradedChapterNumbers: initialDegraded,
+      reason: "无法确定需要修复的目标章节。",
+    };
+  }
+
+  args.log(`检测到状态降级章节：${initialDegraded.join("、")}，尝试自动修复第${attemptedChapterNumber}章。`);
+  let recoverReason: string | undefined;
+  try {
+    await args.pipeline.resyncChapterArtifacts(args.bookId, attemptedChapterNumber);
+  } catch (error) {
+    recoverReason = error instanceof Error ? error.message : String(error);
+    args.log(`自动修复第${attemptedChapterNumber}章失败：${recoverReason}`, "warning");
+  }
+
+  const remainingDegradedChapterNumbers = await findDegradedChapterNumbers({
+    state: args.state,
+    bookId: args.bookId,
+    chapterNumbers: args.chapterNumbers,
+  });
+  const recovered = remainingDegradedChapterNumbers.length === 0;
+  if (recovered) {
+    args.log(`自动修复成功：已恢复第${attemptedChapterNumber}章状态。`);
+  } else {
+    args.log(`自动修复后仍有降级章节：${remainingDegradedChapterNumbers.join("、")}`, "warning");
+  }
+  return {
+    attempted: true,
+    attemptedChapterNumber,
+    recovered,
+    remainingDegradedChapterNumbers,
+    ...(recoverReason ? { reason: recoverReason } : {}),
+  };
+}
+
+async function findChapterFileNameByNumber(state: StateManager, bookId: string, chapterNumber: number): Promise<string | null> {
+  const chaptersDir = join(state.bookDir(bookId), "chapters");
+  const files = await readdir(chaptersDir).catch(() => [] as string[]);
+  const paddedNum = String(chapterNumber).padStart(4, "0");
+  const matches = files
+    .filter((file) => file.startsWith(paddedNum) && file.endsWith(".md"))
+    .sort((left, right) => left.localeCompare(right));
+  return matches.at(-1) ?? null;
+}
+
+function estimateChapterWordCount(markdown: string, language?: string): number {
+  const countingLanguage = language === "en" ? "en" : "zh";
+  return countChapterLengthByLanguage(markdown, countingLanguage);
+}
+
+function deriveChapterTitle(args: {
+  chapterNumber: number;
+  fileName: string;
+  markdown: string;
+}): string {
+  const headingLine = args.markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("#"));
+  if (headingLine) {
+    const rawHeading = headingLine.replace(/^#+\s*/, "").trim();
+    const stripped = rawHeading
+      .replace(/^第\s*\d+\s*章[\s:：\-]*/i, "")
+      .trim();
+    if (stripped) return stripped;
+    if (rawHeading) return rawHeading;
+  }
+
+  const fileStem = args.fileName.replace(/\.md$/i, "");
+  const underscoreIndex = fileStem.indexOf("_");
+  const rawTitle = underscoreIndex >= 0 ? fileStem.slice(underscoreIndex + 1) : fileStem;
+  const title = rawTitle.replace(/_/g, " ").trim();
+  if (title) return title;
+  return `第${args.chapterNumber}章`;
+}
+
+async function repairChapterIndexFromDisk(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly afterIndex: ReadonlyArray<ChapterIndexEntryLike>;
+  readonly minimumChapterNumber?: number;
+  readonly onTelemetry?: (payload: PersistRepairTelemetry) => void;
+}): Promise<WritePersistenceRepairResult> {
+  args.onTelemetry?.({
+    status: "started",
+    repairedChapterNumbers: [],
+  });
+
+  const chaptersDir = join(args.state.bookDir(args.bookId), "chapters");
+  const chapterFiles = await readdir(chaptersDir).catch(() => [] as string[]);
+  const filesByNumber = new Map<number, string>();
+  for (const fileName of chapterFiles) {
+    const chapterNumber = parseChapterFileNumber(fileName);
+    if (!chapterNumber) continue;
+    filesByNumber.set(chapterNumber, fileName);
+  }
+
+  if (filesByNumber.size === 0) {
+    const skipped = {
+      status: "skipped" as const,
+      repairedChapterNumbers: [],
+      reason: "未发现可用于修复的章节正文文件。",
+    };
+    args.onTelemetry?.({
+      status: "skipped",
+      repairedChapterNumbers: [],
+      reason: skipped.reason,
+    });
+    return skipped;
+  }
+
+  const indexedNumbers = new Set(
+    args.afterIndex
+      .map((entry) => Number(entry?.number))
+      .filter((chapterNumber) => Number.isFinite(chapterNumber) && chapterNumber > 0),
+  );
+  const missingIndexNumbers = [...filesByNumber.keys()]
+    .filter((chapterNumber) =>
+      !indexedNumbers.has(chapterNumber)
+      && chapterNumber >= (args.minimumChapterNumber ?? 1),
+    )
+    .sort((left, right) => left - right);
+
+  if (missingIndexNumbers.length === 0) {
+    const skipped = {
+      status: "skipped" as const,
+      repairedChapterNumbers: [],
+      reason: "章节索引与磁盘文件一致，跳过修复。",
+    };
+    args.onTelemetry?.({
+      status: "skipped",
+      repairedChapterNumbers: [],
+      reason: skipped.reason,
+    });
+    return skipped;
+  }
+
+  const nowIso = new Date().toISOString();
+  const repairedEntries: ChapterIndexEntryLike[] = [];
+  for (const chapterNumber of missingIndexNumbers) {
+    const fileName = filesByNumber.get(chapterNumber);
+    if (!fileName) continue;
+    const filePath = join(chaptersDir, fileName);
+    try {
+      const markdown = await readFile(filePath, "utf-8");
+      repairedEntries.push({
+        number: chapterNumber,
+        title: deriveChapterTitle({ chapterNumber, fileName, markdown }),
+        status: "ready-for-review",
+        wordCount: estimateChapterWordCount(markdown),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    } catch {
+      // Ignore unreadable chapter file and continue repairing.
+    }
+  }
+
+  if (repairedEntries.length === 0) {
+    const failed = {
+      status: "failed" as const,
+      repairedChapterNumbers: [],
+      reason: "检测到索引缺口，但未能读取对应章节文件完成修复。",
+    };
+    args.onTelemetry?.({
+      status: "failed",
+      repairedChapterNumbers: [],
+      reason: failed.reason,
+    });
+    return failed;
+  }
+
+  const repairedNumbers = repairedEntries.map((entry) => entry.number).sort((left, right) => left - right);
+  const updatedIndex = [...args.afterIndex, ...repairedEntries]
+    .sort((left, right) => Number(left.number) - Number(right.number))
+    .map((entry) => ({ ...entry }));
+  await args.state.saveChapterIndex(args.bookId, updatedIndex as any);
+
+  const completed = {
+    status: "completed" as const,
+    repairedChapterNumbers: repairedNumbers,
+  };
+  args.onTelemetry?.({
+    status: "completed",
+    repairedChapterNumbers: repairedNumbers,
+  });
+  return completed;
+}
+
+async function verifyWritePersistence(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly beforeIndex: ReadonlyArray<ChapterIndexEntryLike>;
+  readonly onPersistCheck?: (payload: PersistCheckTelemetry) => void;
+  readonly onPersistRepair?: (payload: PersistRepairTelemetry) => void;
+}): Promise<WritePersistenceCheckResult> {
+  const normalizedBeforeIndex = normalizeChapterIndexEntries(args.beforeIndex);
+  const beforeCount = normalizedBeforeIndex.length;
+  args.onPersistCheck?.({
+    status: "started",
+    beforeCount,
+  });
+
+  let afterIndexRaw = normalizeChapterIndexEntries(
+    await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]),
+  );
+  const beforeNumbers = new Set(
+    normalizedBeforeIndex
+      .map((entry) => Number(entry?.number))
+      .filter((n) => Number.isFinite(n) && n > 0),
+  );
+  const beforeMaxChapterNumber = beforeNumbers.size > 0 ? Math.max(...beforeNumbers) : 0;
+  const chaptersDir = join(args.state.bookDir(args.bookId), "chapters");
+  const chapterFiles = await readdir(chaptersDir).catch(() => [] as string[]);
+  const computeSnapshot = (index: ReadonlyArray<ChapterIndexEntryLike>): {
+    afterCount: number;
+    addedChapterNumbers: number[];
+    missingChapterFiles: number[];
+  } => {
+    const addedChapterNumbers = index
+      .map((entry) => Number(entry?.number))
+      .filter((n) => Number.isFinite(n) && n > 0 && !beforeNumbers.has(n));
+    const hasChapterFile = (chapterNumber: number): boolean => {
+      const prefix = String(chapterNumber).padStart(4, "0");
+      return chapterFiles.some((file) => file.startsWith(prefix) && file.endsWith(".md"));
+    };
+    const missingChapterFiles = addedChapterNumbers.filter((chapterNumber) => !hasChapterFile(chapterNumber));
+    return {
+      afterCount: index.length,
+      addedChapterNumbers,
+      missingChapterFiles,
+    };
+  };
+
+  let snapshot = computeSnapshot(afterIndexRaw);
+  let repair: WritePersistenceRepairResult = {
+    status: "skipped",
+    repairedChapterNumbers: [],
+    reason: "无需修复。",
+  };
+
+  if (snapshot.addedChapterNumbers.length === 0 || snapshot.missingChapterFiles.length > 0) {
+    repair = await repairChapterIndexFromDisk({
+      state: args.state,
+      bookId: args.bookId,
+      afterIndex: afterIndexRaw,
+      minimumChapterNumber: beforeMaxChapterNumber + 1,
+      onTelemetry: args.onPersistRepair,
+    });
+    if (repair.status === "completed") {
+      afterIndexRaw = normalizeChapterIndexEntries(
+        await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]),
+      );
+      snapshot = computeSnapshot(afterIndexRaw);
+    }
+  }
+
+  const persisted = snapshot.addedChapterNumbers.length > 0 && snapshot.missingChapterFiles.length === 0;
+  args.onPersistCheck?.({
+    status: "completed",
+    beforeCount,
+    afterCount: snapshot.afterCount,
+    addedChapterNumbers: snapshot.addedChapterNumbers,
+    missingChapterFiles: snapshot.missingChapterFiles,
+    persisted,
+  });
+
+  return {
+    persisted,
+    beforeCount,
+    afterCount: snapshot.afterCount,
+    addedChapterNumbers: snapshot.addedChapterNumbers,
+    missingChapterFiles: snapshot.missingChapterFiles,
+    repair,
+  };
+}
+
+async function prepareRewriteFromChapter(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly chapterNumber: number;
+}): Promise<{
+  rollbackTarget: number;
+  discarded: ReadonlyArray<number>;
+  usedFallbackRepair: boolean;
+}> {
+  const rollbackTarget = args.chapterNumber - 1;
+  let discarded: ReadonlyArray<number>;
+  let usedFallbackRepair = false;
+  try {
+    discarded = await args.state.rollbackToChapter(args.bookId, rollbackTarget);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/snapshot/i.test(message) || /restore/i.test(message)) {
+      try {
+        discarded = await args.state.rollbackToChapterWithoutSnapshot(args.bookId, rollbackTarget);
+        usedFallbackRepair = true;
+      } catch (fallbackError) {
+        const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        throw new ApiError(
+          409,
+          "AGENT_REWRITE_SNAPSHOT_MISSING",
+          `无法重写第${args.chapterNumber}章：缺少可回滚快照（目标第${rollbackTarget}章）。自动修复失败：${fallbackMessage}`,
+        );
+      }
+    } else {
+      throw error;
+    }
+  }
+  const nextChapterNumber = await args.state.getNextChapterNumber(args.bookId);
+  if (nextChapterNumber !== args.chapterNumber) {
+    throw new Error(
+      `Cannot rewrite chapter ${args.chapterNumber}: expected next chapter to be ${args.chapterNumber}, but resolved to ${nextChapterNumber}`,
+    );
+  }
+  return { rollbackTarget, discarded, usedFallbackRepair };
+}
+
+async function writeRewrittenChapter(args: {
+  readonly pipeline: PipelineRunner;
+  readonly bookId: string;
+  readonly chapterNumber: number;
+  readonly wordCount?: number;
+  readonly quickMode?: boolean;
+}): Promise<Awaited<ReturnType<PipelineRunner["writeNextChapter"]>>> {
+  const hasWordCount = typeof args.wordCount === "number" && Number.isFinite(args.wordCount);
+  const writeOptions = typeof args.quickMode === "boolean"
+    ? { quickMode: args.quickMode }
+    : undefined;
+  let writeResult: Awaited<ReturnType<PipelineRunner["writeNextChapter"]>>;
+  try {
+    writeResult = (hasWordCount || writeOptions)
+      ? await args.pipeline.writeNextChapter(
+        args.bookId,
+        hasWordCount ? args.wordCount : undefined,
+        undefined,
+        writeOptions,
+      )
+      : await args.pipeline.writeNextChapter(args.bookId);
+  } catch (error) {
+    rethrowWriteErrorAsApiError(error, "重写");
+  }
+
+  const writtenChapterNumber = Number(writeResult.chapterNumber ?? 0);
+  if (
+    Number.isFinite(writtenChapterNumber)
+    && writtenChapterNumber > 0
+    && writtenChapterNumber !== args.chapterNumber
+  ) {
+    throw new Error(
+      `Cannot rewrite chapter ${args.chapterNumber}: write returned chapter ${writtenChapterNumber}`,
+    );
+  }
+  return writeResult;
+}
+
+function extractChapterPreviewBody(markdown: string): string {
+  const normalized = markdown.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").trim();
+  if (!normalized) return "";
+  const lines = normalized.split("\n");
+  const firstNonEmpty = lines.findIndex((line) => line.trim().length > 0);
+  if (firstNonEmpty < 0) return "";
+  const bodyLines = lines.slice(firstNonEmpty);
+  if (bodyLines.length > 0 && /^\s*#/.test(bodyLines[0] ?? "")) {
+    bodyLines.shift();
+  }
+  while (bodyLines.length > 0 && bodyLines[0]?.trim().length === 0) {
+    bodyLines.shift();
+  }
+  const body = bodyLines.join("\n").trim();
+  return body || normalized;
+}
+
+function splitChapterPreviewText(text: string, options?: { maxChars?: number; chunkSize?: number }): string[] {
+  const maxChars = Math.max(800, Number(options?.maxChars ?? 6_000));
+  const chunkSize = Math.max(60, Number(options?.chunkSize ?? 220));
+  const normalized = text.trim().slice(0, maxChars);
+  if (!normalized) return [];
+  const chunks: string[] = [];
+  for (let i = 0; i < normalized.length; i += chunkSize) {
+    const chunk = normalized.slice(i, i + chunkSize);
+    if (chunk) chunks.push(chunk);
+  }
+  return chunks;
+}
+
+async function emitChapterDeltaFallbackIfMissing(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly chapterNumber: number;
+  readonly mode: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly emittedChapterPreviewNumbers: Set<number>;
+}): Promise<boolean> {
+  if (!Number.isFinite(args.chapterNumber) || args.chapterNumber <= 0) return false;
+  if (args.emittedChapterPreviewNumbers.has(args.chapterNumber)) return false;
+  const chapterFileName = await findChapterFileNameByNumber(args.state, args.bookId, args.chapterNumber);
+  if (!chapterFileName) return false;
+  const chapterPath = join(args.state.bookDir(args.bookId), "chapters", chapterFileName);
+  const markdown = await readFile(chapterPath, "utf-8").catch(() => "");
+  if (!markdown.trim()) return false;
+  const previewText = extractChapterPreviewBody(markdown);
+  const chunks = splitChapterPreviewText(previewText);
+  if (chunks.length === 0) return false;
+  for (const chunk of chunks) {
+    broadcast("chapter:delta", {
+      sessionId: args.sessionId,
+      runId: args.runId,
+      sequence: nextChapterDeltaSequence(args.runId),
+      previewType: "chapter",
+      bookId: args.bookId,
+      chapterNumber: args.chapterNumber,
+      mode: args.mode,
+      text: chunk,
+    });
+  }
+  args.emittedChapterPreviewNumbers.add(args.chapterNumber);
+  return true;
+}
+
+function rethrowWriteErrorAsApiError(error: unknown, actionLabel: string): never {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/state-degraded/i.test(message)) {
+    throw new ApiError(
+      409,
+      "AGENT_WRITE_DEGRADED",
+      `${actionLabel}被阻止：最新章节处于状态降级（state-degraded）。请先修复该章状态后再继续。`,
+    );
+  }
+  throw error;
+}
+
+function hasStateDegradedSignal(text: string): boolean {
+  return /state-degraded|状态降级/i.test(text);
+}
+
+function inferWriterStateDegradedPrecondition(args: {
+  readonly toolExecutions: ReadonlyArray<CollectedToolExec>;
+  readonly responseText?: string;
+}): boolean {
+  if (typeof args.responseText === "string" && hasStateDegradedSignal(args.responseText)) {
+    return true;
+  }
+  for (const execution of args.toolExecutions) {
+    if (execution.agent !== "writer") continue;
+    if (execution.status !== "error") continue;
+    if (typeof execution.error === "string" && hasStateDegradedSignal(execution.error)) {
+      return true;
+    }
+    if (Array.isArray(execution.logs)) {
+      for (const log of execution.logs) {
+        if (hasStateDegradedSignal(String(log))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+function tryParseHttpStatusCode(message: string): number | null {
+  const patterns = [
+    /\b(\d{3})\s*status code\b/i,
+    /\bstatus code\s*\(?\s*(\d{3})\s*\)?/i,
+    /\bhttp\s*(\d{3})\b/i,
+    /\bapi\s*返回\s*(\d{3})\b/i,
+    /\b(\d{3})\s*\([^)]*no body[^)]*\)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = message.match(pattern);
+    if (!match?.[1]) continue;
+    const status = Number.parseInt(match[1], 10);
+    if (Number.isFinite(status) && status >= 100 && status <= 599) {
+      return status;
+    }
+  }
+  return null;
+}
+
+function classifyAgentUpstreamFailure(error: unknown): {
+  readonly status: 502 | 504;
+  readonly code: "AGENT_UPSTREAM_ERROR" | "AGENT_UPSTREAM_TIMEOUT";
+  readonly message: string;
+} | null {
+  const raw = error instanceof Error ? error.message : String(error);
+  const message = raw.trim();
+  const normalized = message.toLowerCase();
+
+  if (
+    normalized.includes("timeout")
+    || normalized.includes("timed out")
+    || normalized.includes("请求超时")
+  ) {
+    return {
+      status: 504,
+      code: "AGENT_UPSTREAM_TIMEOUT",
+      message: `上游模型服务超时：${message || "unknown timeout"}`,
+    };
+  }
+
+  const statusCode = tryParseHttpStatusCode(message);
+  if (!statusCode || statusCode < 400 || statusCode > 599) return null;
+  return {
+    status: 502,
+    code: "AGENT_UPSTREAM_ERROR",
+    message: `上游模型服务异常（HTTP ${statusCode}）：${message || `HTTP ${statusCode}`}`,
+  };
+}
+
+function classifySingleModelTestError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+
+  if (
+    normalized.includes("timeout")
+    || normalized.includes("timed out")
+    || normalized.includes("aborted")
+  ) {
+    return "timeout";
+  }
+  if (
+    normalized.includes("401")
+    || normalized.includes("403")
+    || normalized.includes("unauthorized")
+    || normalized.includes("forbidden")
+    || normalized.includes("api key")
+  ) {
+    return "auth_failed";
+  }
+  if (
+    normalized.includes("404")
+    || normalized.includes("not found")
+    || (
+      normalized.includes("model")
+      && (
+        normalized.includes("invalid")
+        || normalized.includes("unknown")
+        || normalized.includes("not exist")
+        || normalized.includes("not available")
+        || normalized.includes("doesn't exist")
+      )
+    )
+  ) {
+    return "unsupported_model";
+  }
+
+  return message;
+}
+
+async function runSingleModelConnectivityTest(args: {
+  service: string;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+  apiFormat: "chat" | "responses";
+  stream: boolean;
+}): Promise<{
+  ok: boolean;
+  elapsedMs: number;
+  apiFormat: "chat" | "responses";
+  stream: boolean;
+  error?: string;
+}> {
+  const startedAt = Date.now();
+  const baseService = isCustomServiceId(args.service) ? "custom" : args.service;
+  const client = createLLMClient({
+    provider: resolveServiceProviderFamily(baseService) ?? "openai",
+    service: baseService,
+    configSource: "studio",
+    baseUrl: args.baseUrl,
+    apiKey: args.apiKey.trim(),
+    model: args.model,
+    temperature: 0.7,
+    maxTokens: 2048,
+    thinkingBudget: 0,
+    apiFormat: args.apiFormat,
+    stream: args.stream,
+  } as ProjectConfig["llm"]);
+
+  try {
+    await withTimeout(
+      chatCompletion(client, args.model, [{ role: "user", content: "ping" }], { maxTokens: 256 }),
+      12_000,
+    );
+    return {
+      ok: true,
+      elapsedMs: elapsedSince(startedAt),
+      apiFormat: args.apiFormat,
+      stream: args.stream,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      elapsedMs: elapsedSince(startedAt),
+      apiFormat: args.apiFormat,
+      stream: args.stream,
+      error: classifySingleModelTestError(error),
+    };
+  }
+}
+
 async function probeServiceCapabilities(args: {
   root: string;
   service: string;
@@ -516,7 +4063,54 @@ async function probeServiceCapabilities(args: {
 export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   const app = new Hono();
   const state = new StateManager(root);
+  const reviewMetricsByBook = new Map<string, ReviewMetricsBookStore>();
   let cachedConfig = initialConfig;
+
+  function recordReviewMetrics(args: {
+    bookId: string;
+    entry: ReviewEntry;
+    passed: boolean;
+    reviseRoundsUsed: number;
+    finalState: "passed" | "failed-max-rounds" | "failed-single-audit";
+    issueClassCounts?: Readonly<{ structural: number; textual: number }>;
+    issueTexts?: ReadonlyArray<string>;
+  }): void {
+    const key = args.bookId.trim();
+    if (!key) return;
+    const bookStore = reviewMetricsByBook.get(key) ?? createReviewMetricsBookStore();
+    applyReviewMetricsObservation(bookStore.overall, {
+      passed: args.passed,
+      reviseRoundsUsed: args.reviseRoundsUsed,
+      finalState: args.finalState,
+      issueClassCounts: args.issueClassCounts,
+      issueTexts: args.issueTexts,
+    });
+    applyReviewMetricsObservation(bookStore.byEntry[args.entry], {
+      passed: args.passed,
+      reviseRoundsUsed: args.reviseRoundsUsed,
+      finalState: args.finalState,
+      issueClassCounts: args.issueClassCounts,
+      issueTexts: args.issueTexts,
+    });
+    reviewMetricsByBook.set(key, bookStore);
+  }
+
+  function getReviewMetricsPayload(bookId: string): {
+    reviewMetrics: ReviewMetricsSnapshot;
+    reviewMetricsByEntry: Record<ReviewEntry, ReviewMetricsSnapshot>;
+  } {
+    const key = bookId.trim();
+    const empty = createReviewMetricsBookStore();
+    const store = reviewMetricsByBook.get(key) ?? empty;
+    return {
+      reviewMetrics: reviewMetricsSnapshotFromCounter(store.overall),
+      reviewMetricsByEntry: {
+        "write-next": reviewMetricsSnapshotFromCounter(store.byEntry["write-next"]),
+        "write-target": reviewMetricsSnapshotFromCounter(store.byEntry["write-target"]),
+        rewrite: reviewMetricsSnapshotFromCounter(store.byEntry.rewrite),
+      },
+    };
+  }
 
   app.use("/*", cors());
 
@@ -525,6 +4119,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     if (error instanceof ApiError) {
       return c.json({ error: { code: error.code, message: error.message } }, error.status as 400);
     }
+    console.error("[studio] uncaught api error:", error);
     return c.json(
       { error: { code: "INTERNAL_ERROR", message: "Unexpected server error." } },
       500,
@@ -550,17 +4145,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   // Logger sink that broadcasts to SSE
   const sseSink: LogSink = {
     write(entry: LogEntry): void {
-      broadcast("log", { level: entry.level, tag: entry.tag, message: entry.message });
+      if (shouldSuppressStageHeartbeatLog(entry.message)) return;
+      const contextual = withLogContext({ message: entry.message });
+      broadcast("log", {
+        level: entry.level,
+        tag: entry.tag,
+        message: contextual.message,
+        ...(typeof contextual.chapterNumber === "number" ? { chapterNumber: contextual.chapterNumber } : {}),
+      });
     },
   };
 
   // Logger sink that prints to server terminal
   const consoleSink: LogSink = {
     write(entry: LogEntry): void {
+      if (shouldSuppressStageHeartbeatLog(entry.message)) return;
+      const contextual = withLogContext({ message: entry.message });
       const prefix = `[${entry.tag}]`;
-      if (entry.level === "warn") console.warn(prefix, entry.message);
-      else if (entry.level === "error") console.error(prefix, entry.message);
-      else console.log(prefix, entry.message);
+      if (entry.level === "warn") console.warn(prefix, contextual.message);
+      else if (entry.level === "error") console.error(prefix, contextual.message);
+      else console.log(prefix, contextual.message);
     },
   };
 
@@ -573,44 +4177,331 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   }
 
   async function buildPipelineConfig(
-    overrides?: Partial<Pick<PipelineConfig, "externalContext" | "client" | "model">> & {
+    overrides?: Partial<Pick<PipelineConfig, "externalContext" | "client" | "model" | "defaultWriteNextQuickMode" | "writeStageHeartbeatMs">> & {
       readonly currentConfig?: ProjectConfig;
       readonly sessionIdForSSE?: string;
+      readonly runIdForSSE?: string;
+      readonly onChapterDelta?: (payload: {
+        previewType: "chapter" | "patch";
+        chapterNumber?: number;
+        mode?: string;
+      }) => void;
     },
   ): Promise<PipelineConfig> {
     const currentConfig = overrides?.currentConfig ?? await loadCurrentProjectConfig();
     const scopedSseSink: LogSink = overrides?.sessionIdForSSE
       ? {
           write(entry) {
+            if (shouldSuppressStageHeartbeatLog(entry.message)) return;
+            const contextual = withLogContext({
+              message: entry.message,
+              runId: overrides.runIdForSSE,
+            });
             broadcast("log", {
               sessionId: overrides.sessionIdForSSE,
+              ...(overrides.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
               level: entry.level,
               tag: entry.tag,
-              message: entry.message,
+              message: contextual.message,
+              ...(typeof contextual.chapterNumber === "number" ? { chapterNumber: contextual.chapterNumber } : {}),
             });
           },
         }
       : sseSink;
-    const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, consoleSink] });
+    const scopedConsoleSink: LogSink = overrides?.runIdForSSE
+      ? {
+          write(entry) {
+            if (shouldSuppressStageHeartbeatLog(entry.message)) return;
+            const contextual = withLogContext({
+              message: entry.message,
+              runId: overrides.runIdForSSE,
+            });
+            const prefix = `[${entry.tag}]`;
+            if (entry.level === "warn") console.warn(prefix, contextual.message);
+            else if (entry.level === "error") console.error(prefix, contextual.message);
+            else console.log(prefix, contextual.message);
+          },
+        }
+      : consoleSink;
+    const logger = createLogger({ tag: "studio", sinks: [scopedSseSink, scopedConsoleSink] });
     return {
       client: overrides?.client ?? createLLMClient(currentConfig.llm),
       model: overrides?.model ?? currentConfig.llm.model,
       projectRoot: root,
       defaultLLMConfig: currentConfig.llm,
+      enforceOutlineAnchorMatch: true,
       modelOverrides: currentConfig.modelOverrides,
       notifyChannels: currentConfig.notify,
       logger,
       onStreamProgress: (progress) => {
         broadcast("llm:progress", {
           ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
           status: progress.status,
           elapsedMs: progress.elapsedMs,
           totalChars: progress.totalChars,
           chineseChars: progress.chineseChars,
         });
       },
+      onWriterTextDelta: (payload) => {
+        const sequence = overrides?.runIdForSSE ? nextChapterDeltaSequence(overrides.runIdForSSE) : undefined;
+        overrides?.onChapterDelta?.({
+          previewType: "chapter",
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+        });
+        broadcast("chapter:delta", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          ...(typeof sequence === "number" ? { sequence } : {}),
+          previewType: "chapter",
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+          text: payload.text,
+        });
+      },
+      onReviserTextDelta: (payload) => {
+        const sequence = overrides?.runIdForSSE ? nextChapterDeltaSequence(overrides.runIdForSSE) : undefined;
+        overrides?.onChapterDelta?.({
+          previewType: "chapter",
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+        });
+        broadcast("chapter:delta", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          ...(typeof sequence === "number" ? { sequence } : {}),
+          previewType: "chapter",
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+          text: payload.text,
+        });
+      },
+      onReviserPatchDelta: (payload) => {
+        const sequence = overrides?.runIdForSSE ? nextChapterDeltaSequence(overrides.runIdForSSE) : undefined;
+        overrides?.onChapterDelta?.({
+          previewType: "patch",
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+        });
+        broadcast("chapter:delta", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          ...(typeof sequence === "number" ? { sequence } : {}),
+          previewType: "patch",
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+          text: payload.text,
+        });
+      },
+      onWriteNextAuditStart: (payload) => {
+        broadcast("audit:start", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          entry: "write-next",
+          chapter: payload.chapterNumber,
+          round: payload.round,
+          maxRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+        });
+      },
+      onWriteNextAuditComplete: (payload) => {
+        const auditClassMeta = payload.audit as {
+          issueClassCounts?: { structural?: number; textual?: number };
+          primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
+          dimensionChecks?: ReadonlyArray<{
+            dimension: string;
+            status: "pass" | "warning" | "failed";
+            evidence?: string;
+          }>;
+        };
+        const failureGate = resolveDisplayFailureGate({
+          passed: payload.audit.passed,
+          score: payload.audit.score,
+          severityCounts: payload.audit.severityCounts,
+        });
+        const issueTexts = buildAuditIssueTexts(payload.audit.issues);
+        const report = buildAuditReportText({
+          chapterNumber: payload.chapterNumber,
+          passed: payload.audit.passed,
+          issueCount: payload.audit.issueCount,
+          summary: payload.audit.summary,
+          issueTexts,
+          severityCounts: payload.audit.severityCounts,
+          failureGate,
+        });
+        const autoReviewState = buildAutoReviewAuditEventState({
+          round: payload.round,
+          maxReviseRounds: payload.maxReviseRounds,
+          passed: payload.audit.passed,
+        });
+        if (!overrides?.runIdForSSE && autoReviewState.autoReviewFinal) {
+          const terminalState = autoReviewState.autoReviewState === "failed-max-rounds"
+            ? "failed-max-rounds"
+            : (autoReviewState.autoReviewState === "passed" ? "passed" : "failed-single-audit");
+          recordReviewMetrics({
+            bookId: payload.bookId,
+            entry: "write-next",
+            passed: payload.audit.passed,
+            reviseRoundsUsed: Math.max(0, payload.round - 1),
+            finalState: terminalState,
+            issueClassCounts: auditClassMeta.issueClassCounts
+              ? {
+                  structural: Number(auditClassMeta.issueClassCounts.structural ?? 0),
+                  textual: Number(auditClassMeta.issueClassCounts.textual ?? 0),
+                }
+              : undefined,
+            issueTexts,
+          });
+        }
+        broadcast("audit:complete", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          entry: "write-next",
+          chapter: payload.chapterNumber,
+          round: payload.round,
+          maxRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+          passed: payload.audit.passed,
+          issueCount: payload.audit.issueCount,
+          score: payload.audit.score,
+          severityCounts: payload.audit.severityCounts,
+          failureGate,
+          issueClassCounts: auditClassMeta.issueClassCounts,
+          primaryIssueClass: auditClassMeta.primaryIssueClass,
+          summary: payload.audit.summary,
+          dimensionChecks: auditClassMeta.dimensionChecks,
+          issues: issueTexts,
+          report,
+          ...autoReviewState,
+        });
+      },
+      onWriteNextReviseStart: (payload) => {
+        broadcast("revise:start", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          entry: "write-next",
+          chapter: payload.chapterNumber,
+          round: payload.round,
+          maxRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+          mode: payload.mode,
+          autoTriggeredByAudit: true,
+        });
+      },
+      onWriteNextReviseComplete: (payload) => {
+        const auditClassMeta = payload.audit as {
+          issueClassCounts?: { structural?: number; textual?: number };
+          primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
+          dimensionChecks?: ReadonlyArray<{
+            dimension: string;
+            status: "pass" | "warning" | "failed";
+            evidence?: string;
+          }>;
+        } | null;
+        const reviseStatus = payload.audit
+          ? (payload.audit.passed ? "ready-for-review" : "audit-failed")
+          : (payload.applied ? "ready-for-review" : "unchanged");
+        const reviseAudit = payload.audit
+          ? (() => {
+              const failureGate = resolveDisplayFailureGate({
+                passed: payload.audit.passed,
+                score: payload.audit.score,
+                severityCounts: payload.audit.severityCounts,
+              });
+              const issueTexts = buildAuditIssueTexts(payload.audit.issues);
+              return {
+                passed: payload.audit.passed,
+                score: payload.audit.score,
+                issueCount: payload.audit.issueCount,
+                severityCounts: payload.audit.severityCounts,
+                failureGate,
+                issueClassCounts: auditClassMeta?.issueClassCounts,
+                primaryIssueClass: auditClassMeta?.primaryIssueClass,
+                summary: payload.audit.summary,
+                dimensionChecks: auditClassMeta?.dimensionChecks,
+                issues: issueTexts,
+                report: buildAuditReportText({
+                  chapterNumber: payload.chapterNumber,
+                  passed: payload.audit.passed,
+                  issueCount: payload.audit.issueCount,
+                  summary: payload.audit.summary,
+                  issueTexts,
+                  severityCounts: payload.audit.severityCounts,
+                  failureGate,
+                }),
+              };
+            })()
+          : null;
+        broadcast("revise:complete", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          entry: "write-next",
+          chapter: payload.chapterNumber,
+          round: payload.round,
+          maxRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+          mode: payload.mode,
+          autoTriggeredByAudit: true,
+          wordCount: payload.wordCount,
+          status: reviseStatus,
+          applied: payload.applied,
+          ...(reviseAudit ? { audit: reviseAudit } : {}),
+        });
+      },
       externalContext: overrides?.externalContext,
+      defaultWriteNextQuickMode: overrides?.defaultWriteNextQuickMode,
+      writeStageHeartbeatMs: overrides?.writeStageHeartbeatMs,
     };
+  }
+
+  async function resolvePipelineClientFromSelection(args: {
+    readonly currentConfig: ProjectConfig;
+    readonly selectedService?: string;
+    readonly selectedModel?: string;
+  }): Promise<{ client?: ReturnType<typeof createLLMClient>; model?: string; error?: string }> {
+    const selectedService = args.selectedService?.trim();
+    const selectedModel = args.selectedModel?.trim();
+    if (!selectedService || !selectedModel) return {};
+
+    try {
+      const configuredEntry = await resolveConfiguredServiceEntry(root, selectedService);
+      const resolved = await resolveServiceModel(
+        selectedService,
+        selectedModel,
+        root,
+        await resolveConfiguredServiceBaseUrl(root, selectedService),
+        configuredEntry?.apiFormat,
+      );
+
+      const client = createLLMClient({
+        ...args.currentConfig.llm,
+        service: configuredEntry?.service ?? selectedService,
+        model: selectedModel,
+        apiKey: resolved.apiKey,
+        ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
+        ...(configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
+        baseUrl: configuredEntry?.baseUrl ?? "",
+      } as any);
+
+      return {
+        client,
+        model: selectedModel,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/API key/i.test(message)) {
+        return { error: `请先为 ${selectedService} 配置 API Key` };
+      }
+      return { error: message };
+    }
   }
 
   // --- Books ---
@@ -741,7 +4632,23 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
       if (!match) return c.json({ error: "Chapter not found" }, 404);
       const content = await readFile(join(chaptersDir, match), "utf-8");
-      return c.json({ chapterNumber: num, filename: match, content });
+      const book = await state.loadBookConfig(id).catch(() => null);
+      const wordCount = estimateChapterWordCount(content, book?.language);
+      const chapterIndex = await state.loadChapterIndex(id).catch(() => []);
+      if (chapterIndex.length > 0) {
+        const updatedAt = new Date().toISOString();
+        let changed = false;
+        const updatedIndex = chapterIndex.map((chapter) => {
+          if (chapter.number !== num) return chapter;
+          if ((chapter.wordCount ?? 0) === wordCount) return chapter;
+          changed = true;
+          return { ...chapter, wordCount, updatedAt };
+        });
+        if (changed) {
+          await state.saveChapterIndex(id, updatedIndex);
+        }
+      }
+      return c.json({ chapterNumber: num, filename: match, content, wordCount });
     } catch {
       return c.json({ error: "Chapter not found" }, 404);
     }
@@ -764,7 +4671,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       const { writeFile: writeFileFs } = await import("node:fs/promises");
       await writeFileFs(join(chaptersDir, match), content, "utf-8");
-      return c.json({ ok: true, chapterNumber: num });
+      const book = await state.loadBookConfig(id).catch(() => null);
+      const chapterWordCount = estimateChapterWordCount(content, book?.language);
+      const chapterIndex = await state.loadChapterIndex(id).catch(() => []);
+      if (chapterIndex.length > 0) {
+        const updatedAt = new Date().toISOString();
+        const updatedIndex = chapterIndex.map((chapter) =>
+          chapter.number === num
+            ? { ...chapter, wordCount: chapterWordCount, updatedAt }
+            : chapter,
+        );
+        await state.saveChapterIndex(id, updatedIndex);
+      }
+      return c.json({ ok: true, chapterNumber: num, wordCount: chapterWordCount });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
     }
@@ -835,7 +4754,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const id = c.req.param("id");
     try {
       const chapters = await state.loadChapterIndex(id);
-      return c.json(computeAnalytics(id, chapters));
+      const analytics = computeAnalytics(id, chapters);
+      const metrics = getReviewMetricsPayload(id);
+      return c.json({
+        ...analytics,
+        ...metrics,
+      });
     } catch {
       return c.json({ error: `Book "${id}" not found` }, 404);
     }
@@ -845,15 +4769,100 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.post("/api/v1/books/:id/write-next", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json<{ wordCount?: number }>().catch(() => ({ wordCount: undefined }));
+    const body = await c.req.json<{
+      wordCount?: number;
+      service?: string;
+      model?: string;
+      quickMode?: boolean;
+      preferFastWriterModel?: boolean;
+    }>()
+      .catch(() => ({
+        wordCount: undefined,
+        service: undefined,
+        model: undefined,
+        quickMode: undefined,
+        preferFastWriterModel: undefined,
+      }));
+    const currentConfig = await loadCurrentProjectConfig();
+    const quickMode = body.quickMode ?? false;
+    const preferFastWriterModel = body.preferFastWriterModel ?? true;
+    let selectedService = body.service?.trim();
+    let selectedModel = body.model?.trim();
+    if (preferFastWriterModel) {
+      const services = normalizeServiceConfig((currentConfig.llm as Record<string, unknown>).services);
+      const configuredDefaultModel = (currentConfig.llm as Record<string, unknown>).defaultModel;
+      const fallbackModel = typeof configuredDefaultModel === "string" && configuredDefaultModel.trim().length > 0
+        ? configuredDefaultModel.trim()
+        : currentConfig.llm.model;
+      const fastSelection = resolveFastWriterModelSelection({
+        services,
+        currentModel: selectedModel ?? fallbackModel,
+        preferredServiceKey: selectedService,
+      });
+      if (fastSelection) {
+        const fromModel = selectedModel ?? fallbackModel;
+        const fromService = selectedService ?? fastSelection.serviceKey;
+        selectedService = fastSelection.serviceKey;
+        selectedModel = fastSelection.model;
+        broadcast("log", {
+          bookId: id,
+          level: "info",
+          tag: "studio",
+          message: `写作快速模式：模型已从 ${fromService}/${fromModel} 自动切换为 ${selectedService}/${selectedModel}`,
+        });
+      }
+    }
+    const selectedRuntime = await resolvePipelineClientFromSelection({
+      currentConfig,
+      selectedService,
+      selectedModel,
+    });
+    if (selectedRuntime.error) {
+      return c.json({ error: selectedRuntime.error }, 400);
+    }
 
     broadcast("write:start", { bookId: id });
 
     // Fire and forget — progress/completion/errors pushed via SSE
-    const pipeline = new PipelineRunner(await buildPipelineConfig());
-    pipeline.writeNextChapter(id, body.wordCount).then(
+      const pipeline = new PipelineRunner(await buildPipelineConfig({
+        currentConfig,
+        ...(selectedRuntime.client ? { client: selectedRuntime.client } : {}),
+        ...(selectedRuntime.model ? { model: selectedRuntime.model } : {}),
+        writeStageHeartbeatMs: resolveWriteStageHeartbeatMs(),
+      }));
+    void pipeline.writeNextChapter(id, body.wordCount, undefined, {
+      quickMode,
+    }).then(
       (result) => {
-        broadcast("write:complete", { bookId: id, chapterNumber: result.chapterNumber, status: result.status, title: result.title, wordCount: result.wordCount });
+        const autoReview = (() => {
+          const payload = (result as { autoReview?: unknown }).autoReview;
+          if (payload && typeof payload === "object") {
+            const parsed = payload as Partial<UnifiedReviewLoopAutoReviewPayload>;
+            if (
+              typeof parsed.enabled === "boolean"
+              && typeof parsed.maxReviseRounds === "number"
+              && typeof parsed.reviseRoundsUsed === "number"
+              && typeof parsed.auditRounds === "number"
+              && typeof parsed.stoppedByMaxRounds === "boolean"
+              && (parsed.finalState === "passed" || parsed.finalState === "failed-max-rounds" || parsed.finalState === "failed-single-audit")
+              && Array.isArray(parsed.revisions)
+            ) {
+              return parsed as UnifiedReviewLoopAutoReviewPayload;
+            }
+          }
+          const passed = typeof (result.auditResult as { passed?: unknown } | undefined)?.passed === "boolean"
+            ? Boolean((result.auditResult as { passed?: unknown }).passed)
+            : result.status !== "audit-failed";
+          return buildSingleAuditAutoReviewPayload(passed);
+        })();
+        broadcast("write:complete", {
+          bookId: id,
+          chapterNumber: result.chapterNumber,
+          status: result.status,
+          title: result.title,
+          wordCount: result.wordCount,
+          autoReview,
+        });
       },
       (e) => {
         broadcast("write:error", { bookId: id, error: e instanceof Error ? e.message : String(e) });
@@ -865,11 +4874,25 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.post("/api/v1/books/:id/draft", async (c) => {
     const id = c.req.param("id");
-    const body = await c.req.json<{ wordCount?: number; context?: string }>().catch(() => ({ wordCount: undefined, context: undefined }));
+    const body = await c.req.json<{ wordCount?: number; context?: string; service?: string; model?: string }>()
+      .catch(() => ({ wordCount: undefined, context: undefined, service: undefined, model: undefined }));
+    const currentConfig = await loadCurrentProjectConfig();
+    const selectedRuntime = await resolvePipelineClientFromSelection({
+      currentConfig,
+      selectedService: body.service,
+      selectedModel: body.model,
+    });
+    if (selectedRuntime.error) {
+      return c.json({ error: selectedRuntime.error }, 400);
+    }
 
     broadcast("draft:start", { bookId: id });
 
-    const pipeline = new PipelineRunner(await buildPipelineConfig());
+    const pipeline = new PipelineRunner(await buildPipelineConfig({
+      currentConfig,
+      ...(selectedRuntime.client ? { client: selectedRuntime.client } : {}),
+      ...(selectedRuntime.model ? { model: selectedRuntime.model } : {}),
+    }));
     pipeline.writeDraft(id, body.context, body.wordCount).then(
       (result) => {
         broadcast("draft:complete", { bookId: id, chapterNumber: result.chapterNumber, title: result.title, wordCount: result.wordCount });
@@ -1013,6 +5036,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
     if (body.defaultModel !== undefined) {
       llm.defaultModel = body.defaultModel;
+      if (typeof body.defaultModel === "string" && body.defaultModel.length > 0) {
+        llm.model = body.defaultModel;
+      }
     }
     if (body.configSource !== undefined) {
       llm.configSource = normalizeConfigSource(body.configSource);
@@ -1021,6 +5047,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       llm.service = body.service;
     }
     await saveRawConfig(root, config);
+    modelListCache.clear();
     return c.json({ ok: true });
   });
 
@@ -1069,6 +5096,88 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     });
   });
 
+  app.post("/api/v1/services/:service/models/:model/test", async (c) => {
+    const service = c.req.param("service");
+    const model = c.req.param("model").trim();
+    const body = await c.req.json<{
+      apiKey?: string;
+      baseUrl?: string;
+      apiFormat?: "chat" | "responses";
+      stream?: boolean;
+    }>().catch(() => ({} as {
+      apiKey?: string;
+      baseUrl?: string;
+      apiFormat?: "chat" | "responses";
+      stream?: boolean;
+    }));
+
+    if (!model) {
+      return c.json({
+        ok: false,
+        model: "",
+        canConnect: false,
+        elapsedMs: 0,
+        apiFormat: "chat",
+        stream: false,
+        error: "模型名称不能为空",
+      }, 400);
+    }
+
+    const configuredEntry = await resolveConfiguredServiceEntry(root, service);
+    const apiFormat = body.apiFormat ?? configuredEntry?.apiFormat ?? "chat";
+    const stream = typeof body.stream === "boolean" ? body.stream : configuredEntry?.stream ?? false;
+    const resolvedBaseUrl = await resolveConfiguredServiceBaseUrl(root, service, body.baseUrl);
+
+    if (!resolvedBaseUrl) {
+      return c.json({
+        ok: false,
+        model,
+        canConnect: false,
+        elapsedMs: 0,
+        apiFormat,
+        stream,
+        error: `未知服务商: ${service}`,
+      }, 400);
+    }
+
+    const providedApiKey = body.apiKey?.trim();
+    const apiKey = providedApiKey && providedApiKey.length > 0
+      ? providedApiKey
+      : await getServiceApiKey(root, service);
+
+    if (!apiKey?.trim()) {
+      return c.json({
+        ok: false,
+        model,
+        canConnect: false,
+        elapsedMs: 0,
+        apiFormat,
+        stream,
+        error: "API Key 不能为空",
+      }, 400);
+    }
+
+    const result = await runSingleModelConnectivityTest({
+      service,
+      model,
+      apiKey,
+      baseUrl: resolvedBaseUrl,
+      apiFormat,
+      stream,
+    });
+
+    const payload = {
+      ok: result.ok,
+      model,
+      canConnect: result.ok,
+      elapsedMs: result.elapsedMs,
+      apiFormat: result.apiFormat,
+      stream: result.stream,
+      ...(result.error ? { error: result.error } : {}),
+    };
+    return c.json(payload, result.ok ? 200 : 400);
+  });
+
   app.put("/api/v1/services/:service/secret", async (c) => {
     const service = c.req.param("service");
     const { apiKey } = await c.req.json<{ apiKey: string }>();
@@ -1079,6 +5188,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       delete secrets.services[service];
     }
     await saveSecrets(root, secrets);
+    for (const key of modelListCache.keys()) {
+      if (key.startsWith(`${service}::`)) {
+        modelListCache.delete(key);
+      }
+    }
     return c.json({ ok: true });
   });
 
@@ -1093,52 +5207,106 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.get("/api/v1/services/:service/models", async (c) => {
     const service = c.req.param("service");
     const refresh = c.req.query("refresh") === "1";
+    const sourceFilter = c.req.query("source");
+    const configuredEntry = await resolveConfiguredServiceEntry(root, service);
+    const configuredModels = configuredEntry?.models ?? [];
+    const disabledModelIds = new Set(
+      configuredModels
+        .filter((model) => model.enabled === false)
+        .map((model) => model.id.trim())
+        .filter((id) => id.length > 0),
+    );
+    const modelMode = configuredEntry?.modelMode ?? "hybrid";
+    const manualModels = configuredModels
+      .filter((model) => model.enabled !== false)
+      .map((model) => ({
+        id: model.id,
+        name: model.name ?? model.id,
+        source: model.source ?? "manual" as const,
+      }));
+    const returnAutoOnly = sourceFilter === "auto";
     const apiKey = c.req.query("apiKey") || await getServiceApiKey(root, service);
 
     // No key = no models
-    if (!apiKey) return c.json({ models: [] });
+    if (!apiKey) {
+      const effective = returnAutoOnly
+        ? []
+        : composeEffectiveModels({
+            mode: modelMode,
+            manualModels,
+            detectedModels: [],
+            disabledModelIds,
+          });
+      return c.json({
+        models: effective,
+        modelMode,
+        preferredModel: configuredEntry?.preferredModel ?? null,
+      });
+    }
 
     const preset = resolveServicePreset(isCustomServiceId(service) ? "custom" : service);
     const resolvedBaseUrl = await resolveConfiguredServiceBaseUrl(root, service);
 
     // Cache by service + resolved baseUrl + apiKey fingerprint; valid for 10 min unless ?refresh=1
-    const cacheKey = `${service}::${resolvedBaseUrl ?? ""}::${apiKey.slice(-8)}`;
+    const modelConfigFingerprint = configuredModels
+      .map((model) => `${model.id}:${model.name ?? model.id}:${model.enabled === false ? "0" : "1"}:${model.source ?? "manual"}`)
+      .join("|");
+    const cacheKey = `${service}::${resolvedBaseUrl ?? ""}::${apiKey.slice(-8)}::${modelMode}::${modelConfigFingerprint}`;
     if (!refresh) {
       const cached = modelListCache.get(cacheKey);
       if (cached && Date.now() - cached.at < 10 * 60 * 1000) {
-        return c.json({ models: cached.models });
+        const models = returnAutoOnly
+          ? cached.models.filter((model) => model.source !== "manual" && !disabledModelIds.has(model.id))
+          : cached.models;
+        return c.json({
+          models,
+          modelMode,
+          preferredModel: configuredEntry?.preferredModel ?? null,
+        });
       }
     }
+
+    let detectedModels: Array<{ id: string; name: string; source?: "manual" | "detected" }> = [];
 
     // Fast path: services with knownModels return immediately
     if (preset?.knownModels && preset.knownModels.length > 0) {
-      const models = preset.knownModels.map((id) => ({ id, name: id }));
-      modelListCache.set(cacheKey, { models, at: Date.now() });
-      return c.json({ models });
-    }
-
-    // Simple /models API call + fallback to pi-ai built-in list (no slow probe)
-    if (!resolvedBaseUrl) return c.json({ models: [] });
-
-    const modelsBase = preset?.modelsBaseUrl ?? resolvedBaseUrl;
-    let models: Array<{ id: string; name: string }> = [];
-    try {
-      const modelsUrl = modelsBase.replace(/\/$/, "") + "/models";
-      const res = await fetch(modelsUrl, {
-        headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (res.ok) {
-        const json = await res.json() as { data?: Array<{ id: string }> };
-        models = (json.data ?? []).map((m) => ({ id: m.id, name: m.id }));
+      detectedModels = preset.knownModels.map((id) => ({ id, name: id, source: "detected" }));
+    } else if (resolvedBaseUrl) {
+      // Simple /models API call + fallback to pi-ai built-in list (no slow probe)
+      const modelsBase = preset?.modelsBaseUrl ?? resolvedBaseUrl;
+      try {
+        const modelsUrl = modelsBase.replace(/\/$/, "") + "/models";
+        const res = await fetch(modelsUrl, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (res.ok) {
+          const json = await res.json() as { data?: Array<{ id: string }> };
+          detectedModels = (json.data ?? []).map((m) => ({ id: m.id, name: m.id, source: "detected" as const }));
+        }
+      } catch { /* timeout or network error */ }
+      if (detectedModels.length === 0) {
+        const builtIn = await listModelsForService(service, apiKey);
+        detectedModels = builtIn.map((m) => ({ id: m.id, name: m.name, source: "detected" as const }));
       }
-    } catch { /* timeout or network error */ }
-    if (models.length === 0) {
-      const builtIn = await listModelsForService(service, apiKey);
-      models = builtIn.map((m) => ({ id: m.id, name: m.name }));
     }
-    modelListCache.set(cacheKey, { models, at: Date.now() });
-    return c.json({ models });
+
+    const effectiveModels = composeEffectiveModels({
+      mode: modelMode,
+      manualModels,
+      detectedModels,
+      disabledModelIds,
+    });
+    modelListCache.set(cacheKey, { models: effectiveModels, at: Date.now() });
+
+    const autoModels = dedupeModelsById(detectedModels)
+      .filter((model) => !disabledModelIds.has(model.id));
+
+    return c.json({
+      models: returnAutoOnly ? autoModels : effectiveModels,
+      modelMode,
+      preferredModel: configuredEntry?.preferredModel ?? null,
+    });
   });
 
   // --- Project info ---
@@ -1345,15 +5513,97 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json({ ok: true });
   });
 
+  app.post("/api/v1/agent/stop", async (c) => {
+    const payload = await c.req.json<{ sessionId?: string; runId?: string }>()
+      .catch(() => ({} as { sessionId?: string; runId?: string }));
+    const sessionId = payload.sessionId?.trim();
+    const requestedRunId = payload.runId?.trim();
+    if (!sessionId) {
+      throw new ApiError(400, "SESSION_ID_REQUIRED", "sessionId is required");
+    }
+
+    const targetRunId = requestedRunId || inFlightAgentRunIdBySession.get(sessionId);
+    if (!targetRunId) {
+      return c.json({ ok: true, stopped: false, sessionId, runId: null });
+    }
+
+    const inFlight = inFlightAgentRunsByRunId.get(targetRunId);
+    if (!inFlight || inFlight.sessionId !== sessionId) {
+      return c.json({ ok: true, stopped: false, sessionId, runId: targetRunId });
+    }
+
+    inFlight.controller.abort();
+    broadcast("agent:stopped", { sessionId, runId: inFlight.runId });
+    const waitUntil = Date.now() + 1_500;
+    while (
+      inFlightAgentRunIdBySession.get(sessionId) === inFlight.runId
+      && Date.now() < waitUntil
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return c.json({ ok: true, stopped: true, sessionId, runId: inFlight.runId });
+  });
+
+  app.get("/api/v1/agent/status", async (c) => {
+    const sessionId = c.req.query("sessionId")?.trim();
+    const requestedRunId = c.req.query("runId")?.trim();
+    if (!sessionId) {
+      throw new ApiError(400, "SESSION_ID_REQUIRED", "sessionId is required");
+    }
+
+    const targetRunId = requestedRunId || inFlightAgentRunIdBySession.get(sessionId);
+    if (!targetRunId) {
+      return c.json({ ok: true, running: false, sessionId, runId: null });
+    }
+
+    const inFlight = inFlightAgentRunsByRunId.get(targetRunId);
+    if (!inFlight || inFlight.sessionId !== sessionId) {
+      return c.json({ ok: true, running: false, sessionId, runId: targetRunId });
+    }
+
+    return c.json({
+      ok: true,
+      running: true,
+      sessionId,
+      runId: inFlight.runId,
+      startedAt: inFlight.startedAt,
+      aborted: inFlight.controller.signal.aborted,
+    });
+  });
+
   app.post("/api/v1/agent", async (c) => {
-    const { instruction, activeBookId, sessionId: reqSessionId, model: reqModel, service: reqService } = await c.req.json<{
+    const payload = await c.req.json<{
       instruction: string;
       activeBookId?: string;
       sessionId?: string;
+      runId?: string;
       model?: string;
       service?: string;
+      quickMode?: boolean;
+      preferFastWriterModel?: boolean;
     }>();
+    const {
+      instruction,
+      activeBookId,
+      sessionId: reqSessionId,
+      runId: reqRunId,
+      model: reqModel,
+      service: reqService,
+      quickMode: reqQuickMode,
+      preferFastWriterModel: reqPreferFastWriterModel,
+    } = payload;
     const sessionId = reqSessionId;
+    const runId = reqRunId?.trim() || createAgentRunId();
+    const writeIntent = isWriteInstruction(instruction ?? "");
+    const deterministicAction = activeBookId ? parseDeterministicAgentAction(instruction ?? "") : null;
+    const destructiveInstructionRequested = deterministicAction?.kind === "rewrite"
+      || deterministicAction?.kind === "rewrite-batch";
+    const writerKernelIntent = writeIntent
+      || deterministicAction?.kind === "rewrite"
+      || deterministicAction?.kind === "rewrite-batch";
+    const quickMode = reqQuickMode ?? writeIntent;
+    const preferFastWriterModel = reqPreferFastWriterModel ?? true;
+    let writeIndexBefore: ReadonlyArray<ChapterIndexEntryLike> = [];
     if (!instruction?.trim()) {
       return c.json({ error: "No instruction provided" }, 400);
     }
@@ -1361,7 +5611,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       throw new ApiError(400, "SESSION_ID_REQUIRED", "sessionId is required");
     }
 
-    broadcast("agent:start", { instruction, activeBookId, sessionId });
+    if (inFlightAgentRunIdBySession.has(sessionId)) {
+      return c.json({
+        error: { code: "AGENT_BUSY", message: "正在处理中，请等待当前操作完成" },
+        response: "正在处理中，请等待当前操作完成后再发送。",
+        runId,
+      }, 429);
+    }
+
+    const abortController = new AbortController();
+    registerInFlightAgentRun(sessionId, runId, abortController);
+
+    if (writerKernelIntent && activeBookId) {
+      writeIndexBefore = await state.loadChapterIndex(activeBookId).catch(() => [] as ChapterIndexEntryLike[]);
+    }
+
+    broadcast("agent:start", { instruction, activeBookId, sessionId, runId });
 
     try {
       // Load config + create LLM client (pipeline created after model resolution)
@@ -1374,6 +5639,61 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
       let bookSession = loadedBookSession;
       const streamSessionId = loadedBookSession.sessionId;
+      const emitAgentLog = (
+        message: string,
+        level: "info" | "warning" | "error" = "info",
+        options?: { chapterNumber?: number },
+      ): void => {
+        const contextual = withLogContext({
+          message,
+          runId,
+          chapterNumber: options?.chapterNumber,
+        });
+        broadcast("log", {
+          sessionId: streamSessionId,
+          runId,
+          activeBookId,
+          level,
+          tag: "studio",
+          message: contextual.message,
+          ...(typeof contextual.chapterNumber === "number" ? { chapterNumber: contextual.chapterNumber } : {}),
+        });
+      };
+      const emitRewriteAuditLog = (args: {
+        readonly mode: "destructive" | "non-destructive";
+        readonly target: string;
+        readonly riskMessage?: string;
+      }): void => {
+        const compactInstruction = compactInstructionForAuditLog(instruction ?? "");
+        const message = [
+          `[rewrite:audit] mode=${args.mode}`,
+          `target=${args.target}`,
+          `instruction="${compactInstruction}"`,
+          args.riskMessage ? `risk="${args.riskMessage}"` : null,
+        ].filter(Boolean).join(" ");
+        emitAgentLog(message, args.mode === "destructive" ? "warning" : "info");
+      };
+      let effectiveReqService = reqService?.trim();
+      let effectiveReqModel = reqModel?.trim();
+      if (writerKernelIntent && preferFastWriterModel) {
+        const services = normalizeServiceConfig((config.llm as Record<string, unknown>).services);
+        const configuredDefaultModel = (config.llm as Record<string, unknown>).defaultModel;
+        const fallbackModel = typeof configuredDefaultModel === "string" && configuredDefaultModel.trim().length > 0
+          ? configuredDefaultModel.trim()
+          : config.llm.model;
+        const fastSelection = resolveFastWriterModelSelection({
+          services,
+          currentModel: effectiveReqModel ?? fallbackModel,
+          preferredServiceKey: effectiveReqService,
+        });
+        if (fastSelection) {
+          const fromModel = effectiveReqModel ?? fallbackModel;
+          const fromService = effectiveReqService ?? fastSelection.serviceKey;
+          effectiveReqService = fastSelection.serviceKey;
+          effectiveReqModel = fastSelection.model;
+          emitAgentLog(`写作快速模式：模型已从 ${fromService}/${fromModel} 自动切换为 ${effectiveReqService}/${effectiveReqModel}`);
+        }
+      }
 
       // Build initial message context from persisted session
       const initialMessages = bookSession.messages
@@ -1384,15 +5704,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       let resolvedModel: ResolvedModel["model"] | undefined;
       let resolvedApiKey: string | undefined;
 
-      if (reqService && reqModel) {
+      if (effectiveReqService && effectiveReqModel) {
         // 1. Frontend explicitly selected a service+model — fail loudly if no key
         try {
-          const configuredEntry = await resolveConfiguredServiceEntry(root, reqService);
+          const configuredEntry = await resolveConfiguredServiceEntry(root, effectiveReqService);
           const resolved = await resolveServiceModel(
-            reqService,
-            reqModel,
+            effectiveReqService,
+            effectiveReqModel,
             root,
-            await resolveConfiguredServiceBaseUrl(root, reqService),
+            await resolveConfiguredServiceBaseUrl(root, effectiveReqService),
             configuredEntry?.apiFormat,
           );
           resolvedModel = resolved.model;
@@ -1401,8 +5721,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           const msg = e?.message ?? String(e);
           if (/API key/i.test(msg)) {
             return c.json({
-              error: `请先为 ${reqService} 配置 API Key`,
-              response: `请先在模型配置中为 ${reqService} 填写 API Key，然后再试。`,
+              error: `请先为 ${effectiveReqService} 配置 API Key`,
+              response: `请先在模型配置中为 ${effectiveReqService} 填写 API Key，然后再试。`,
             }, 400);
           }
           throw e;
@@ -1465,16 +5785,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       const model = resolvedModel!;
       const agentApiKey = resolvedApiKey;
-      const configuredEntry = reqService ? await resolveConfiguredServiceEntry(root, reqService) : undefined;
+      const configuredEntry = effectiveReqService
+        ? await resolveConfiguredServiceEntry(root, effectiveReqService)
+        : undefined;
+      const emittedChapterPreviewNumbers = new Set<number>();
 
       // Create pipeline with resolved model (so sub_agent tools use the frontend-selected model)
       // Don't spread config.llm — its baseUrl/provider belong to the old service.
       // Let createLLMClient resolve baseUrl from the service preset.
-      const pipelineClient = (reqService && reqModel && resolvedApiKey)
+      const pipelineClient = (effectiveReqService && effectiveReqModel && resolvedApiKey)
         ? createLLMClient({
             ...config.llm,
-            service: configuredEntry?.service ?? reqService,
-            model: reqModel,
+            service: configuredEntry?.service ?? effectiveReqService,
+            model: effectiveReqModel,
             apiKey: resolvedApiKey,
             ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
             ...(configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
@@ -1483,90 +5806,3412 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         : client;
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         client: pipelineClient,
-        model: reqModel ?? config.llm.model,
+        model: effectiveReqModel ?? config.llm.model,
         currentConfig: config,
         sessionIdForSSE: bookSession.sessionId,
+        runIdForSSE: runId,
+        onChapterDelta: (payload) => {
+          if (payload.previewType !== "chapter") return;
+          const chapterNumber = Number(payload.chapterNumber ?? 0);
+          if (!Number.isFinite(chapterNumber) || chapterNumber <= 0) return;
+          emittedChapterPreviewNumbers.add(chapterNumber);
+        },
+        defaultWriteNextQuickMode: quickMode,
+        writeStageHeartbeatMs: resolveWriteStageHeartbeatMs(),
       }));
 
       // Run pi-agent session
       const collectedToolExecs: CollectedToolExec[] = [];
-      const result = await runAgentSession(
-        {
-          model,
-          apiKey: agentApiKey,
-          pipeline,
-          projectRoot: root,
-          bookId: activeBookId ?? null,
-          sessionId: bookSession.sessionId,
-          language: config.language ?? "zh",
-          onEvent: (event) => {
-            if (event.type === "message_update") {
-              const ame = event.assistantMessageEvent;
-              if (ame.type === "text_delta") {
-                broadcast("draft:delta", { sessionId: streamSessionId, text: ame.delta });
-              } else if (ame.type === "thinking_delta") {
-                broadcast("thinking:delta", { sessionId: streamSessionId, text: (ame as any).delta });
-              } else if (ame.type === "thinking_start") {
-                broadcast("thinking:start", { sessionId: streamSessionId });
-              } else if (ame.type === "thinking_end") {
-                broadcast("thinking:end", { sessionId: streamSessionId });
+      const batchProgressByToolCallId = new Map<string, BatchProgressState>();
+      let sawDraftDelta = false;
+      let sawWriterToolStart = false;
+      let sawWriterToolSuccess = false;
+      let sawWriterToolError = false;
+      let precomputedWritePersistence: WritePersistenceCheckResult | null = null;
+
+      const persistTelemetryHooks = {
+        onPersistCheck: (payload: PersistCheckTelemetry) => {
+          broadcast("persist:check", {
+            sessionId: streamSessionId,
+            runId,
+            activeBookId,
+            ...payload,
+          });
+          if (payload.status === "started") {
+            emitAgentLog(`[persist:check] start beforeCount=${payload.beforeCount}`);
+            return;
+          }
+          emitAgentLog(
+            `[persist:check] done persisted=${payload.persisted ? "true" : "false"}`
+            + ` before=${payload.beforeCount}`
+            + ` after=${payload.afterCount ?? 0}`
+            + ` added=${(payload.addedChapterNumbers ?? []).join(",") || "-"}`
+            + ` missing=${(payload.missingChapterFiles ?? []).join(",") || "-"}`,
+          );
+        },
+        onPersistRepair: (payload: PersistRepairTelemetry) => {
+          broadcast("persist:repair", {
+            sessionId: streamSessionId,
+            runId,
+            activeBookId,
+            ...payload,
+          });
+          if (payload.status === "started") {
+            emitAgentLog("[persist:repair] start");
+            return;
+          }
+          if (payload.status === "completed") {
+            emitAgentLog(
+              `[persist:repair] completed chapters=${payload.repairedChapterNumbers.join(",") || "-"}`,
+            );
+            return;
+          }
+          emitAgentLog(
+            `[persist:repair] ${payload.status} reason=${payload.reason ?? "unknown"}`
+            + ` chapters=${payload.repairedChapterNumbers.join(",") || "-"}`,
+            payload.status === "failed" ? "error" : "warning",
+          );
+        },
+      };
+
+      const ensureBatchProgressState = (toolCallId: string, total: number): BatchProgressState | null => {
+        if (!Number.isFinite(total) || total <= 1) return null;
+        const existing = batchProgressByToolCallId.get(toolCallId);
+        if (existing) {
+          if (total > existing.total) {
+            existing.total = total;
+          }
+          return existing;
+        }
+        const state: BatchProgressState = {
+          batchId: `${runId}:${toolCallId}`,
+          total,
+          completed: 0,
+          startedAt: Date.now(),
+        };
+        batchProgressByToolCallId.set(toolCallId, state);
+        broadcast("batch:progress", {
+          sessionId: streamSessionId,
+          runId,
+          id: toolCallId,
+          tool: "sub_agent",
+          batchId: state.batchId,
+          status: "started",
+          total: state.total,
+          completed: state.completed,
+          elapsedMs: 0,
+        });
+        return state;
+      };
+
+      const emitBatchProgress = (
+        toolCallId: string,
+        status: "progress" | "completed" | "failed",
+        state: BatchProgressState,
+        options?: {
+          readonly currentChapter?: number;
+          readonly currentWords?: number;
+          readonly failedChapterNumber?: number;
+          readonly error?: string;
+        },
+      ): void => {
+        broadcast("batch:progress", {
+          sessionId: streamSessionId,
+          runId,
+          id: toolCallId,
+          tool: "sub_agent",
+          batchId: state.batchId,
+          status,
+          total: state.total,
+          completed: state.completed,
+          elapsedMs: elapsedSince(state.startedAt),
+          ...(typeof options?.currentChapter === "number" ? { currentChapter: options.currentChapter } : {}),
+          ...(typeof options?.currentWords === "number" ? { currentWords: options.currentWords } : {}),
+          ...(typeof options?.failedChapterNumber === "number" ? { failedChapterNumber: options.failedChapterNumber } : {}),
+          ...(options?.error ? { error: options.error } : {}),
+        });
+      };
+
+      let deterministicThinkingActive = false;
+      const emitDeterministicThinking = (
+        text: string,
+        metadata?: {
+          readonly toolCallId?: string;
+          readonly chapterNumber?: number;
+          readonly mode?: string;
+          readonly action?: string;
+        },
+      ): void => {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        const thinkingMeta = {
+          ...(metadata?.toolCallId ? { toolCallId: metadata.toolCallId } : {}),
+          ...(typeof metadata?.chapterNumber === "number" ? { chapterNumber: metadata.chapterNumber } : {}),
+          ...(metadata?.mode ? { mode: metadata.mode } : {}),
+          ...(metadata?.action ? { action: metadata.action } : {}),
+        };
+        if (!deterministicThinkingActive) {
+          broadcast("thinking:start", {
+            sessionId: streamSessionId,
+            runId,
+            ...thinkingMeta,
+          });
+          deterministicThinkingActive = true;
+        }
+        broadcast("thinking:delta", {
+          sessionId: streamSessionId,
+          runId,
+          ...thinkingMeta,
+          text: trimmed,
+        });
+      };
+      const closeDeterministicThinking = (
+        metadata?: {
+          readonly toolCallId?: string;
+          readonly chapterNumber?: number;
+          readonly mode?: string;
+          readonly action?: string;
+        },
+      ): void => {
+        if (!deterministicThinkingActive) return;
+        broadcast("thinking:end", {
+          sessionId: streamSessionId,
+          runId,
+          ...(metadata?.toolCallId ? { toolCallId: metadata.toolCallId } : {}),
+          ...(typeof metadata?.chapterNumber === "number" ? { chapterNumber: metadata.chapterNumber } : {}),
+          ...(metadata?.mode ? { mode: metadata.mode } : {}),
+          ...(metadata?.action ? { action: metadata.action } : {}),
+        });
+        deterministicThinkingActive = false;
+      };
+
+      let result: {
+        responseText: string;
+        messages: Array<{ role: string; content: string; thinking?: string }>;
+      } | null = null;
+      if (deterministicAction && activeBookId) {
+        const toolCallId = `det-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const actionMeta = {
+          toolCallId,
+          action: deterministicAction.kind,
+          ...(typeof (deterministicAction as { chapterNumber?: unknown }).chapterNumber === "number"
+            ? { chapterNumber: Number((deterministicAction as { chapterNumber?: unknown }).chapterNumber) }
+            : {}),
+          ...(typeof (deterministicAction as { mode?: unknown }).mode === "string"
+            ? { mode: String((deterministicAction as { mode?: unknown }).mode) }
+            : {}),
+        } as const;
+        emitDeterministicThinking(`开始执行 ${deterministicAction.kind}。`, actionMeta);
+        try {
+        if (deterministicAction.kind === "audit-impacted") {
+          const startedAt = Date.now();
+          const stages = PIPELINE_STAGES.auditor;
+          const impactedChapters = await collectRewriteImpactChapterNumbers({
+            state,
+            bookId: activeBookId,
+          });
+          if (impactedChapters.length === 0) {
+            const responseText = "当前没有待复核章节。";
+            emitDeterministicThinking(responseText, {
+              toolCallId,
+              action: deterministicAction.kind,
+            });
+            result = {
+              responseText,
+              messages: [{ role: "assistant", content: responseText }],
+            };
+          } else {
+            collectedToolExecs.push({
+              id: toolCallId,
+              tool: "sub_agent",
+              agent: "auditor",
+              label: resolveToolLabel("sub_agent", "auditor"),
+              status: "running",
+              args: {
+                agent: "auditor",
+                action: "audit-impacted",
+                bookId: activeBookId,
+                chapterNumbers: impactedChapters,
+              },
+              stages: stages.map((label) => ({ label, status: "pending" as const })),
+              startedAt,
+            });
+            broadcast("tool:start", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              args: {
+                agent: "auditor",
+                action: "audit-impacted",
+                bookId: activeBookId,
+                chapterNumbers: impactedChapters,
+              },
+              stages,
+            });
+            const batch = ensureBatchProgressState(toolCallId, impactedChapters.length);
+            const startText = `Auditor batch started for impacted chapters: ${impactedChapters.join(", ")}.`;
+            emitDeterministicThinking(startText, {
+              toolCallId,
+              action: deterministicAction.kind,
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: startText }] },
+            });
+
+            let passedCount = 0;
+            let failedCount = 0;
+            let errorCount = 0;
+            const chapterSummaries: string[] = [];
+            const autoReviewPolicy = resolveAutoReviewPolicy(config);
+            for (let index = 0; index < impactedChapters.length; index += 1) {
+              const chapterNumber = impactedChapters[index]!;
+              try {
+                const unified = await runUnifiedReviewLoop({
+                  state,
+                  pipeline,
+                  bookId: activeBookId,
+                  chapterNumber,
+                  entry: "rewrite",
+                  onFinalized: ({ entry, finalAudit, autoReview }) => {
+                    recordReviewMetrics({
+                      bookId: activeBookId,
+                      entry,
+                      passed: finalAudit.passed,
+                      reviseRoundsUsed: autoReview.reviseRoundsUsed,
+                      finalState: autoReview.finalState,
+                      issueClassCounts: finalAudit.issueClassCounts,
+                      issueTexts: finalAudit.issueTexts,
+                    });
+                  },
+                  autoReviewPolicy,
+                onAuditStart: ({ round, maxReviseRounds }) => {
+                  broadcast("audit:start", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: chapterNumber,
+                      round,
+                      maxRounds: maxReviseRounds,
+                      phase: "audit",
+                    });
+                  },
+                  onAuditComplete: ({
+                    round,
+                    maxReviseRounds,
+                    audit,
+                    latestRevisionMustFixOutcomes,
+                    latestRevisionMustFixTotalCount,
+                    latestRevisionMustFixUnresolvedCount,
+                  }) => {
+                    const autoReviewState = buildAutoReviewAuditEventState({
+                      round,
+                      maxReviseRounds,
+                      passed: audit.passed,
+                    });
+                  broadcast("audit:complete", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: audit.chapterNumber,
+                      round,
+                      maxRounds: maxReviseRounds,
+                      phase: "audit",
+                      passed: audit.passed,
+                      issueCount: audit.issueCount,
+                      score: audit.score,
+                      severityCounts: audit.severityCounts,
+                      failureGate: audit.failureGate,
+                      summary: audit.summary,
+                      issues: audit.issueTexts,
+                      report: audit.report,
+                      ...autoReviewState,
+                    });
+                  },
+                onReviseStart: ({ round, maxReviseRounds, mode, strategyReason }) => {
+                  broadcast("revise:start", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: chapterNumber,
+                      round,
+                      maxRounds: maxReviseRounds,
+                      phase: "revise",
+                      mode,
+                      ...(typeof strategyReason === "string" && strategyReason.trim()
+                        ? { strategyReason: strategyReason.trim() }
+                        : {}),
+                      autoTriggeredByAudit: true,
+                    });
+                  },
+                onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+                  broadcast("revise:complete", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: reviseResult.chapterNumber,
+                      round,
+                      maxRounds: maxReviseRounds,
+                      phase: "revise",
+                      mode,
+                      autoTriggeredByAudit: true,
+                      wordCount: reviseResult.wordCount,
+                      status: reviseResult.status,
+                      applied: reviseResult.applied,
+                      ...(reviseAudit
+                        ? {
+                          audit: {
+                            passed: reviseAudit.passed,
+                            score: reviseAudit.score,
+                            issueCount: reviseAudit.issueCount,
+                            severityCounts: reviseAudit.severityCounts,
+                            failureGate: reviseAudit.failureGate,
+                            summary: reviseAudit.summary,
+                            issues: reviseAudit.issueTexts,
+                            report: reviseAudit.report,
+                          },
+                        }
+                        : {}),
+                    });
+                  },
+                });
+                const auditResult = unified.finalAudit;
+                const issueCount = auditResult.issueCount;
+                if (auditResult.passed) passedCount += 1;
+                else failedCount += 1;
+                const finalWordCount = unified.autoReview.revisions.length > 0
+                  ? unified.autoReview.revisions[unified.autoReview.revisions.length - 1]?.wordCount
+                  : undefined;
+                chapterSummaries.push(
+                  `第${auditResult.chapterNumber}章：${auditResult.passed ? "通过" : "未通过"}（评分${auditResult.score}，问题${issueCount}项，字数${typeof finalWordCount === "number" ? finalWordCount : "-"}，修订${unified.autoReview.reviseRoundsUsed}轮）`,
+                );
+                const progressText = `Audit progress ${index + 1}/${impactedChapters.length}: chapter ${chapterNumber} (${auditResult.passed ? "PASSED" : "FAILED"}).`;
+                emitDeterministicThinking(progressText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                });
+                broadcast("tool:update", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: toolCallId,
+                  tool: "sub_agent",
+                  partialResult: { content: [{ type: "text", text: progressText }] },
+                });
+              } catch (error) {
+                errorCount += 1;
+                failedCount += 1;
+                const detail = error instanceof Error ? error.message : String(error);
+                chapterSummaries.push(`第${chapterNumber}章：执行失败（${detail}）`);
+                broadcast("audit:error", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  chapter: chapterNumber,
+                  error: detail,
+                });
+                const progressText = `Audit progress ${index + 1}/${impactedChapters.length}: chapter ${chapterNumber} (ERROR).`;
+                emitDeterministicThinking(progressText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                });
+                broadcast("tool:update", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: toolCallId,
+                  tool: "sub_agent",
+                  partialResult: { content: [{ type: "text", text: progressText }] },
+                });
+              }
+              if (batch) {
+                batch.completed = index + 1;
+                batch.currentChapter = chapterNumber;
+                emitBatchProgress(toolCallId, "progress", batch, {
+                  currentChapter: chapterNumber,
+                });
               }
             }
-            if (event.type === "tool_execution_start") {
-              const args = event.args as Record<string, unknown> | undefined;
-              const agent = event.toolName === "sub_agent" ? (args?.agent as string | undefined) : undefined;
-              const stages = agent ? (PIPELINE_STAGES[agent] ?? []) : [];
 
-              collectedToolExecs.push({
-                id: event.toolCallId,
-                tool: event.toolName,
-                agent,
-                label: resolveToolLabel(event.toolName, agent),
-                status: "running",
-                args,
-                stages: stages.length > 0
-                  ? stages.map(l => ({ label: l, status: "pending" as const }))
-                  : undefined,
-                startedAt: Date.now(),
+            await clearRewriteImpactNotes({
+              state,
+              bookId: activeBookId,
+              chapterNumbers: impactedChapters,
+            });
+
+            const finishText = `Audit batch complete for impacted chapters (${impactedChapters.length}).`;
+            emitDeterministicThinking(finishText, {
+              toolCallId,
+              action: deterministicAction.kind,
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: finishText }] },
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "completed";
+              exec.completedAt = Date.now();
+              exec.result = finishText;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: finishText,
+              isError: false,
+            });
+            if (batch) {
+              emitBatchProgress(toolCallId, "completed", batch, {
+                ...(typeof batch.currentChapter === "number" ? { currentChapter: batch.currentChapter } : {}),
               });
-
-              broadcast("tool:start", {
-                sessionId: streamSessionId,
-                id: event.toolCallId,
-                tool: event.toolName,
-                args,
-                stages,
+              batchProgressByToolCallId.delete(toolCallId);
+            }
+            const lines = [
+              `已完成受影响章节批量审计：共${impactedChapters.length}章，通过${passedCount}章，未通过${failedCount - errorCount}章，执行失败${errorCount}章。`,
+              `已清理待复核标记：第${impactedChapters[0]}-${impactedChapters.at(-1)}章。`,
+            ];
+            if (chapterSummaries.length > 0) {
+              lines.push("审计结果：");
+              chapterSummaries.forEach((summary, index) => lines.push(`${index + 1}. ${summary}`));
+            }
+            result = {
+              responseText: lines.join("\n"),
+              messages: [{ role: "assistant", content: lines.join("\n") }],
+            };
+          }
+        } else if (deterministicAction.kind === "audit" || deterministicAction.kind === "audit-latest") {
+          const startedAt = Date.now();
+          const stages = PIPELINE_STAGES.auditor;
+          const chapterNumber = await resolveAuditTargetChapterNumber({
+            state,
+            bookId: activeBookId,
+            explicitChapterNumber: deterministicAction.kind === "audit"
+              ? deterministicAction.chapterNumber
+              : undefined,
+          });
+          collectedToolExecs.push({
+            id: toolCallId,
+            tool: "sub_agent",
+            agent: "auditor",
+            label: resolveToolLabel("sub_agent", "auditor"),
+            status: "running",
+            args: {
+              agent: "auditor",
+              bookId: activeBookId,
+              chapterNumber,
+            },
+            stages: stages.map((label) => ({ label, status: "pending" as const })),
+            startedAt,
+          });
+          broadcast("tool:start", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            args: {
+              agent: "auditor",
+              bookId: activeBookId,
+              chapterNumber,
+            },
+            stages,
+          });
+          const startText = `Auditor started for chapter ${chapterNumber}.`;
+          emitDeterministicThinking(startText, {
+            toolCallId,
+            action: deterministicAction.kind,
+            chapterNumber,
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            partialResult: { content: [{ type: "text", text: startText }] },
+          });
+          try {
+            const autoReviewPolicy = resolveAutoReviewPolicy(config);
+            const unified = await runUnifiedReviewLoop({
+              state,
+              pipeline,
+              bookId: activeBookId,
+              chapterNumber,
+              entry: "rewrite",
+              onFinalized: ({ entry, finalAudit, autoReview }) => {
+                recordReviewMetrics({
+                  bookId: activeBookId,
+                  entry,
+                  passed: finalAudit.passed,
+                  reviseRoundsUsed: autoReview.reviseRoundsUsed,
+                  finalState: autoReview.finalState,
+                  issueClassCounts: finalAudit.issueClassCounts,
+                  issueTexts: finalAudit.issueTexts,
+                });
+              },
+              autoReviewPolicy,
+              onAuditStart: ({ round, maxReviseRounds }) => {
+                    broadcast("audit:start", {
+                      sessionId: streamSessionId,
+                      runId,
+                      bookId: activeBookId,
+                      entry: "rewrite",
+                      chapter: chapterNumber,
+                  round,
+                  maxRounds: maxReviseRounds,
+                  phase: "audit",
+                });
+              },
+              onAuditComplete: ({
+                round,
+                maxReviseRounds,
+                audit,
+                latestRevisionMustFixOutcomes,
+                latestRevisionMustFixTotalCount,
+                latestRevisionMustFixUnresolvedCount,
+              }) => {
+                const autoReviewState = buildAutoReviewAuditEventState({
+                  round,
+                  maxReviseRounds,
+                  passed: audit.passed,
+                });
+                broadcast("audit:complete", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  chapter: audit.chapterNumber,
+                  round,
+                  maxRounds: maxReviseRounds,
+                  phase: "audit",
+                  passed: audit.passed,
+                  issueCount: audit.issueCount,
+                  score: audit.score,
+                  severityCounts: audit.severityCounts,
+                  failureGate: audit.failureGate,
+                  summary: audit.summary,
+                  dimensionChecks: audit.dimensionChecks,
+                  issues: audit.issueTexts,
+                  report: audit.report,
+                  ...(Array.isArray(latestRevisionMustFixOutcomes)
+                    ? { latestRevisionMustFixOutcomes }
+                    : {}),
+                  ...(typeof latestRevisionMustFixTotalCount === "number"
+                    ? { latestRevisionMustFixTotalCount }
+                    : {}),
+                  ...(typeof latestRevisionMustFixUnresolvedCount === "number"
+                    ? { latestRevisionMustFixUnresolvedCount }
+                    : {}),
+                  ...autoReviewState,
+                });
+              },
+              onReviseStart: ({ round, maxReviseRounds, mode, strategyReason }) => {
+                const reviseStartText = `Auto revise round ${round}/${maxReviseRounds} started for chapter ${chapterNumber}.`;
+                emitDeterministicThinking(reviseStartText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                  mode,
+                });
+                broadcast("revise:start", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  chapter: chapterNumber,
+                  round,
+                  maxRounds: maxReviseRounds,
+                  phase: "revise",
+                  mode,
+                  ...(typeof strategyReason === "string" && strategyReason.trim()
+                    ? { strategyReason: strategyReason.trim() }
+                    : {}),
+                  autoTriggeredByAudit: true,
+                });
+                broadcast("tool:update", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: toolCallId,
+                  tool: "sub_agent",
+                  partialResult: { content: [{ type: "text", text: reviseStartText }] },
+                });
+              },
+              onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+                const reviseFinishText = `Auto revise round ${round}/${maxReviseRounds} complete for chapter ${chapterNumber}: ${reviseResult.applied ? "APPLIED" : "UNCHANGED"} (${reviseResult.status}).`;
+                emitDeterministicThinking(reviseFinishText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                  mode,
+                });
+                broadcast("tool:update", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: toolCallId,
+                  tool: "sub_agent",
+                  partialResult: { content: [{ type: "text", text: reviseFinishText }] },
+                });
+                broadcast("revise:complete", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  chapter: reviseResult.chapterNumber,
+                  round,
+                  maxRounds: maxReviseRounds,
+                  phase: "revise",
+                  mode,
+                  autoTriggeredByAudit: true,
+                  wordCount: reviseResult.wordCount,
+                  status: reviseResult.status,
+                  applied: reviseResult.applied,
+                  ...(reviseAudit
+                    ? {
+                      audit: {
+                        passed: reviseAudit.passed,
+                        score: reviseAudit.score,
+                        issueCount: reviseAudit.issueCount,
+                        severityCounts: reviseAudit.severityCounts,
+                        failureGate: reviseAudit.failureGate,
+                        summary: reviseAudit.summary,
+                        dimensionChecks: reviseAudit.dimensionChecks,
+                        issues: reviseAudit.issueTexts,
+                        report: reviseAudit.report,
+                      },
+                    }
+                    : {}),
+                });
+              },
+            });
+            const finalAudit = unified.finalAudit;
+            const issueCount = finalAudit.issueCount;
+            const responseText = finalAudit.report;
+            const finishText = `Audit cycle complete for chapter ${finalAudit.chapterNumber}: ${finalAudit.passed ? "PASSED" : "FAILED"} (${issueCount} issue${issueCount === 1 ? "" : "s"}).`;
+            const auditExecutionFailed = !finalAudit.passed;
+            emitDeterministicThinking(finishText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber: finalAudit.chapterNumber,
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: finishText }] },
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = auditExecutionFailed ? "error" : "completed";
+              exec.completedAt = Date.now();
+              if (auditExecutionFailed) {
+                exec.error = finishText;
+              } else {
+                exec.result = finishText;
+              }
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: finishText,
+              isError: auditExecutionFailed,
+            });
+            const runSingleAudit = unified.autoReview.maxReviseRounds <= 0;
+            const autoSummaryLines = runSingleAudit
+              ? ["自动闭环：已关闭，仅执行单次审计。"]
+              : [
+                `自动闭环：最多${unified.autoReview.maxReviseRounds}轮修订，本次执行${unified.autoReview.reviseRoundsUsed}轮。`,
+                unified.autoReview.stoppedByMaxRounds && !finalAudit.passed
+                  ? "结果：二次修订后仍未通过，已自动中止。"
+                  : "结果：已达标并结束自动闭环。",
+              ];
+            autoSummaryLines.push(
+              `审计轮次：共${unified.autoReview.auditRounds}轮，最终评分=${finalAudit.score}，问题数=${finalAudit.issueCount}。`,
+            );
+            if (unified.autoReview.revisions.length > 0) {
+              autoSummaryLines.push("审计轮次：");
+              autoSummaryLines.push("修订轮次：");
+              unified.autoReview.revisions.forEach((entry) => {
+                const resolvedCount = entry.issueResolutions.filter((item) => item.outcome === "resolved").length;
+                const unresolvedCount = entry.issueResolutions.length - resolvedCount;
+                autoSummaryLines.push(
+                  `${entry.round}. applied=${entry.applied ? "yes" : "no"}; status=${entry.status}; wordCount=${entry.wordCount}; resolved=${resolvedCount}; unresolved=${unresolvedCount}`,
+                );
+                if (entry.issueResolutions.length > 0) {
+                  autoSummaryLines.push(`   - 问题映射（前${Math.min(3, entry.issueResolutions.length)}项）：`);
+                  entry.issueResolutions.slice(0, 3).forEach((mapping, idx) => {
+                    const fixDeltaText = mapping.fixDelta ? `；fixDelta=${mapping.fixDelta}` : "";
+                    autoSummaryLines.push(`   - ${idx + 1}. [${mapping.issueId}] ${mapping.issue} => ${mapping.outcome === "resolved" ? "已解决" : "未解决"}${fixDeltaText}`);
+                  });
+                }
               });
             }
-            if (event.type === "tool_execution_update") {
+            result = {
+              responseText: `${autoSummaryLines.join("\n")}\n\n${responseText}`,
+              messages: [{ role: "assistant", content: `${autoSummaryLines.join("\n")}\n\n${responseText}` }],
+            };
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            emitDeterministicThinking(`Audit failed for chapter ${chapterNumber}: ${detail}`, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber,
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "error";
+              exec.completedAt = Date.now();
+              exec.error = detail;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: detail,
+              isError: true,
+            });
+            broadcast("audit:error", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              chapter: chapterNumber,
+              error: detail,
+            });
+            if (/chapter not found/i.test(detail) || /章节.*不存在/.test(detail)) {
+              throw new ApiError(404, "CHAPTER_NOT_FOUND", `Chapter not found: ${chapterNumber}`);
+            }
+            const upstreamFailure = classifyAgentUpstreamFailure(error);
+            if (upstreamFailure) {
+              throw new ApiError(upstreamFailure.status, upstreamFailure.code, upstreamFailure.message);
+            }
+            throw error;
+          }
+        } else if (deterministicAction.kind === "revise") {
+          const startedAt = Date.now();
+          const stages = PIPELINE_STAGES.rewrite;
+          const chapterNumber = deterministicAction.chapterNumber;
+          const mode = deterministicAction.mode;
+          const rewriteConsistencyBaseline = mode === "rewrite"
+            ? await buildNonDestructiveRewriteBaseline({
+              state,
+              bookId: activeBookId,
+              pivotChapter: chapterNumber,
+            })
+            : null;
+          if (mode === "rewrite") {
+            broadcast("rewrite:start", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              entry: "rewrite",
+              chapter: chapterNumber,
+              mode: "non-destructive",
+            });
+          }
+          collectedToolExecs.push({
+            id: toolCallId,
+            tool: "sub_agent",
+            agent: "reviser",
+            label: resolveToolLabel("sub_agent", "reviser"),
+            status: "running",
+            args: {
+              agent: "reviser",
+              bookId: activeBookId,
+              chapterNumber,
+              mode,
+            },
+            stages: stages.map((label) => ({ label, status: "pending" as const })),
+            startedAt,
+          });
+          broadcast("tool:start", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            args: {
+              agent: "reviser",
+              bookId: activeBookId,
+              chapterNumber,
+              mode,
+            },
+            stages,
+          });
+          const startText = `Reviser ${mode} chapter ${chapterNumber} started.`;
+          emitDeterministicThinking(startText, {
+            toolCallId,
+            action: deterministicAction.kind,
+            chapterNumber,
+            mode,
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            partialResult: { content: [{ type: "text", text: startText }] },
+          });
+          if (mode === "rewrite") {
+            emitRewriteAuditLog({
+              mode: "non-destructive",
+              target: `chapter:${chapterNumber}`,
+            });
+          }
+          try {
+            broadcast("revise:start", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              chapter: chapterNumber,
+              round: 1,
+              maxRounds: 0,
+              phase: "revise",
+              mode,
+              autoTriggeredByAudit: false,
+            });
+            const reviseResult = await pipeline.reviseDraft(activeBookId, chapterNumber, mode);
+            const chapterFileName = await findChapterFileNameByNumber(state, activeBookId, chapterNumber);
+            if (rewriteConsistencyBaseline) {
+              await enforceNonDestructiveRewriteConsistency({
+                state,
+                bookId: activeBookId,
+                baseline: rewriteConsistencyBaseline,
+              });
+            }
+            const rewriteImpact = mode === "rewrite"
+              ? await markDownstreamChaptersForReview({
+                state,
+                bookId: activeBookId,
+                pivotChapter: chapterNumber,
+                rewrittenStartChapter: chapterNumber,
+                rewrittenEndChapter: chapterNumber,
+              })
+              : null;
+            if (mode === "rewrite") {
+              await emitChapterDeltaFallbackIfMissing({
+                state,
+                bookId: activeBookId,
+                chapterNumber,
+                mode,
+                sessionId: streamSessionId,
+                runId,
+                emittedChapterPreviewNumbers,
+              });
+            }
+            const finishText = `Revision (${mode}) complete for chapter ${chapterNumber}.`;
+            emitDeterministicThinking(finishText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber,
+              mode,
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: finishText }] },
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "completed";
+              exec.completedAt = Date.now();
+              exec.result = finishText;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: finishText,
+              isError: false,
+            });
+
+            const statusText = reviseResult.status === "ready-for-review"
+              ? "ready-for-review"
+              : reviseResult.status === "audit-failed"
+                ? "audit-failed"
+                : "unchanged";
+            const fixedIssueCount = Array.isArray(reviseResult.fixedIssues) ? reviseResult.fixedIssues.length : 0;
+            const actionLabel = mode === "rewrite" ? "重写" : "修订";
+            const lines = [
+              `已完成第${chapterNumber}章${actionLabel}。`,
+              `模式：${mode}`,
+              `状态：${statusText}`,
+              `已应用：${reviseResult.applied ? "是" : "否"}`,
+              `字数：${Number(reviseResult.wordCount ?? 0)}`,
+              reviseResult.applied
+                ? `修复项：${fixedIssueCount}`
+                : `尝试修复项：${fixedIssueCount}`,
+            ];
+            if (chapterFileName) {
+              lines.push(`正文文件：${chapterFileName}`);
+            }
+            let structuredAudit = normalizeReviseAuditSummary(
+              (reviseResult as { audit?: unknown }).audit,
+              chapterNumber,
+              reviseResult.status !== "audit-failed",
+            );
+            let unifiedAutoReview: UnifiedReviewLoopAutoReviewPayload | null = null;
+            if (mode === "rewrite") {
+              const autoReviewPolicy = resolveAutoReviewPolicy(config);
+              const unified = await runUnifiedReviewLoop({
+                state,
+                pipeline,
+                bookId: activeBookId,
+                chapterNumber,
+                entry: "rewrite",
+                onFinalized: ({ entry, finalAudit, autoReview }) => {
+                  recordReviewMetrics({
+                    bookId: activeBookId,
+                    entry,
+                    passed: finalAudit.passed,
+                    reviseRoundsUsed: autoReview.reviseRoundsUsed,
+                    finalState: autoReview.finalState,
+                    issueClassCounts: finalAudit.issueClassCounts,
+                    issueTexts: finalAudit.issueTexts,
+                  });
+                },
+                autoReviewPolicy,
+                onAuditStart: ({ round, maxReviseRounds }) => {
+                  broadcast("audit:start", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: chapterNumber,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "audit",
+                  });
+                },
+                onAuditComplete: ({
+                  round,
+                  maxReviseRounds,
+                  audit,
+                  latestRevisionMustFixOutcomes,
+                  latestRevisionMustFixTotalCount,
+                  latestRevisionMustFixUnresolvedCount,
+                }) => {
+                  const autoReviewState = buildAutoReviewAuditEventState({
+                    round,
+                    maxReviseRounds,
+                    passed: audit.passed,
+                  });
+                  broadcast("audit:complete", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: chapterNumber,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "audit",
+                    wordCount: reviseResult.wordCount,
+                    status: reviseResult.status,
+                    applied: reviseResult.applied,
+                    passed: audit.passed,
+                    issueCount: audit.issueCount,
+                    score: audit.score,
+                    severityCounts: audit.severityCounts,
+                    failureGate: audit.failureGate,
+                    summary: audit.summary,
+                    dimensionChecks: audit.dimensionChecks,
+                    issues: audit.issueTexts,
+                    report: audit.report,
+                    ...(Array.isArray(latestRevisionMustFixOutcomes)
+                      ? { latestRevisionMustFixOutcomes }
+                      : {}),
+                    ...(typeof latestRevisionMustFixTotalCount === "number"
+                      ? { latestRevisionMustFixTotalCount }
+                      : {}),
+                    ...(typeof latestRevisionMustFixUnresolvedCount === "number"
+                      ? { latestRevisionMustFixUnresolvedCount }
+                      : {}),
+                    ...autoReviewState,
+                  });
+                },
+                onReviseStart: ({ round, maxReviseRounds, mode: autoMode, strategyReason }) => {
+                  broadcast("revise:start", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: chapterNumber,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "revise",
+                    mode: autoMode,
+                    ...(typeof strategyReason === "string" && strategyReason.trim()
+                      ? { strategyReason: strategyReason.trim() }
+                      : {}),
+                    autoTriggeredByAudit: true,
+                  });
+                },
+                onReviseComplete: ({ round, maxReviseRounds, mode: autoMode, reviseResult: autoReviseResult, reviseAudit }) => {
+                  broadcast("revise:complete", {
+                    sessionId: streamSessionId,
+                    runId,
+                    bookId: activeBookId,
+                    entry: "rewrite",
+                    chapter: autoReviseResult.chapterNumber,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "revise",
+                    mode: autoMode,
+                    autoTriggeredByAudit: true,
+                    wordCount: autoReviseResult.wordCount,
+                    status: autoReviseResult.status,
+                    applied: autoReviseResult.applied,
+                    ...(reviseAudit
+                      ? {
+                      audit: {
+                        passed: reviseAudit.passed,
+                        score: reviseAudit.score,
+                        issueCount: reviseAudit.issueCount,
+                        severityCounts: reviseAudit.severityCounts,
+                        failureGate: reviseAudit.failureGate,
+                        summary: reviseAudit.summary,
+                        dimensionChecks: reviseAudit.dimensionChecks,
+                        issues: reviseAudit.issueTexts,
+                        report: reviseAudit.report,
+                      },
+                    }
+                      : {}),
+                  });
+                },
+              });
+              structuredAudit = unified.finalAudit;
+              unifiedAutoReview = unified.autoReview;
+            }
+            if (structuredAudit) {
+              lines.push(
+                `当前审计评分：${structuredAudit.score}/100（严重 ${structuredAudit.severityCounts.critical} / 警告 ${structuredAudit.severityCounts.warning} / 提示 ${structuredAudit.severityCounts.info}）`,
+              );
+              lines.push(`当前问题数：${structuredAudit.issueCount}`);
+              if (structuredAudit.summary) {
+                lines.push(`审计报告：${structuredAudit.summary}`);
+              }
+              lines.push(...buildAuditIssueListLines(structuredAudit.issueTexts));
+              if (mode !== "rewrite") {
+                broadcast("audit:start", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  entry: "rewrite",
+                  chapter: chapterNumber,
+                  round: 1,
+                  maxRounds: 0,
+                  phase: "audit",
+                });
+                const autoReviewState = buildAutoReviewAuditEventState({
+                  round: 1,
+                  maxReviseRounds: 0,
+                  passed: structuredAudit.passed,
+                });
+                broadcast("audit:complete", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  entry: "rewrite",
+                  chapter: chapterNumber,
+                  round: 1,
+                  maxRounds: 0,
+                  phase: "audit",
+                  wordCount: reviseResult.wordCount,
+                  status: reviseResult.status,
+                  applied: reviseResult.applied,
+                  passed: structuredAudit.passed,
+                  issueCount: structuredAudit.issueCount,
+                  score: structuredAudit.score,
+                  severityCounts: structuredAudit.severityCounts,
+                  failureGate: structuredAudit.failureGate,
+                  summary: structuredAudit.summary,
+                  issues: structuredAudit.issueTexts,
+                  report: structuredAudit.report,
+                  ...autoReviewState,
+                });
+              }
+            } else {
+              const chapterIndex = await state.loadChapterIndex(activeBookId).catch(() => [] as Array<{
+                number?: number;
+                auditIssues?: ReadonlyArray<string>;
+              }>);
+              const chapterMeta = chapterIndex.find((item) => item.number === chapterNumber);
+              const chapterIssues = Array.isArray(chapterMeta?.auditIssues)
+                ? chapterMeta.auditIssues
+                : [];
+              if (chapterIssues.length > 0 || reviseResult.status === "audit-failed" || reviseResult.status === "ready-for-review") {
+                const severityCounts = countAuditIssueSeverities(chapterIssues);
+                const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+                lines.push(`当前审计评分：${score}/100（严重 ${severityCounts.critical} / 警告 ${severityCounts.warning} / 提示 ${severityCounts.info}）`);
+                lines.push(`当前问题数：${chapterIssues.length}`);
+              }
+            }
+            if (typeof reviseResult.skippedReason === "string" && reviseResult.skippedReason.trim()) {
+              lines.push(`说明：${reviseResult.skippedReason.trim()}`);
+            }
+            if (!reviseResult.applied && reviseResult.status === "unchanged") {
+              lines.push(`建议：当前模式未通过应用门槛，可尝试“重写第${chapterNumber}章”或“修订第${chapterNumber}章 rework”。`);
+            }
+            if (rewriteImpact) {
+              lines.push(formatRewriteImpactSummary(rewriteImpact));
+            }
+            if (unifiedAutoReview) {
+              lines.push(`自动闭环：最多${unifiedAutoReview.maxReviseRounds}轮，执行${unifiedAutoReview.reviseRoundsUsed}轮，终态=${unifiedAutoReview.finalState}。`);
+            }
+            broadcast("revise:complete", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              entry: "rewrite",
+              chapter: chapterNumber,
+              round: 1,
+              maxRounds: 0,
+              phase: "revise",
+              mode,
+              autoTriggeredByAudit: false,
+              wordCount: reviseResult.wordCount,
+              status: reviseResult.status,
+              applied: reviseResult.applied,
+              ...(structuredAudit
+                ? {
+                  audit: {
+                    passed: structuredAudit.passed,
+                    score: structuredAudit.score,
+                    issueCount: structuredAudit.issueCount,
+                    severityCounts: structuredAudit.severityCounts,
+                    failureGate: structuredAudit.failureGate,
+                    summary: structuredAudit.summary,
+                    issues: structuredAudit.issueTexts,
+                    report: structuredAudit.report,
+                  },
+                }
+                : {}),
+            });
+            if (mode === "rewrite") {
+              const reviseAuditPassed = structuredAudit?.passed ?? (reviseResult.status !== "audit-failed");
+              broadcast("rewrite:complete", {
+                sessionId: streamSessionId,
+                runId,
+                bookId: activeBookId,
+                entry: "rewrite",
+                chapter: chapterNumber,
+                chapterNumber,
+                wordCount: reviseResult.wordCount,
+                status: reviseResult.status,
+                mode: "non-destructive",
+                ...(structuredAudit
+                  ? {
+                    audit: {
+                      passed: structuredAudit.passed,
+                      score: structuredAudit.score,
+                      issueCount: structuredAudit.issueCount,
+                      severityCounts: structuredAudit.severityCounts,
+                      failureGate: structuredAudit.failureGate,
+                      summary: structuredAudit.summary,
+                      issues: structuredAudit.issueTexts,
+                      report: structuredAudit.report,
+                    },
+                  }
+                  : {}),
+                autoReview: unifiedAutoReview ?? buildSingleAuditAutoReviewPayload(reviseAuditPassed),
+                ...(rewriteImpact
+                  ? {
+                    rewriteImpact: {
+                      affectedCount: rewriteImpact.affectedCount,
+                      affectedChapterNumbers: rewriteImpact.affectedChapterNumbers,
+                      ...(typeof rewriteImpact.startChapter === "number" ? { startChapter: rewriteImpact.startChapter } : {}),
+                      ...(typeof rewriteImpact.endChapter === "number" ? { endChapter: rewriteImpact.endChapter } : {}),
+                    },
+                  }
+                  : {}),
+              });
+            }
+
+            const responseText = lines.join("\n");
+            result = {
+              responseText,
+              messages: [{ role: "assistant", content: responseText }],
+            };
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            if (mode === "rewrite") {
+              broadcast("rewrite:error", {
+                sessionId: streamSessionId,
+                runId,
+                bookId: activeBookId,
+                chapter: chapterNumber,
+                mode: "non-destructive",
+                error: detail,
+              });
+            }
+            emitDeterministicThinking(`Revision (${mode}) failed for chapter ${chapterNumber}: ${detail}`, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber,
+              mode,
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "error";
+              exec.completedAt = Date.now();
+              exec.error = detail;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: detail,
+              isError: true,
+            });
+            throw error;
+          }
+        } else if (deterministicAction.kind === "revise-batch") {
+          const { startChapter, endChapter, chapterCount, mode } = deterministicAction;
+          const startedAt = Date.now();
+          const stages = PIPELINE_STAGES.rewrite;
+          const rewriteConsistencyBaseline = mode === "rewrite"
+            ? await buildNonDestructiveRewriteBaseline({
+              state,
+              bookId: activeBookId,
+              pivotChapter: endChapter,
+            })
+            : null;
+          if (mode === "rewrite") {
+            broadcast("rewrite:start", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              entry: "rewrite",
+              chapter: startChapter,
+              startChapter,
+              endChapter,
+              chapterCount,
+              mode: "non-destructive",
+            });
+          }
+          collectedToolExecs.push({
+            id: toolCallId,
+            tool: "sub_agent",
+            agent: "reviser",
+            label: resolveToolLabel("sub_agent", "reviser"),
+            status: "running",
+            args: {
+              agent: "reviser",
+              action: "revise-batch",
+              bookId: activeBookId,
+              startChapter,
+              endChapter,
+              chapterCount,
+              mode,
+            },
+            stages: stages.map((label) => ({ label, status: "pending" as const })),
+            startedAt,
+          });
+          broadcast("tool:start", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            args: {
+              agent: "reviser",
+              action: "revise-batch",
+              bookId: activeBookId,
+              startChapter,
+              endChapter,
+              chapterCount,
+              mode,
+            },
+            stages,
+          });
+          const batch = ensureBatchProgressState(toolCallId, chapterCount);
+          const startText = `Reviser ${mode} batch ${startChapter}-${endChapter} started.`;
+          emitDeterministicThinking(startText, {
+            toolCallId,
+            action: deterministicAction.kind,
+            chapterNumber: startChapter,
+            mode,
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            partialResult: { content: [{ type: "text", text: startText }] },
+          });
+          if (mode === "rewrite") {
+            emitRewriteAuditLog({
+              mode: "non-destructive",
+              target: `chapters:${startChapter}-${endChapter}`,
+            });
+          }
+          try {
+            let totalWords = 0;
+            const batchAudits: Array<{
+              chapterNumber: number;
+              passed: boolean;
+              score: number;
+              issueCount: number;
+              severityCounts: AuditSeverityCounts;
+              failureGate: AuditFailureGate;
+              summary?: string;
+              issues: ReadonlyArray<string>;
+              report: string;
+            }> = [];
+            for (let i = 0; i < chapterCount; i += 1) {
+              const chapterNumber = startChapter + i;
+              broadcast("revise:start", {
+                sessionId: streamSessionId,
+                runId,
+                bookId: activeBookId,
+                chapter: chapterNumber,
+                round: 1,
+                maxRounds: 0,
+                phase: "revise",
+                mode,
+                autoTriggeredByAudit: false,
+              });
+              const reviseResult = await pipeline.reviseDraft(activeBookId, chapterNumber, mode);
+              const structuredAudit = normalizeReviseAuditSummary(
+                (reviseResult as { audit?: unknown }).audit,
+                chapterNumber,
+                reviseResult.status !== "audit-failed",
+              );
+              broadcast("revise:complete", {
+                sessionId: streamSessionId,
+                runId,
+                bookId: activeBookId,
+                chapter: chapterNumber,
+                round: 1,
+                maxRounds: 0,
+                phase: "revise",
+                mode,
+                autoTriggeredByAudit: false,
+                wordCount: reviseResult.wordCount,
+                status: reviseResult.status,
+                applied: reviseResult.applied,
+                ...(structuredAudit
+                  ? {
+                    audit: {
+                      passed: structuredAudit.passed,
+                      score: structuredAudit.score,
+                      issueCount: structuredAudit.issueCount,
+                      severityCounts: structuredAudit.severityCounts,
+                      failureGate: structuredAudit.failureGate,
+                      summary: structuredAudit.summary,
+                      issues: structuredAudit.issueTexts,
+                      report: structuredAudit.report,
+                    },
+                  }
+                  : {}),
+              });
+              if (structuredAudit) {
+                broadcast("audit:start", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  chapter: chapterNumber,
+                  round: 1,
+                  maxRounds: 0,
+                  phase: "audit",
+                });
+                const autoReviewState = buildAutoReviewAuditEventState({
+                  round: 1,
+                  maxReviseRounds: 0,
+                  passed: structuredAudit.passed,
+                });
+                batchAudits.push({
+                  chapterNumber,
+                  passed: structuredAudit.passed,
+                  score: structuredAudit.score,
+                  issueCount: structuredAudit.issueCount,
+                  severityCounts: structuredAudit.severityCounts,
+                  failureGate: structuredAudit.failureGate,
+                  summary: structuredAudit.summary,
+                  issues: structuredAudit.issueTexts,
+                  report: structuredAudit.report,
+                });
+                    broadcast("audit:complete", {
+                      sessionId: streamSessionId,
+                      runId,
+                      bookId: activeBookId,
+                      entry: "rewrite",
+                      chapter: chapterNumber,
+                  round: 1,
+                  maxRounds: 0,
+                  phase: "audit",
+                  wordCount: reviseResult.wordCount,
+                  status: reviseResult.status,
+                  applied: reviseResult.applied,
+                  passed: structuredAudit.passed,
+                  issueCount: structuredAudit.issueCount,
+                  score: structuredAudit.score,
+                  severityCounts: structuredAudit.severityCounts,
+                  failureGate: structuredAudit.failureGate,
+                  summary: structuredAudit.summary,
+                  issues: structuredAudit.issueTexts,
+                  report: structuredAudit.report,
+                  ...autoReviewState,
+                });
+              }
+              if (mode === "rewrite") {
+                await emitChapterDeltaFallbackIfMissing({
+                  state,
+                  bookId: activeBookId,
+                  chapterNumber,
+                  mode,
+                  sessionId: streamSessionId,
+                  runId,
+                  emittedChapterPreviewNumbers,
+                });
+              }
+              const wordCount = Number(reviseResult.wordCount ?? 0);
+              if (Number.isFinite(wordCount) && wordCount > 0) {
+                totalWords += wordCount;
+              }
+              const progressText = `Revision (${mode}) progress ${i + 1}/${chapterCount}: chapter ${chapterNumber} (${Number.isFinite(wordCount) && wordCount > 0 ? wordCount : "unknown"} words).`;
+              emitDeterministicThinking(progressText, {
+                toolCallId,
+                action: deterministicAction.kind,
+                chapterNumber,
+                mode,
+              });
               broadcast("tool:update", {
                 sessionId: streamSessionId,
-                tool: event.toolName,
-                partialResult: event.partialResult,
+                runId,
+                id: toolCallId,
+                tool: "sub_agent",
+                partialResult: { content: [{ type: "text", text: progressText }] },
+              });
+              if (batch) {
+                batch.completed = i + 1;
+                batch.currentChapter = chapterNumber;
+                emitBatchProgress(toolCallId, "progress", batch, {
+                  currentChapter: chapterNumber,
+                  ...(Number.isFinite(wordCount) && wordCount > 0 ? { currentWords: wordCount } : {}),
+                });
+              }
+            }
+            if (rewriteConsistencyBaseline) {
+              await enforceNonDestructiveRewriteConsistency({
+                state,
+                bookId: activeBookId,
+                baseline: rewriteConsistencyBaseline,
               });
             }
-            if (event.type === "tool_execution_end") {
-              const exec = collectedToolExecs.find(t => t.id === event.toolCallId);
-              if (exec) {
-                exec.status = event.isError ? "error" : "completed";
-                exec.completedAt = Date.now();
-                exec.stages = exec.stages?.map(s => ({ ...s, status: "completed" as const }));
-                if (event.isError) exec.error = extractToolError(event.result);
-                else exec.result = summarizeResult(event.result);
+            const rewriteImpact = mode === "rewrite"
+              ? await markDownstreamChaptersForReview({
+                state,
+                bookId: activeBookId,
+                pivotChapter: endChapter,
+                rewrittenStartChapter: startChapter,
+                rewrittenEndChapter: endChapter,
+              })
+              : null;
+
+            const finishText = `Revision (${mode}) batch complete for chapters ${startChapter}-${endChapter}.`;
+            emitDeterministicThinking(finishText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber: endChapter,
+              mode,
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: finishText }] },
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "completed";
+              exec.completedAt = Date.now();
+              exec.result = finishText;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: finishText,
+              isError: false,
+            });
+            if (batch) {
+              emitBatchProgress(toolCallId, "completed", batch, {
+                ...(typeof batch.currentChapter === "number" ? { currentChapter: batch.currentChapter } : {}),
+              });
+              batchProgressByToolCallId.delete(toolCallId);
+            }
+            const lines = [
+              `已完成重写第${startChapter}-${endChapter}章（非破坏模式）${totalWords > 0 ? `，共${totalWords}字` : ""}。`,
+            ];
+            if (batchAudits.length > 0) {
+              const passedCount = batchAudits.filter((item) => item.passed).length;
+              const failedCount = batchAudits.length - passedCount;
+              lines.push(`自动审计：共${batchAudits.length}章，通过${passedCount}章，未通过${failedCount}章。`);
+            }
+            if (rewriteImpact) {
+              lines.push(formatRewriteImpactSummary(rewriteImpact));
+            }
+            if (mode === "rewrite") {
+                const failedCount = batchAudits.filter((item) => !item.passed).length;
+                broadcast("rewrite:complete", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  entry: "rewrite",
+                  chapter: endChapter,
+                chapterNumber: endChapter,
+                startChapter,
+                endChapter,
+                chapterCount,
+                totalWords: totalWords > 0 ? totalWords : undefined,
+                mode: "non-destructive",
+                ...(batchAudits.length > 0
+                  ? {
+                    audits: batchAudits.map((item) => ({
+                      chapterNumber: item.chapterNumber,
+                      passed: item.passed,
+                      score: item.score,
+                      issueCount: item.issueCount,
+                      severityCounts: item.severityCounts,
+                      failureGate: item.failureGate,
+                      summary: item.summary,
+                      issues: item.issues,
+                      report: item.report,
+                    })),
+                  }
+                  : {}),
+                autoReview: {
+                  enabled: false,
+                  maxReviseRounds: 0,
+                  reviseRoundsUsed: 0,
+                  auditRounds: Math.max(1, batchAudits.length),
+                  stoppedByMaxRounds: false,
+                  finalState: failedCount > 0 ? "failed-single-audit" : "passed",
+                  revisions: [],
+                } satisfies UnifiedReviewLoopAutoReviewPayload,
+                ...(rewriteImpact
+                  ? {
+                    rewriteImpact: {
+                      affectedCount: rewriteImpact.affectedCount,
+                      affectedChapterNumbers: rewriteImpact.affectedChapterNumbers,
+                      ...(typeof rewriteImpact.startChapter === "number" ? { startChapter: rewriteImpact.startChapter } : {}),
+                      ...(typeof rewriteImpact.endChapter === "number" ? { endChapter: rewriteImpact.endChapter } : {}),
+                    },
+                  }
+                  : {}),
+              });
+            }
+            const responseText = lines.join("\n");
+            result = {
+              responseText,
+              messages: [{ role: "assistant", content: responseText }],
+            };
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            if (mode === "rewrite") {
+              broadcast("rewrite:error", {
+                sessionId: streamSessionId,
+                runId,
+                bookId: activeBookId,
+                chapter: startChapter,
+                startChapter,
+                endChapter,
+                chapterCount,
+                mode: "non-destructive",
+                error: detail,
+              });
+            }
+            emitDeterministicThinking(`Revision (${mode}) batch failed for chapters ${startChapter}-${endChapter}: ${detail}`, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber: startChapter,
+              mode,
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "error";
+              exec.completedAt = Date.now();
+              exec.error = detail;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: detail,
+              isError: true,
+            });
+            if (batch) {
+              emitBatchProgress(toolCallId, "failed", batch, {
+                failedChapterNumber: typeof batch.currentChapter === "number" ? batch.currentChapter + 1 : startChapter,
+                error: detail,
+              });
+              batchProgressByToolCallId.delete(toolCallId);
+            }
+            throw error;
+          }
+        } else if (deterministicAction.kind === "rewrite-batch") {
+          const { startChapter, endChapter, chapterCount } = deterministicAction;
+          assertDestructiveRewriteEnabled();
+          const rollbackTarget = startChapter - 1;
+          const rewriteRisk = buildRewriteRiskSummaryFromIndex({
+            index: normalizeChapterIndexEntries(writeIndexBefore),
+            rollbackTarget,
+          });
+          broadcast("rewrite:start", {
+            sessionId: streamSessionId,
+            runId,
+            bookId: activeBookId,
+            entry: "rewrite",
+            chapter: startChapter,
+            startChapter,
+            endChapter,
+            chapterCount,
+            mode: "destructive",
+          });
+          const startedAt = Date.now();
+          const stages = PIPELINE_STAGES.writer;
+          sawWriterToolStart = true;
+          collectedToolExecs.push({
+            id: toolCallId,
+            tool: "sub_agent",
+            agent: "writer",
+            label: "重写",
+            status: "running",
+            args: {
+              agent: "writer",
+              action: "rewrite-batch",
+              bookId: activeBookId,
+              startChapter,
+              endChapter,
+              chapterCount,
+            },
+            stages: stages.map((label) => ({ label, status: "pending" as const })),
+            startedAt,
+          });
+          broadcast("tool:start", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            args: {
+              agent: "writer",
+              action: "rewrite-batch",
+              bookId: activeBookId,
+              startChapter,
+              endChapter,
+              chapterCount,
+            },
+            stages,
+          });
+          const batch = ensureBatchProgressState(toolCallId, chapterCount);
+          const startText = `Writer rewrite batch ${startChapter}-${endChapter} started.`;
+          emitDeterministicThinking(startText, {
+            toolCallId,
+            action: deterministicAction.kind,
+            chapterNumber: startChapter,
+            mode: "rewrite",
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            partialResult: { content: [{ type: "text", text: startText }] },
+          });
+          emitRewriteAuditLog({
+            mode: "destructive",
+            target: `chapters:${startChapter}-${endChapter}`,
+            riskMessage: rewriteRisk.message,
+          });
+          const riskText = rewriteRisk.message;
+          emitDeterministicThinking(riskText, {
+            toolCallId,
+            action: deterministicAction.kind,
+            chapterNumber: startChapter,
+            mode: "rewrite",
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            partialResult: { content: [{ type: "text", text: riskText }] },
+          });
+          broadcast("rewrite:risk", {
+            sessionId: streamSessionId,
+            runId,
+            bookId: activeBookId,
+            mode: "destructive",
+            rollbackTarget,
+            discardedChapterNumbers: rewriteRisk.discardedChapterNumbers,
+            discardedCount: rewriteRisk.discardedCount,
+            message: rewriteRisk.message,
+          });
+          try {
+            const rollbackStartText = `Rewriting chapters ${startChapter}-${endChapter}: rolling back to snapshot ${rollbackTarget}.`;
+            emitDeterministicThinking(rollbackStartText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber: startChapter,
+              mode: "rewrite",
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: rollbackStartText }] },
+            });
+            const { discarded, usedFallbackRepair } = await prepareRewriteFromChapter({
+              state,
+              bookId: activeBookId,
+              chapterNumber: startChapter,
+            });
+            writeIndexBefore = await state.loadChapterIndex(activeBookId).catch(() => [] as ChapterIndexEntryLike[]);
+            const rollbackDoneText = discarded.length > 0
+              ? `Rollback complete for chapters ${startChapter}-${endChapter}; discarded chapters: ${discarded.join(", ")}.`
+              : `Rollback complete for chapters ${startChapter}-${endChapter}.`;
+            emitDeterministicThinking(rollbackDoneText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber: startChapter,
+              mode: "rewrite",
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: rollbackDoneText }] },
+            });
+            if (usedFallbackRepair && rollbackTarget > 0) {
+              const repairStartText = `Snapshot chain repaired for rollback target ${rollbackTarget}; rebuilding chapter state before rewrite.`;
+              emitDeterministicThinking(repairStartText, {
+                toolCallId,
+                action: deterministicAction.kind,
+                chapterNumber: rollbackTarget,
+                mode: "rewrite",
+              });
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "sub_agent",
+                partialResult: { content: [{ type: "text", text: repairStartText }] },
+              });
+              await pipeline.resyncChapterArtifacts(activeBookId, rollbackTarget);
+              const repairDoneText = `Rollback state rebuilt from chapter ${rollbackTarget}.`;
+              emitDeterministicThinking(repairDoneText, {
+                toolCallId,
+                action: deterministicAction.kind,
+                chapterNumber: rollbackTarget,
+                mode: "rewrite",
+              });
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "sub_agent",
+                partialResult: { content: [{ type: "text", text: repairDoneText }] },
+              });
+            }
+
+            let totalWords = 0;
+            for (let i = 0; i < chapterCount; i += 1) {
+              const chapterNumber = startChapter + i;
+              const writeResult = await writeRewrittenChapter({
+                pipeline,
+                bookId: activeBookId,
+                chapterNumber,
+                quickMode,
+              });
+              sawWriterToolSuccess = true;
+              await emitChapterDeltaFallbackIfMissing({
+                state,
+                bookId: activeBookId,
+                chapterNumber,
+                mode: "write-next",
+                sessionId: streamSessionId,
+                runId,
+                emittedChapterPreviewNumbers,
+              });
+              const writeStatus = typeof writeResult.status === "string"
+                ? writeResult.status.trim().toLowerCase()
+                : "";
+              const wordCount = Number(writeResult.wordCount ?? 0);
+              if (Number.isFinite(wordCount) && wordCount > 0) {
+                totalWords += wordCount;
               }
+              const progressText = `Rewrite progress ${i + 1}/${chapterCount}: chapter ${chapterNumber} (${Number.isFinite(wordCount) && wordCount > 0 ? wordCount : "unknown"} words).`;
+              emitDeterministicThinking(progressText, {
+                toolCallId,
+                action: deterministicAction.kind,
+                chapterNumber,
+                mode: "rewrite",
+              });
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "sub_agent",
+                partialResult: { content: [{ type: "text", text: progressText }] },
+              });
+              if (batch) {
+                batch.completed = i + 1;
+                batch.currentChapter = chapterNumber;
+                emitBatchProgress(toolCallId, "progress", batch, {
+                  currentChapter: chapterNumber,
+                  ...(Number.isFinite(wordCount) && wordCount > 0 ? { currentWords: wordCount } : {}),
+                });
+              }
+              if (writeStatus === "state-degraded") {
+                const degradedText = `Rewrite halted after chapter ${chapterNumber}: chapter state is degraded.`;
+                emitDeterministicThinking(degradedText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                  mode: "rewrite",
+                });
+                broadcast("tool:update", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: toolCallId,
+                  tool: "sub_agent",
+                  partialResult: { content: [{ type: "text", text: degradedText }] },
+                });
+                break;
+              }
+            }
+
+            const finishText = `Rewrite batch complete for chapters ${startChapter}-${endChapter}.`;
+            emitDeterministicThinking(finishText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber: endChapter,
+              mode: "rewrite",
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: finishText }] },
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "completed";
+              exec.completedAt = Date.now();
+              exec.result = finishText;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: finishText,
+              isError: false,
+            });
+            if (batch) {
+              emitBatchProgress(toolCallId, "completed", batch, {
+                ...(typeof batch.currentChapter === "number" ? { currentChapter: batch.currentChapter } : {}),
+              });
+              batchProgressByToolCallId.delete(toolCallId);
+            }
+            const responseText = `已完成重写第${startChapter}-${endChapter}章${totalWords > 0 ? `，共${totalWords}字` : ""}。`;
+            broadcast("rewrite:complete", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              entry: "rewrite",
+              chapter: endChapter,
+              chapterNumber: endChapter,
+              startChapter,
+              endChapter,
+              chapterCount,
+              totalWords: totalWords > 0 ? totalWords : undefined,
+              mode: "destructive",
+              autoReview: buildSingleAuditAutoReviewPayload(true),
+            });
+            result = {
+              responseText,
+              messages: [{ role: "assistant", content: responseText }],
+            };
+          } catch (error) {
+            sawWriterToolError = true;
+            const detail = error instanceof Error ? error.message : String(error);
+            broadcast("rewrite:error", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              chapter: startChapter,
+              startChapter,
+              endChapter,
+              chapterCount,
+              mode: "destructive",
+              error: detail,
+            });
+            emitDeterministicThinking(`Rewrite batch failed for chapters ${startChapter}-${endChapter}: ${detail}`, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber: startChapter,
+              mode: "rewrite",
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "error";
+              exec.completedAt = Date.now();
+              exec.error = detail;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: detail,
+              isError: true,
+            });
+            if (batch) {
+              emitBatchProgress(toolCallId, "failed", batch, {
+                failedChapterNumber: typeof batch.currentChapter === "number" ? batch.currentChapter + 1 : startChapter,
+                error: detail,
+              });
+              batchProgressByToolCallId.delete(toolCallId);
+            }
+            throw error;
+          }
+        } else if (deterministicAction.kind === "rewrite") {
+          const chapterNumber = deterministicAction.chapterNumber;
+          assertDestructiveRewriteEnabled();
+          const rollbackTarget = chapterNumber - 1;
+          const rewriteRisk = buildRewriteRiskSummaryFromIndex({
+            index: normalizeChapterIndexEntries(writeIndexBefore),
+            rollbackTarget,
+          });
+          broadcast("rewrite:start", {
+            sessionId: streamSessionId,
+            runId,
+            bookId: activeBookId,
+            entry: "rewrite",
+            chapter: chapterNumber,
+            mode: "destructive",
+          });
+          const startedAt = Date.now();
+          const stages = PIPELINE_STAGES.writer;
+          sawWriterToolStart = true;
+          collectedToolExecs.push({
+            id: toolCallId,
+            tool: "sub_agent",
+            agent: "writer",
+            label: "重写",
+            status: "running",
+            args: {
+              agent: "writer",
+              action: "rewrite",
+              bookId: activeBookId,
+              chapterNumber,
+            },
+            stages: stages.map((label) => ({ label, status: "pending" as const })),
+            startedAt,
+          });
+          broadcast("tool:start", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            args: {
+              agent: "writer",
+              action: "rewrite",
+              bookId: activeBookId,
+              chapterNumber,
+            },
+            stages,
+          });
+          const startText = `Writer rewrite chapter ${chapterNumber} started.`;
+          emitDeterministicThinking(startText, {
+            toolCallId,
+            action: deterministicAction.kind,
+            chapterNumber,
+            mode: "rewrite",
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            partialResult: { content: [{ type: "text", text: startText }] },
+          });
+          emitRewriteAuditLog({
+            mode: "destructive",
+            target: `chapter:${chapterNumber}`,
+            riskMessage: rewriteRisk.message,
+          });
+          const riskText = rewriteRisk.message;
+          emitDeterministicThinking(riskText, {
+            toolCallId,
+            action: deterministicAction.kind,
+            chapterNumber,
+            mode: "rewrite",
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            partialResult: { content: [{ type: "text", text: riskText }] },
+          });
+          broadcast("rewrite:risk", {
+            sessionId: streamSessionId,
+            runId,
+            bookId: activeBookId,
+            mode: "destructive",
+            rollbackTarget,
+            discardedChapterNumbers: rewriteRisk.discardedChapterNumbers,
+            discardedCount: rewriteRisk.discardedCount,
+            message: rewriteRisk.message,
+          });
+          try {
+            const rollbackStartText = `Rewriting chapter ${chapterNumber}: rolling back to snapshot ${rollbackTarget}.`;
+            emitDeterministicThinking(rollbackStartText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber,
+              mode: "rewrite",
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: rollbackStartText }] },
+            });
+            const { discarded, usedFallbackRepair } = await prepareRewriteFromChapter({
+              state,
+              bookId: activeBookId,
+              chapterNumber,
+            });
+            writeIndexBefore = await state.loadChapterIndex(activeBookId).catch(() => [] as ChapterIndexEntryLike[]);
+            const rollbackDoneText = discarded.length > 0
+              ? `Rollback complete for chapter ${chapterNumber}; discarded chapters: ${discarded.join(", ")}.`
+              : `Rollback complete for chapter ${chapterNumber}.`;
+            emitDeterministicThinking(rollbackDoneText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber,
+              mode: "rewrite",
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: rollbackDoneText }] },
+            });
+            if (usedFallbackRepair && rollbackTarget > 0) {
+              const repairStartText = `Snapshot chain repaired for rollback target ${rollbackTarget}; rebuilding chapter state before rewrite.`;
+              emitDeterministicThinking(repairStartText, {
+                toolCallId,
+                action: deterministicAction.kind,
+                chapterNumber: rollbackTarget,
+                mode: "rewrite",
+              });
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "sub_agent",
+                partialResult: { content: [{ type: "text", text: repairStartText }] },
+              });
+              await pipeline.resyncChapterArtifacts(activeBookId, rollbackTarget);
+              const repairDoneText = `Rollback state rebuilt from chapter ${rollbackTarget}.`;
+              emitDeterministicThinking(repairDoneText, {
+                toolCallId,
+                action: deterministicAction.kind,
+                chapterNumber: rollbackTarget,
+                mode: "rewrite",
+              });
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "sub_agent",
+                partialResult: { content: [{ type: "text", text: repairDoneText }] },
+              });
+            }
+            const writeResult = await writeRewrittenChapter({
+              pipeline,
+              bookId: activeBookId,
+              chapterNumber,
+              quickMode,
+            });
+            sawWriterToolSuccess = true;
+            const structuredWriteAudit = normalizeWriteAuditSummary(
+              (writeResult as { auditResult?: unknown }).auditResult,
+              chapterNumber,
+            );
+            if (structuredWriteAudit) {
+              broadcast("audit:start", {
+                sessionId: streamSessionId,
+                runId,
+                bookId: activeBookId,
+                chapter: chapterNumber,
+                round: 1,
+                maxRounds: 0,
+                phase: "audit",
+              });
+              const autoReviewState = buildAutoReviewAuditEventState({
+                round: 1,
+                maxReviseRounds: 0,
+                passed: structuredWriteAudit.passed,
+              });
+              broadcast("audit:complete", {
+                sessionId: streamSessionId,
+                runId,
+                bookId: activeBookId,
+                chapter: chapterNumber,
+                round: 1,
+                maxRounds: 0,
+                phase: "audit",
+                passed: structuredWriteAudit.passed,
+                issueCount: structuredWriteAudit.issueCount,
+                score: structuredWriteAudit.score,
+                severityCounts: structuredWriteAudit.severityCounts,
+                failureGate: structuredWriteAudit.failureGate,
+                summary: structuredWriteAudit.summary,
+                issues: structuredWriteAudit.issueTexts,
+                report: structuredWriteAudit.report,
+                ...autoReviewState,
+              });
+            }
+            await emitChapterDeltaFallbackIfMissing({
+              state,
+              bookId: activeBookId,
+              chapterNumber,
+              mode: "write-next",
+              sessionId: streamSessionId,
+              runId,
+              emittedChapterPreviewNumbers,
+            });
+            const finishText = `Rewrite complete for chapter ${chapterNumber}.`;
+            emitDeterministicThinking(finishText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber,
+              mode: "rewrite",
+            });
+            broadcast("tool:update", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              partialResult: { content: [{ type: "text", text: finishText }] },
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "completed";
+              exec.completedAt = Date.now();
+              exec.result = finishText;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: finishText,
+              isError: false,
+            });
+            result = {
+              responseText: `已重写第${chapterNumber}章。`,
+              messages: [{ role: "assistant", content: `已重写第${chapterNumber}章。` }],
+            };
+            broadcast("rewrite:complete", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              entry: "rewrite",
+              chapter: chapterNumber,
+              chapterNumber,
+              title: writeResult.title,
+              wordCount: writeResult.wordCount,
+              status: writeResult.status,
+              mode: "destructive",
+              autoReview: buildSingleAuditAutoReviewPayload(structuredWriteAudit?.passed ?? (writeResult.status !== "audit-failed")),
+              ...(structuredWriteAudit
+                ? {
+                  audit: {
+                    passed: structuredWriteAudit.passed,
+                    score: structuredWriteAudit.score,
+                    issueCount: structuredWriteAudit.issueCount,
+                    severityCounts: structuredWriteAudit.severityCounts,
+                    failureGate: structuredWriteAudit.failureGate,
+                    summary: structuredWriteAudit.summary,
+                    issues: structuredWriteAudit.issueTexts,
+                    report: structuredWriteAudit.report,
+                  },
+                }
+                : {}),
+            });
+          } catch (error) {
+            sawWriterToolError = true;
+            const detail = error instanceof Error ? error.message : String(error);
+            broadcast("rewrite:error", {
+              sessionId: streamSessionId,
+              runId,
+              bookId: activeBookId,
+              chapter: chapterNumber,
+              mode: "destructive",
+              error: detail,
+            });
+            emitDeterministicThinking(`Rewrite failed for chapter ${chapterNumber}: ${detail}`, {
+              toolCallId,
+              action: deterministicAction.kind,
+              chapterNumber,
+              mode: "rewrite",
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "error";
+              exec.completedAt = Date.now();
+              exec.error = detail;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: detail,
+              isError: true,
+            });
+            throw error;
+          }
+        } else if (deterministicAction.kind === "repair-persistence") {
+          const startedAt = Date.now();
+          const chapterNumber = deterministicAction.chapterNumber;
+          const stages = ["检查章节落盘状态", "修复章节索引"];
+          const toolArgs: Record<string, unknown> = {
+            action: "repair_chapter_persistence",
+            bookId: activeBookId,
+            ...(typeof chapterNumber === "number" ? { chapterNumber } : {}),
+          };
+          collectedToolExecs.push({
+            id: toolCallId,
+            tool: "edit",
+            label: resolveToolLabel("edit"),
+            status: "running",
+            args: toolArgs,
+            stages: stages.map((label) => ({ label, status: "pending" as const })),
+            startedAt,
+          });
+          broadcast("tool:start", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "edit",
+            args: toolArgs,
+            stages,
+          });
+          broadcast("tool:update", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "edit",
+            partialResult: {
+              content: [{
+                type: "text",
+                text: typeof chapterNumber === "number"
+                  ? `开始校验第${chapterNumber}章落盘与索引状态。`
+                  : "开始校验章节落盘与索引状态。",
+              }],
+            },
+          });
+          emitDeterministicThinking(
+            typeof chapterNumber === "number"
+              ? `开始校验第${chapterNumber}章落盘与索引状态。`
+              : "开始校验章节落盘与索引状态。",
+            {
+              toolCallId,
+              action: deterministicAction.kind,
+              ...(typeof chapterNumber === "number" ? { chapterNumber } : {}),
+            },
+          );
+
+          const finishDeterministicRepair = (input: {
+            readonly ok: boolean;
+            readonly responseText: string;
+            readonly code?: string;
+            readonly details?: Record<string, unknown>;
+          }): Response | null => {
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = input.ok ? "completed" : "error";
+              exec.completedAt = Date.now();
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+              if (input.ok) exec.result = input.responseText;
+              else exec.error = input.responseText;
+            }
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "edit",
+              result: input.responseText,
+              isError: !input.ok,
+            });
+            if (input.ok) {
+              result = {
+                responseText: input.responseText,
+                messages: [{ role: "assistant", content: input.responseText }],
+              };
+              return null;
+            }
+            broadcast("agent:error", {
+              instruction,
+              activeBookId,
+              sessionId,
+              runId,
+              error: input.responseText,
+            });
+            return c.json(
+              {
+                error: {
+                  code: input.code ?? "AGENT_PERSISTENCE_REPAIR_FAILED",
+                  message: input.responseText,
+                },
+                response: input.responseText,
+                runId,
+                ...(input.details ? { details: input.details } : {}),
+              },
+              409,
+            );
+          };
+
+          try {
+            const beforeIndex = await state.loadChapterIndex(activeBookId).catch(
+              () => [] as ChapterIndexEntryLike[],
+            );
+
+            let writePersistence = await verifyWritePersistence({
+              state,
+              bookId: activeBookId,
+              beforeIndex,
+              ...persistTelemetryHooks,
+            });
+
+            let afterIndex = await state.loadChapterIndex(activeBookId).catch(
+              () => beforeIndex as ReadonlyArray<ChapterIndexEntryLike>,
+            );
+            let indexedNumbers = new Set(
+              afterIndex
+                .map((entry) => Number(entry?.number))
+                .filter((n) => Number.isFinite(n) && n > 0),
+            );
+
+            const chaptersDir = join(state.bookDir(activeBookId), "chapters");
+            const chapterFiles = await readdir(chaptersDir).catch(() => [] as string[]);
+            const chapterFileNumbers = new Set(
+              chapterFiles
+                .map((fileName) => parseChapterFileNumber(fileName))
+                .filter((n): n is number => n !== null && Number.isFinite(n) && n > 0),
+            );
+
+            if (
+              typeof chapterNumber === "number"
+              && chapterFileNumbers.has(chapterNumber)
+              && !indexedNumbers.has(chapterNumber)
+            ) {
+              const repairResult = await repairChapterIndexFromDisk({
+                state,
+                bookId: activeBookId,
+                afterIndex,
+                minimumChapterNumber: chapterNumber,
+                onTelemetry: persistTelemetryHooks.onPersistRepair,
+              });
+              if (repairResult.status === "completed") {
+                afterIndex = await state.loadChapterIndex(activeBookId).catch(
+                  () => afterIndex as ReadonlyArray<ChapterIndexEntryLike>,
+                );
+                indexedNumbers = new Set(
+                  afterIndex
+                    .map((entry) => Number(entry?.number))
+                    .filter((n) => Number.isFinite(n) && n > 0),
+                );
+                writePersistence = {
+                  ...writePersistence,
+                  repair: repairResult,
+                  addedChapterNumbers: [
+                    ...new Set([
+                      ...writePersistence.addedChapterNumbers,
+                      ...repairResult.repairedChapterNumbers,
+                    ]),
+                  ].sort((left, right) => left - right),
+                };
+              }
+            }
+
+            if (typeof chapterNumber === "number") {
+              const hasFile = chapterFileNumbers.has(chapterNumber);
+              const hasIndex = indexedNumbers.has(chapterNumber);
+
+              if (hasFile && hasIndex) {
+                const repairHint = writePersistence.repair.status === "completed"
+                  && writePersistence.repair.repairedChapterNumbers.includes(chapterNumber)
+                  ? "，并已自动补齐索引。"
+                  : "，状态一致。";
+                const responseText = `第${chapterNumber}章正文已落盘，索引已存在${repairHint}`;
+                emitDeterministicThinking(responseText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                });
+                const early = finishDeterministicRepair({
+                  ok: true,
+                  responseText,
+                });
+                if (early) return early;
+              } else if (!hasFile && !hasIndex) {
+                const responseText = `第${chapterNumber}章正文与索引均不存在，请重新执行“写第${chapterNumber}章”。`;
+                emitDeterministicThinking(responseText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                });
+                const early = finishDeterministicRepair({
+                  ok: false,
+                  responseText,
+                  code: "AGENT_TARGET_CHAPTER_NOT_PERSISTED",
+                  details: {
+                    writeIntegrity: {
+                      beforeCount: writePersistence.beforeCount,
+                      afterCount: writePersistence.afterCount,
+                      addedChapterNumbers: writePersistence.addedChapterNumbers,
+                      missingChapterFiles: writePersistence.missingChapterFiles,
+                      repair: writePersistence.repair,
+                    },
+                  },
+                });
+                if (early) return early;
+              } else if (hasFile && !hasIndex) {
+                const responseText = `第${chapterNumber}章正文已存在，但索引修复失败，请稍后重试。`;
+                emitDeterministicThinking(responseText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                });
+                const early = finishDeterministicRepair({
+                  ok: false,
+                  responseText,
+                  code: "AGENT_TARGET_CHAPTER_INDEX_REPAIR_FAILED",
+                  details: {
+                    writeIntegrity: {
+                      beforeCount: writePersistence.beforeCount,
+                      afterCount: writePersistence.afterCount,
+                      addedChapterNumbers: writePersistence.addedChapterNumbers,
+                      missingChapterFiles: writePersistence.missingChapterFiles,
+                      repair: writePersistence.repair,
+                    },
+                  },
+                });
+                if (early) return early;
+              } else {
+                const responseText = `第${chapterNumber}章索引存在，但正文文件缺失。请重写该章或先执行章节修复。`;
+                emitDeterministicThinking(responseText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  chapterNumber,
+                });
+                const early = finishDeterministicRepair({
+                  ok: false,
+                  responseText,
+                  code: "AGENT_TARGET_CHAPTER_FILE_MISSING",
+                  details: {
+                    writeIntegrity: {
+                      beforeCount: writePersistence.beforeCount,
+                      afterCount: writePersistence.afterCount,
+                      addedChapterNumbers: writePersistence.addedChapterNumbers,
+                      missingChapterFiles: writePersistence.missingChapterFiles,
+                      repair: writePersistence.repair,
+                    },
+                  },
+                });
+                if (early) return early;
+              }
+            } else {
+              const repaired = writePersistence.repair.repairedChapterNumbers;
+              const responseText = repaired.length > 0
+                ? `已修复章节索引：补齐第${repaired.join("、")}章。`
+                : "章节索引与正文文件状态一致，无需修复。";
+              emitDeterministicThinking(responseText, {
+                toolCallId,
+                action: deterministicAction.kind,
+              });
+              const early = finishDeterministicRepair({
+                ok: true,
+                responseText,
+              });
+              if (early) return early;
+            }
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            const early = finishDeterministicRepair({
+              ok: false,
+              responseText: detail,
+            });
+            if (early) return early;
+          }
+        } else {
+          let chapterCount = deterministicAction.kind === "write-batch"
+            ? deterministicAction.chapterCount
+            : 1;
+          const targetChapterNumber = deterministicAction.kind === "write-target-chapter"
+            ? deterministicAction.chapterNumber
+            : null;
+          let bypassWriterExecution = false;
+          if (targetChapterNumber !== null) {
+            const indexedNumbers = writeIndexBefore
+              .map((entry) => Number(entry?.number))
+              .filter((n) => Number.isFinite(n) && n > 0);
+            const chaptersDir = join(state.bookDir(activeBookId), "chapters");
+            const chapterFiles = await readdir(chaptersDir).catch(() => [] as string[]);
+            const chapterFileNumbers = chapterFiles
+              .map((fileName) => parseChapterFileNumber(fileName))
+              .filter((chapterNumber): chapterNumber is number => Number.isFinite(chapterNumber));
+            const targetChapterExistsInIndex = indexedNumbers.includes(targetChapterNumber);
+            const targetChapterExistsInFile = chapterFileNumbers.includes(targetChapterNumber);
+            const maxPersistedChapterNumber = Math.max(
+              0,
+              ...(indexedNumbers.length > 0 ? indexedNumbers : [0]),
+              ...(chapterFileNumbers.length > 0 ? chapterFileNumbers : [0]),
+            );
+            const nextChapterNumber = maxPersistedChapterNumber + 1;
+
+            if (targetChapterExistsInFile && !targetChapterExistsInIndex) {
+              emitAgentLog(`检测到第${targetChapterNumber}章正文已存在但索引缺失，开始自动修复索引。`);
+              const startedAt = Date.now();
+              const stages = ["检查章节落盘状态", "修复章节索引"];
+              const toolArgs = {
+                action: "repair_chapter_persistence",
+                bookId: activeBookId,
+                chapterNumber: targetChapterNumber,
+              };
+              collectedToolExecs.push({
+                id: toolCallId,
+                tool: "edit",
+                label: resolveToolLabel("edit"),
+                status: "running",
+                args: toolArgs,
+                stages: stages.map((label) => ({ label, status: "pending" as const })),
+                startedAt,
+              });
+              broadcast("tool:start", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "edit",
+                args: toolArgs,
+                stages,
+              });
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "edit",
+                partialResult: {
+                  content: [{ type: "text", text: `开始修复第${targetChapterNumber}章索引。` }],
+                },
+              });
+              precomputedWritePersistence = await verifyWritePersistence({
+                state,
+                bookId: activeBookId,
+                beforeIndex: writeIndexBefore,
+                ...persistTelemetryHooks,
+              });
+              if (
+                !precomputedWritePersistence.persisted
+                || !precomputedWritePersistence.addedChapterNumbers.includes(targetChapterNumber)
+              ) {
+                const message = `第${targetChapterNumber}章正文已存在，但自动修复索引失败，请稍后重试。`;
+                const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+                if (exec) {
+                  exec.status = "error";
+                  exec.completedAt = Date.now();
+                  exec.error = message;
+                  exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+                }
+                broadcast("tool:end", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: toolCallId,
+                  tool: "edit",
+                  result: message,
+                  isError: true,
+                });
+                broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+                return c.json(
+                  {
+                    error: { code: "AGENT_TARGET_CHAPTER_INDEX_REPAIR_FAILED", message },
+                    response: message,
+                    runId,
+                  },
+                  409,
+                );
+              }
+              const repairSummary = `第${targetChapterNumber}章正文已存在，已自动补齐章节索引。`;
+              const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+              if (exec) {
+                exec.status = "completed";
+                exec.completedAt = Date.now();
+                exec.result = repairSummary;
+                exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+              }
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "edit",
+                partialResult: {
+                  content: [{ type: "text", text: repairSummary }],
+                },
+              });
               broadcast("tool:end", {
                 sessionId: streamSessionId,
-                id: event.toolCallId,
-                tool: event.toolName,
-                result: event.result,
-                isError: event.isError,
+                runId,
+                id: toolCallId,
+                tool: "edit",
+                result: repairSummary,
+                isError: false,
               });
+              result = {
+                responseText: repairSummary,
+                messages: [{ role: "assistant", content: repairSummary }],
+              };
+              bypassWriterExecution = true;
+            } else if (targetChapterNumber < nextChapterNumber) {
+              const message = `第${targetChapterNumber}章已存在。若需覆盖，请使用“重写第${targetChapterNumber}章”。`;
+              broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+              return c.json(
+                {
+                  error: { code: "AGENT_TARGET_CHAPTER_ALREADY_EXISTS", message },
+                  response: message,
+                  runId,
+                },
+                409,
+              );
+            } else {
+              chapterCount = Math.max(1, targetChapterNumber - nextChapterNumber + 1);
             }
+          }
+          if (bypassWriterExecution) {
+            // handled via index-repair path; skip writer tool execution for this turn
+          } else {
+          const writeEntry = resolveWriterReviewEntry(targetChapterNumber);
+          const startedAt = Date.now();
+          const stages = PIPELINE_STAGES.writer;
+            sawWriterToolStart = true;
+            emitAgentLog(
+              `[writer:start] entry=${writeEntry} book=${activeBookId} chapterCount=${chapterCount}`
+              + `${targetChapterNumber !== null ? ` targetChapter=${targetChapterNumber}` : ""}`,
+              "info",
+              targetChapterNumber !== null ? { chapterNumber: targetChapterNumber } : undefined,
+            );
+            emitDeterministicThinking(
+              `Writer started for ${activeBookId}: chapterCount=${chapterCount}${targetChapterNumber !== null ? `, targetChapter=${targetChapterNumber}` : ""}.`,
+              {
+                toolCallId,
+                action: deterministicAction.kind,
+                ...(targetChapterNumber !== null ? { chapterNumber: targetChapterNumber } : {}),
+                mode: "write-next",
+              },
+            );
+            collectedToolExecs.push({
+            id: toolCallId,
+            tool: "sub_agent",
+            agent: "writer",
+            label: resolveToolLabel("sub_agent", "writer"),
+            status: "running",
+            args: {
+              agent: "writer",
+              bookId: activeBookId,
+              ...(chapterCount > 1 ? { chapterCount } : {}),
+              ...(targetChapterNumber !== null ? { targetChapterNumber } : {}),
+            },
+            stages: stages.map((label) => ({ label, status: "pending" as const })),
+            startedAt,
+          });
+          broadcast("tool:start", {
+            sessionId: streamSessionId,
+            runId,
+            id: toolCallId,
+            tool: "sub_agent",
+            args: {
+              agent: "writer",
+              bookId: activeBookId,
+              ...(chapterCount > 1 ? { chapterCount } : {}),
+              ...(targetChapterNumber !== null ? { targetChapterNumber } : {}),
+            },
+            stages,
+          });
+          const batch = ensureBatchProgressState(toolCallId, chapterCount);
+          let firstChapterNumber: number | null = null;
+          let lastChapterNumber: number | null = null;
+          let totalWords = 0;
+          try {
+            for (let i = 0; i < chapterCount; i += 1) {
+              let writeResult: Awaited<ReturnType<PipelineRunner["writeNextChapter"]>>;
+              try {
+                writeResult = await pipeline.writeNextChapter(activeBookId, undefined, undefined, { quickMode });
+              } catch (error) {
+                rethrowWriteErrorAsApiError(error, chapterCount > 1 ? "连续写作" : "写作");
+              }
+              sawWriterToolSuccess = true;
+              const writeStatus = typeof writeResult.status === "string"
+                ? writeResult.status.trim().toLowerCase()
+                : "";
+              const chapterNumber = Number(writeResult.chapterNumber ?? 0);
+              const wordCount = Number(writeResult.wordCount ?? 0);
+              const structuredWriteAudit = Number.isFinite(chapterNumber) && chapterNumber > 0
+                ? normalizeWriteAuditSummary(
+                  (writeResult as { auditResult?: unknown }).auditResult,
+                  chapterNumber,
+                )
+                : null;
+              if (structuredWriteAudit && Number.isFinite(chapterNumber) && chapterNumber > 0) {
+                const autoReviewMeta = (writeResult as {
+                  autoReview?: {
+                    auditRounds?: number;
+                    maxReviseRounds?: number;
+                    reviseRoundsUsed?: number;
+                    finalState?: "passed" | "failed-max-rounds" | "failed-single-audit";
+                  };
+                }).autoReview;
+                const auditRounds = Number.isFinite(Number(autoReviewMeta?.auditRounds))
+                  ? Math.max(1, Math.trunc(Number(autoReviewMeta?.auditRounds)))
+                  : 1;
+                const maxReviseRounds = Number.isFinite(Number(autoReviewMeta?.maxReviseRounds))
+                  ? Math.max(0, Math.min(5, Math.trunc(Number(autoReviewMeta?.maxReviseRounds))))
+                  : 0;
+                const reviseRoundsUsed = Number.isFinite(Number(autoReviewMeta?.reviseRoundsUsed))
+                  ? Math.max(0, Math.trunc(Number(autoReviewMeta?.reviseRoundsUsed)))
+                  : 0;
+                const finalState = autoReviewMeta?.finalState
+                  ?? (structuredWriteAudit.passed ? "passed" : "failed-single-audit");
+                const autoReviewState = buildAutoReviewAuditEventState({
+                  round: auditRounds,
+                  maxReviseRounds,
+                  passed: structuredWriteAudit.passed,
+                });
+                broadcast("audit:start", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  entry: writeEntry,
+                  chapter: chapterNumber,
+                  round: auditRounds,
+                  maxRounds: maxReviseRounds,
+                  phase: "audit",
+                });
+                broadcast("audit:complete", {
+                  sessionId: streamSessionId,
+                  runId,
+                  bookId: activeBookId,
+                  entry: writeEntry,
+                  chapter: chapterNumber,
+                  round: auditRounds,
+                  maxRounds: maxReviseRounds,
+                  phase: "audit",
+                  passed: structuredWriteAudit.passed,
+                  issueCount: structuredWriteAudit.issueCount,
+                  score: structuredWriteAudit.score,
+                  severityCounts: structuredWriteAudit.severityCounts,
+                  failureGate: structuredWriteAudit.failureGate,
+                  summary: structuredWriteAudit.summary,
+                  issues: structuredWriteAudit.issueTexts,
+                  report: structuredWriteAudit.report,
+                  ...autoReviewState,
+                });
+                recordReviewMetrics({
+                  bookId: activeBookId,
+                  entry: writeEntry,
+                  passed: structuredWriteAudit.passed,
+                  reviseRoundsUsed,
+                  finalState,
+                  issueTexts: structuredWriteAudit.issueTexts,
+                });
+              }
+              if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+                const emittedFallback = await emitChapterDeltaFallbackIfMissing({
+                  state,
+                  bookId: activeBookId,
+                  chapterNumber,
+                  mode: "write-next",
+                  sessionId: streamSessionId,
+                  runId,
+                  emittedChapterPreviewNumbers,
+                });
+                if (emittedFallback) {
+                  emitAgentLog(
+                    `[writer:preview-fallback] chapter=${chapterNumber} replayed persisted text chunks`,
+                    "info",
+                    { chapterNumber },
+                  );
+                }
+              }
+              if (firstChapterNumber === null && Number.isFinite(chapterNumber) && chapterNumber > 0) {
+                firstChapterNumber = chapterNumber;
+              }
+              if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+                lastChapterNumber = chapterNumber;
+              }
+              if (Number.isFinite(wordCount) && wordCount > 0) {
+                totalWords += wordCount;
+              }
+              const progressText = `Writer progress ${i + 1}/${chapterCount}: chapter ${Number.isFinite(chapterNumber) && chapterNumber > 0 ? chapterNumber : "unknown"} (${Number.isFinite(wordCount) && wordCount > 0 ? wordCount : "unknown"} words).`;
+              if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+                emitAgentLog(
+                  `[writer:progress] ${i + 1}/${chapterCount} words=${Number.isFinite(wordCount) && wordCount > 0 ? wordCount : "unknown"}`,
+                  "info",
+                  { chapterNumber },
+                );
+              }
+              emitDeterministicThinking(progressText, {
+                toolCallId,
+                action: deterministicAction.kind,
+                ...(Number.isFinite(chapterNumber) && chapterNumber > 0 ? { chapterNumber } : {}),
+                mode: "write-next",
+              });
+              broadcast("tool:update", {
+                sessionId: streamSessionId,
+                runId,
+                id: toolCallId,
+                tool: "sub_agent",
+                partialResult: { content: [{ type: "text", text: progressText }] },
+              });
+              if (batch) {
+                batch.completed = i + 1;
+                if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+                  batch.currentChapter = chapterNumber;
+                }
+                emitBatchProgress(toolCallId, "progress", batch, {
+                  ...(Number.isFinite(chapterNumber) && chapterNumber > 0 ? { currentChapter: chapterNumber } : {}),
+                  ...(Number.isFinite(wordCount) && wordCount > 0 ? { currentWords: wordCount } : {}),
+                });
+              }
+              if (writeStatus === "state-degraded") {
+                const degradedText = `Writer halted after chapter ${Number.isFinite(chapterNumber) && chapterNumber > 0 ? chapterNumber : "unknown"}: chapter state is degraded.`;
+                if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
+                  emitAgentLog("[writer:degraded] state-degraded detected", "warning", { chapterNumber });
+                }
+                emitDeterministicThinking(degradedText, {
+                  toolCallId,
+                  action: deterministicAction.kind,
+                  ...(Number.isFinite(chapterNumber) && chapterNumber > 0 ? { chapterNumber } : {}),
+                  mode: "write-next",
+                });
+                broadcast("tool:update", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: toolCallId,
+                  tool: "sub_agent",
+                  partialResult: { content: [{ type: "text", text: degradedText }] },
+                });
+                break;
+              }
+            }
+            const summaryText = chapterCount === 1
+              ? `Chapter written for "${activeBookId}".`
+              : `Batch write complete for "${activeBookId}": ${chapterCount} chapters.`;
+            emitDeterministicThinking(summaryText, {
+              toolCallId,
+              action: deterministicAction.kind,
+              ...(lastChapterNumber !== null ? { chapterNumber: lastChapterNumber } : {}),
+              mode: "write-next",
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "completed";
+              exec.completedAt = Date.now();
+              exec.result = summaryText;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            emitAgentLog(
+              `[writer:end] book=${activeBookId} status=success chapters=${chapterCount}`
+              + `${firstChapterNumber !== null && lastChapterNumber !== null ? ` range=${firstChapterNumber}-${lastChapterNumber}` : ""}`,
+              "info",
+              lastChapterNumber !== null ? { chapterNumber: lastChapterNumber } : undefined,
+            );
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: summaryText,
+              isError: false,
+            });
+            if (batch) {
+              emitBatchProgress(toolCallId, "completed", batch, {
+                ...(typeof batch.currentChapter === "number" ? { currentChapter: batch.currentChapter } : {}),
+              });
+              batchProgressByToolCallId.delete(toolCallId);
+            }
+            const responseText = chapterCount === 1
+              ? (firstChapterNumber
+                ? `已完成第${firstChapterNumber}章写作。`
+                : "已完成写作。")
+              : `已完成连写${chapterCount}章${firstChapterNumber && lastChapterNumber ? `（第${firstChapterNumber}-${lastChapterNumber}章）` : ""}${totalWords > 0 ? `，共${totalWords}字` : ""}。`;
+            result = {
+              responseText,
+              messages: [{ role: "assistant", content: responseText }],
+            };
+          } catch (error) {
+            sawWriterToolError = true;
+            const detail = error instanceof Error ? error.message : String(error);
+            emitDeterministicThinking(`Writer failed: ${detail}`, {
+              toolCallId,
+              action: deterministicAction.kind,
+              mode: "write-next",
+            });
+            const exec = collectedToolExecs.find((item) => item.id === toolCallId);
+            if (exec) {
+              exec.status = "error";
+              exec.completedAt = Date.now();
+              exec.error = detail;
+              exec.stages = exec.stages?.map((stage) => ({ ...stage, status: "completed" as const }));
+            }
+            emitAgentLog(
+              `[writer:end] book=${activeBookId} status=failed error=${detail}`,
+              "error",
+              lastChapterNumber !== null ? { chapterNumber: lastChapterNumber } : undefined,
+            );
+            broadcast("tool:end", {
+              sessionId: streamSessionId,
+              runId,
+              id: toolCallId,
+              tool: "sub_agent",
+              result: detail,
+              isError: true,
+            });
+            if (batch) {
+              emitBatchProgress(toolCallId, "failed", batch, {
+                ...(typeof batch.currentChapter === "number" ? { failedChapterNumber: batch.currentChapter + 1 } : {}),
+                error: detail,
+              });
+              batchProgressByToolCallId.delete(toolCallId);
+            }
+            throw error;
+          }
+          }
+        }
+        } finally {
+          closeDeterministicThinking(actionMeta);
+        }
+      } else {
+        result = await runAgentSession(
+          {
+            model,
+            apiKey: agentApiKey,
+            pipeline,
+            projectRoot: root,
+            bookId: activeBookId ?? null,
+            sessionId: bookSession.sessionId,
+            language: config.language ?? "zh",
+            signal: abortController.signal,
+            onEvent: (event: any) => {
+              if (event.type === "message_update") {
+                const ame = event.assistantMessageEvent;
+                if (ame.type === "text_delta") {
+                  sawDraftDelta = true;
+                  broadcast("draft:delta", { sessionId: streamSessionId, runId, text: ame.delta });
+                } else if (ame.type === "thinking_delta") {
+                  broadcast("thinking:delta", { sessionId: streamSessionId, runId, text: (ame as any).delta });
+                } else if (ame.type === "thinking_start") {
+                  broadcast("thinking:start", { sessionId: streamSessionId, runId });
+                } else if (ame.type === "thinking_end") {
+                  broadcast("thinking:end", { sessionId: streamSessionId, runId });
+                }
+              }
+              if (event.type === "tool_execution_start") {
+                const args = event.args as Record<string, unknown> | undefined;
+                const agent = event.toolName === "sub_agent" ? (args?.agent as string | undefined) : undefined;
+                const stages = agent ? (PIPELINE_STAGES[agent] ?? []) : [];
+                if (event.toolName === "sub_agent" && agent === "writer") {
+                  sawWriterToolStart = true;
+                  const chapterCount = Number(args?.chapterCount ?? 1);
+                  emitAgentLog(
+                    `[writer:start] book=${activeBookId ?? "unknown"} chapterCount=${Number.isFinite(chapterCount) && chapterCount > 0 ? chapterCount : 1}`,
+                  );
+                }
+
+                collectedToolExecs.push({
+                  id: event.toolCallId,
+                  tool: event.toolName,
+                  agent,
+                  label: resolveToolLabel(event.toolName, agent),
+                  status: "running",
+                  args,
+                  stages: stages.length > 0
+                    ? stages.map(l => ({ label: l, status: "pending" as const }))
+                    : undefined,
+                  startedAt: Date.now(),
+                });
+
+                broadcast("tool:start", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: event.toolCallId,
+                  tool: event.toolName,
+                  args,
+                  stages,
+                });
+
+                if (event.toolName === "sub_agent" && agent === "writer") {
+                  const chapterCount = Number(args?.chapterCount ?? 0);
+                  ensureBatchProgressState(event.toolCallId, chapterCount);
+                }
+              }
+              if (event.type === "tool_execution_update") {
+                broadcast("tool:update", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: event.toolCallId,
+                  tool: event.toolName,
+                  partialResult: event.partialResult,
+                });
+
+                if (event.toolName === "sub_agent") {
+                  const text = extractToolUpdateText(event.partialResult);
+                  if (text) {
+                    const inferredCountMatch = text.match(/inferred chapterCount=(\d+)/i);
+                    if (inferredCountMatch?.[1]) {
+                      const inferred = parseInt(inferredCountMatch[1], 10);
+                      ensureBatchProgressState(event.toolCallId, inferred);
+                    }
+
+                    const batchStartMatch = text.match(/writing\s+(\d+)\s+consecutive\s+chapters?/i);
+                    if (batchStartMatch?.[1]) {
+                      const total = parseInt(batchStartMatch[1], 10);
+                      ensureBatchProgressState(event.toolCallId, total);
+                    }
+
+                    const progressMatch = text.match(
+                      /writer progress\s+(\d+)\/(\d+):\s*chapter\s*(\d+|unknown)(?:\s*\((\d+|unknown)\s*words?\))?/i,
+                    );
+                    if (progressMatch) {
+                      const completed = parseInt(progressMatch[1] ?? "0", 10);
+                      const total = parseInt(progressMatch[2] ?? "0", 10);
+                      const currentChapter = /^\d+$/.test(progressMatch[3] ?? "")
+                        ? parseInt(progressMatch[3]!, 10)
+                        : undefined;
+                      const currentWords = /^\d+$/.test(progressMatch[4] ?? "")
+                        ? parseInt(progressMatch[4]!, 10)
+                        : undefined;
+
+                      const batch = ensureBatchProgressState(event.toolCallId, total);
+                      if (batch) {
+                        batch.completed = Math.max(batch.completed, completed);
+                        if (typeof currentChapter === "number") {
+                          batch.currentChapter = currentChapter;
+                        }
+                        emitBatchProgress(event.toolCallId, "progress", batch, {
+                          currentChapter,
+                          currentWords,
+                        });
+                      }
+                      emitAgentLog(
+                        `[writer:progress] ${completed}/${total} words=${typeof currentWords === "number" ? currentWords : "unknown"}`,
+                        "info",
+                        typeof currentChapter === "number" ? { chapterNumber: currentChapter } : undefined,
+                      );
+                    }
+                  }
+                }
+              }
+              if (event.type === "tool_execution_end") {
+                const exec = collectedToolExecs.find(t => t.id === event.toolCallId);
+                if (exec) {
+                  exec.status = event.isError ? "error" : "completed";
+                  exec.completedAt = Date.now();
+                  exec.stages = exec.stages?.map(s => ({ ...s, status: "completed" as const }));
+                  if (event.isError) exec.error = extractToolError(event.result);
+                  else exec.result = summarizeResult(event.result);
+                }
+                broadcast("tool:end", {
+                  sessionId: streamSessionId,
+                  runId,
+                  id: event.toolCallId,
+                  tool: event.toolName,
+                  result: event.result,
+                  isError: event.isError,
+                });
+                if (event.toolName === "sub_agent") {
+                  const maybeAgent = (
+                    collectedToolExecs.find((t) => t.id === event.toolCallId)?.agent
+                    ?? (event.args as { agent?: unknown } | undefined)?.agent
+                  );
+                  if (maybeAgent === "writer") {
+                    if (event.isError) {
+                      sawWriterToolError = true;
+                      const detail = extractToolError(event.result);
+                      emitAgentLog(
+                        `[writer:end] book=${activeBookId ?? "unknown"} status=failed error=${detail}`,
+                        "error",
+                      );
+                    } else {
+                      sawWriterToolSuccess = true;
+                      emitAgentLog(`[writer:end] book=${activeBookId ?? "unknown"} status=success`);
+                    }
+                  }
+                }
+
+                const batch = batchProgressByToolCallId.get(event.toolCallId);
+                if (batch) {
+                  if (event.isError) {
+                    const error = extractToolError(event.result);
+                    const failedMatch = error.match(/after\s+(\d+)\/(\d+)\s+chapters?/i);
+                    if (failedMatch) {
+                      batch.completed = parseInt(failedMatch[1] ?? String(batch.completed), 10);
+                      batch.total = parseInt(failedMatch[2] ?? String(batch.total), 10);
+                    }
+                    const failedChapterNumber = typeof batch.currentChapter === "number"
+                      ? batch.currentChapter + 1
+                      : undefined;
+                    emitBatchProgress(event.toolCallId, "failed", batch, {
+                      failedChapterNumber,
+                      error,
+                    });
+                  } else {
+                    const summary = summarizeResult(event.result);
+                    const completedMatch = summary.match(/:\s*(\d+)\s+chapters?/i);
+                    if (completedMatch?.[1]) {
+                      batch.completed = parseInt(completedMatch[1], 10);
+                    } else {
+                      batch.completed = Math.max(batch.completed, batch.total);
+                    }
+                    emitBatchProgress(event.toolCallId, "completed", batch, {
+                      currentChapter: batch.currentChapter,
+                    });
+                  }
+                  batchProgressByToolCallId.delete(event.toolCallId);
+                }
+              }
+            },
+          } as any,
+          instruction,
+          initialMessages,
+        );
+      }
+      if (!result) {
+        throw new ApiError(500, "AGENT_INTERNAL_STATE", "内部错误：写作流程未产生响应。");
+      }
+      if (
+        !deterministicAction
+        && collectedToolExecs.length === 0
+        && hasBlockedToolCallMarker(result.responseText ?? "")
+      ) {
+        const message = "当前模型返回了被拦截的工具调用，未执行实际操作。请切换支持工具调用的模型，或使用确定性指令（如“写下一章”“写第19章”“修复第19章索引”）。";
+        broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+        return c.json(
+          {
+            error: { code: "AGENT_TOOL_CALL_BLOCKED", message },
+            response: message,
+            runId,
           },
-        },
-        instruction,
-        initialMessages,
-      );
+          409,
+        );
+      }
+      if (result.responseText && !sawDraftDelta) {
+        emitSyntheticDraftDeltas({
+          sessionId: streamSessionId,
+          runId,
+          text: result.responseText,
+        });
+      }
+      let writePersistence: WritePersistenceCheckResult | null = precomputedWritePersistence;
+      let writeDegradedRecovery: WriteDegradedRecoveryResult | null = null;
+      if (writerKernelIntent && activeBookId) {
+        if (!writePersistence && (!sawWriterToolStart || !sawWriterToolSuccess)) {
+          const degradedPrecondition = sawWriterToolError && inferWriterStateDegradedPrecondition({
+            toolExecutions: collectedToolExecs,
+            responseText: result.responseText,
+          });
+          if (degradedPrecondition) {
+            const message = "写作被阻止：最新章节处于状态降级（state-degraded）。请先修复该章状态后再继续。";
+            broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+            return c.json(
+              {
+                error: { code: "AGENT_WRITE_DEGRADED", message },
+                response: message,
+                runId,
+                details: {
+                  degradedRecovery: {
+                    persisted: false,
+                    attempted: false,
+                    recovered: false,
+                    remainingDegradedChapterNumbers: [],
+                    reason: "degraded_precondition",
+                    suggestion: "可执行修复：修复最新章节落库和索引。",
+                  },
+                },
+              },
+              409,
+            );
+          }
+          const message = sawWriterToolError
+            ? "写作流程执行失败，未完成章节落盘。"
+            : "未触发写作工具，章节尚未生成。";
+          broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+          return c.json(
+            {
+              error: { code: "AGENT_WRITE_NOT_EXECUTED", message },
+              response: message,
+              runId,
+            },
+            409,
+          );
+        }
+        if (!writePersistence) {
+          writePersistence = await verifyWritePersistence({
+            state,
+            bookId: activeBookId,
+            beforeIndex: writeIndexBefore,
+            ...persistTelemetryHooks,
+          });
+        }
+        if (!writePersistence.persisted) {
+          const degradedPrecondition = inferWriterStateDegradedPrecondition({
+            toolExecutions: collectedToolExecs,
+            responseText: result.responseText,
+          });
+          if (degradedPrecondition && writePersistence.addedChapterNumbers.length === 0) {
+            const message = "写作被阻止：最新章节处于状态降级（state-degraded）。请先修复该章状态后再继续。";
+            broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+            return c.json(
+              {
+                error: { code: "AGENT_WRITE_DEGRADED", message },
+                response: message,
+                runId,
+                details: {
+                  degradedRecovery: {
+                    persisted: false,
+                    attempted: false,
+                    recovered: false,
+                    remainingDegradedChapterNumbers: [],
+                    reason: "degraded_precondition",
+                    suggestion: "可执行修复：修复最新章节落库和索引。",
+                  },
+                  writeIntegrity: {
+                    beforeCount: writePersistence.beforeCount,
+                    afterCount: writePersistence.afterCount,
+                    addedChapterNumbers: writePersistence.addedChapterNumbers,
+                    missingChapterFiles: writePersistence.missingChapterFiles,
+                    repair: writePersistence.repair,
+                  },
+                },
+              },
+              409,
+            );
+          }
+          const message = writePersistence.addedChapterNumbers.length === 0
+            ? "写作流程结束，但未检测到新章节写入索引。"
+            : `写作流程结束，但第${writePersistence.missingChapterFiles.join("、")}章正文文件未落盘。`;
+          broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+          return c.json(
+            {
+              error: { code: "AGENT_WRITE_NOT_PERSISTED", message },
+              response: message,
+              runId,
+              details: {
+                writeIntegrity: {
+                  beforeCount: writePersistence.beforeCount,
+                  afterCount: writePersistence.afterCount,
+                  addedChapterNumbers: writePersistence.addedChapterNumbers,
+                  missingChapterFiles: writePersistence.missingChapterFiles,
+                  repair: writePersistence.repair,
+                },
+              },
+            },
+            409,
+          );
+        }
+        const degradedChapterNumbers = await findDegradedChapterNumbers({
+          state,
+          bookId: activeBookId,
+          chapterNumbers: writePersistence.addedChapterNumbers,
+        });
+        if (degradedChapterNumbers.length > 0) {
+          writeDegradedRecovery = await tryAutoRecoverDegradedWrite({
+            pipeline,
+            state,
+            bookId: activeBookId,
+            chapterNumbers: writePersistence.addedChapterNumbers,
+            log: emitAgentLog,
+          });
+          if (!writeDegradedRecovery.recovered) {
+            const remainingDegraded = writeDegradedRecovery.remainingDegradedChapterNumbers;
+            const targetChapter = remainingDegraded.at(-1);
+            const suggestion = typeof targetChapter === "number"
+              ? `可执行修复：修复第${targetChapter}章落库和索引。`
+              : "可执行修复：修复最新章节落库和索引。";
+            const message = `写作已完成且正文已落盘，但第${remainingDegraded.join("、")}章状态降级（state-degraded），请先修复后再继续。`;
+            broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+            return c.json(
+              {
+                error: { code: "AGENT_WRITE_DEGRADED", message },
+                response: `${message}${writeDegradedRecovery.reason ? ` 自动修复失败：${writeDegradedRecovery.reason}` : ""} ${suggestion}`,
+                runId,
+                details: {
+                  writeIntegrity: {
+                    beforeCount: writePersistence.beforeCount,
+                    afterCount: writePersistence.afterCount,
+                    addedChapterNumbers: writePersistence.addedChapterNumbers,
+                    missingChapterFiles: writePersistence.missingChapterFiles,
+                    repair: writePersistence.repair,
+                    degradedChapterNumbers,
+                  },
+                  degradedRecovery: {
+                    persisted: true,
+                    attempted: writeDegradedRecovery.attempted,
+                    attemptedChapterNumber: writeDegradedRecovery.attemptedChapterNumber,
+                    recovered: writeDegradedRecovery.recovered,
+                    remainingDegradedChapterNumbers: remainingDegraded,
+                    ...(writeDegradedRecovery.reason ? { reason: writeDegradedRecovery.reason } : {}),
+                    suggestion,
+                  },
+                },
+              },
+              409,
+            );
+          }
+          emitAgentLog(
+            `检测到状态降级已自动恢复：章节 ${degradedChapterNumbers.join("、")}`
+            + `${writeDegradedRecovery.attemptedChapterNumber ? `（修复目标：第${writeDegradedRecovery.attemptedChapterNumber}章）` : ""}`,
+          );
+        }
+      }
 
       // Persist user + assistant messages to BookSession
       bookSession = appendBookSessionMessage(bookSession, {
@@ -1599,8 +9244,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         try {
           const fallbackClient = createLLMClient({
             ...config.llm,
-            service: configuredEntry?.service ?? reqService ?? config.llm.service,
-            model: reqModel ?? config.llm.model,
+            service: configuredEntry?.service ?? effectiveReqService ?? config.llm.service,
+            model: effectiveReqModel ?? config.llm.model,
             apiKey: agentApiKey ?? config.llm.apiKey,
             baseUrl: configuredEntry?.baseUrl ?? "",
             ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
@@ -1608,7 +9253,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           } as ProjectConfig["llm"]);
           const fallback = await chatCompletion(
             fallbackClient,
-            reqModel ?? config.llm.model,
+            effectiveReqModel ?? config.llm.model,
             [
               { role: "system", content: buildAgentSystemPrompt(activeBookId ?? null, config.language ?? "zh") },
               { role: "user", content: instruction },
@@ -1616,6 +9261,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             { maxTokens: 256 },
           );
           if (fallback.content?.trim()) {
+            emitSyntheticDraftDeltas({
+              sessionId: streamSessionId,
+              runId,
+              text: fallback.content,
+            });
             bookSession = appendBookSessionMessage(bookSession, {
               role: "assistant",
               content: fallback.content,
@@ -1624,6 +9274,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             await persistBookSession(root, bookSession);
             return c.json({
               response: fallback.content,
+              runId,
               session: { sessionId: bookSession.sessionId },
             });
           }
@@ -1634,8 +9285,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         try {
           const probeClient = createLLMClient({
             ...config.llm,
-            service: configuredEntry?.service ?? reqService ?? config.llm.service,
-            model: reqModel ?? config.llm.model,
+            service: configuredEntry?.service ?? effectiveReqService ?? config.llm.service,
+            model: effectiveReqModel ?? config.llm.model,
             apiKey: agentApiKey ?? config.llm.apiKey,
             baseUrl: configuredEntry?.baseUrl ?? "",
             ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
@@ -1643,7 +9294,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           } as ProjectConfig["llm"]);
           await chatCompletion(
             probeClient,
-            reqModel ?? config.llm.model,
+            effectiveReqModel ?? config.llm.model,
             [{ role: "user", content: "ping" }],
             { maxTokens: 5 },
           );
@@ -1652,6 +9303,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           return c.json({
             error: { code: "AGENT_EMPTY_RESPONSE", message: probeMessage },
             response: probeMessage,
+            runId,
           }, 502);
         }
 
@@ -1659,11 +9311,42 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         return c.json({
           error: { code: "AGENT_EMPTY_RESPONSE", message: emptyMessage },
           response: emptyMessage,
+          runId,
         }, 502);
       }
       await persistBookSession(root, bookSession);
 
-      broadcast("agent:complete", { instruction, activeBookId, sessionId: bookSession.sessionId });
+      broadcast("agent:complete", {
+        instruction,
+        activeBookId,
+        sessionId: bookSession.sessionId,
+        runId,
+        ...(writePersistence
+          ? {
+              effects: {
+                writeNext: {
+                  persisted: true,
+                  addedChapterNumbers: writePersistence.addedChapterNumbers,
+                  ...(writePersistence.repair.status === "completed"
+                    ? { repairedChapterNumbers: writePersistence.repair.repairedChapterNumbers }
+                    : {}),
+                  ...(writeDegradedRecovery
+                    ? {
+                        degradedRecovery: {
+                          attempted: writeDegradedRecovery.attempted,
+                          recovered: writeDegradedRecovery.recovered,
+                          remainingDegradedChapterNumbers: writeDegradedRecovery.remainingDegradedChapterNumbers,
+                          ...(writeDegradedRecovery.attemptedChapterNumber
+                            ? { attemptedChapterNumber: writeDegradedRecovery.attemptedChapterNumber }
+                            : {}),
+                        },
+                      }
+                    : {}),
+                },
+              },
+            }
+          : {}),
+      });
 
       // If a sub_agent created a new book during this session, broadcast book:created
       // so the sidebar refreshes.
@@ -1687,6 +9370,42 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       return c.json({
         response: result.responseText,
+        runId,
+        ...(destructiveInstructionRequested ? { destructive: true } : {}),
+        ...(writePersistence
+          ? {
+              details: {
+                effects: {
+                  writeNext: {
+                    persisted: true,
+                    addedChapterNumbers: writePersistence.addedChapterNumbers,
+                    ...(writePersistence.repair.status === "completed"
+                      ? { repairedChapterNumbers: writePersistence.repair.repairedChapterNumbers }
+                      : {}),
+                    ...(writeDegradedRecovery
+                      ? {
+                          degradedRecovery: {
+                            attempted: writeDegradedRecovery.attempted,
+                            recovered: writeDegradedRecovery.recovered,
+                            remainingDegradedChapterNumbers: writeDegradedRecovery.remainingDegradedChapterNumbers,
+                            ...(writeDegradedRecovery.attemptedChapterNumber
+                              ? { attemptedChapterNumber: writeDegradedRecovery.attemptedChapterNumber }
+                              : {}),
+                          },
+                        }
+                      : {}),
+                  },
+                },
+                writeIntegrity: {
+                  beforeCount: writePersistence.beforeCount,
+                  afterCount: writePersistence.afterCount,
+                  addedChapterNumbers: writePersistence.addedChapterNumbers,
+                  missingChapterFiles: writePersistence.missingChapterFiles,
+                  repair: writePersistence.repair,
+                },
+              },
+            }
+          : {}),
         session: {
           sessionId: bookSession.sessionId,
           ...(bookSession.bookId ? { activeBookId: bookSession.bookId } : {}),
@@ -1701,20 +9420,46 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         throw new ApiError(409, "SESSION_ALREADY_MIGRATED", migratedMessage);
       }
       const msg = e instanceof Error ? e.message : String(e);
-      broadcast("agent:error", { instruction, activeBookId, sessionId, error: msg });
+      broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: msg });
+
+      if (abortController.signal.aborted || /abort/i.test(msg)) {
+        return c.json(
+          {
+            error: { code: "AGENT_ABORTED", message: "已停止当前对话" },
+            response: "已停止当前对话",
+            runId,
+          },
+          409,
+        );
+      }
 
       // Agent busy — return 429 with user-friendly message
       if (/already processing|prompt.*queue/i.test(msg)) {
         return c.json({
           error: { code: "AGENT_BUSY", message: "正在处理中，请等待当前操作完成" },
           response: "正在处理中，请等待当前操作完成后再发送。",
+          runId,
         }, 429);
       }
 
+      const upstreamFailure = classifyAgentUpstreamFailure(e);
+      if (upstreamFailure) {
+        return c.json(
+          {
+            error: { code: upstreamFailure.code, message: upstreamFailure.message },
+            response: upstreamFailure.message,
+            runId,
+          },
+          upstreamFailure.status,
+        );
+      }
+
       return c.json(
-        { error: { code: "AGENT_ERROR", message: msg } },
+        { error: { code: "AGENT_ERROR", message: msg }, runId },
         500,
       );
+    } finally {
+      clearInFlightAgentRun(sessionId, runId);
     }
   });
 
@@ -1740,54 +9485,136 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.post("/api/v1/books/:id/audit/:chapter", async (c) => {
     const id = c.req.param("id");
     const chapterNum = parseInt(c.req.param("chapter"), 10);
-    const bookDir = state.bookDir(id);
-
-    broadcast("audit:start", { bookId: id, chapter: chapterNum });
     try {
-      const book = await state.loadBookConfig(id);
-      const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(chapterNum).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-      if (!match) {
-        const error = "Chapter not found";
-        broadcast("audit:error", { bookId: id, chapter: chapterNum, error });
-        return c.json({ error }, 404);
-      }
-
-      const content = await readFile(join(chaptersDir, match), "utf-8");
       const currentConfig = await loadCurrentProjectConfig();
-      const { ContinuityAuditor } = await import("@actalk/inkos-core");
-      const auditor = new ContinuityAuditor({
-        client: createLLMClient(currentConfig.llm),
-        model: currentConfig.llm.model,
-        projectRoot: root,
+      const autoReviewPolicy = resolveAutoReviewPolicy(currentConfig);
+      const pipeline = new PipelineRunner(await buildPipelineConfig({ currentConfig }));
+      const unified = await runUnifiedReviewLoop({
+        state,
+        pipeline,
         bookId: id,
+        chapterNumber: chapterNum,
+        entry: "write-target",
+        onFinalized: ({ entry, finalAudit, autoReview }) => {
+          recordReviewMetrics({
+            bookId: id,
+            entry,
+            passed: finalAudit.passed,
+            reviseRoundsUsed: autoReview.reviseRoundsUsed,
+            finalState: autoReview.finalState,
+            issueClassCounts: finalAudit.issueClassCounts,
+            issueTexts: finalAudit.issueTexts,
+          });
+        },
+        autoReviewPolicy,
+        onAuditStart: ({ round, maxReviseRounds }) => {
+          broadcast("audit:start", {
+            bookId: id,
+            entry: "write-target",
+            chapter: chapterNum,
+            round,
+            maxRounds: maxReviseRounds,
+            phase: "audit",
+          });
+        },
+        onAuditComplete: ({
+          round,
+          maxReviseRounds,
+          audit,
+          latestRevisionMustFixOutcomes,
+          latestRevisionMustFixTotalCount,
+          latestRevisionMustFixUnresolvedCount,
+        }) => {
+          const autoReviewState = buildAutoReviewAuditEventState({
+            round,
+            maxReviseRounds,
+            passed: audit.passed,
+          });
+          broadcast("audit:complete", {
+            bookId: id,
+            entry: "write-target",
+            chapter: audit.chapterNumber,
+            round,
+            maxRounds: maxReviseRounds,
+            phase: "audit",
+            passed: audit.passed,
+            issueCount: audit.issueCount,
+            score: audit.score,
+            severityCounts: audit.severityCounts,
+            failureGate: audit.failureGate,
+            summary: audit.summary,
+            issues: audit.issueTexts,
+            report: audit.report,
+            ...(Array.isArray(latestRevisionMustFixOutcomes)
+              ? { latestRevisionMustFixOutcomes }
+              : {}),
+            ...(typeof latestRevisionMustFixTotalCount === "number"
+              ? { latestRevisionMustFixTotalCount }
+              : {}),
+            ...(typeof latestRevisionMustFixUnresolvedCount === "number"
+              ? { latestRevisionMustFixUnresolvedCount }
+              : {}),
+            ...autoReviewState,
+          });
+        },
+        onReviseStart: ({ round, maxReviseRounds, mode, strategyReason }) => {
+          broadcast("revise:start", {
+            bookId: id,
+            entry: "write-target",
+            chapter: chapterNum,
+            round,
+            maxRounds: maxReviseRounds,
+            phase: "revise",
+            mode,
+            ...(typeof strategyReason === "string" && strategyReason.trim()
+              ? { strategyReason: strategyReason.trim() }
+              : {}),
+            autoTriggeredByAudit: true,
+          });
+        },
+        onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+          broadcast("revise:complete", {
+            bookId: id,
+            entry: "write-target",
+            chapter: reviseResult.chapterNumber,
+            round,
+            maxRounds: maxReviseRounds,
+            phase: "revise",
+            mode,
+            autoTriggeredByAudit: true,
+            wordCount: reviseResult.wordCount,
+            status: reviseResult.status,
+            applied: reviseResult.applied,
+            ...(reviseAudit
+              ? {
+                audit: {
+                  passed: reviseAudit.passed,
+                  score: reviseAudit.score,
+                  issueCount: reviseAudit.issueCount,
+                  severityCounts: reviseAudit.severityCounts,
+                  failureGate: reviseAudit.failureGate,
+                  summary: reviseAudit.summary,
+                  issues: reviseAudit.issueTexts,
+                  report: reviseAudit.report,
+                },
+              }
+              : {}),
+          });
+        },
       });
-      const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre);
-
-      // Keep chapter index status aligned with standalone audit outcome.
-      const chapterIndex = await state.loadChapterIndex(id);
-      const updatedAt = new Date().toISOString();
-      const updatedIndex = chapterIndex.map((chapter) =>
-        chapter.number === chapterNum
-          ? {
-              ...chapter,
-              status: (result.passed ? "ready-for-review" : "audit-failed") as typeof chapter.status,
-              updatedAt,
-              auditIssues: result.issues.map((issue) => `[${issue.severity}] ${issue.description}`),
-            }
-          : chapter,
-      );
-      await state.saveChapterIndex(id, updatedIndex);
-
-      broadcast("audit:complete", {
-        bookId: id,
-        chapter: chapterNum,
-        passed: result.passed,
-        issueCount: result.issues.length,
+      return c.json({
+        ...unified.finalAudit.raw,
+        chapterNumber: unified.finalAudit.chapterNumber,
+        passed: unified.finalAudit.passed,
+        issueCount: unified.finalAudit.issueCount,
+        score: unified.finalAudit.score,
+        severityCounts: unified.finalAudit.severityCounts,
+        failureGate: unified.finalAudit.failureGate,
+        summary: unified.finalAudit.summary,
+        issues: unified.finalAudit.issueTexts,
+        report: unified.finalAudit.report,
+        autoReview: unified.autoReview,
       });
-      return c.json(result);
     } catch (e) {
       broadcast("audit:error", { bookId: id, chapter: chapterNum, error: String(e) });
       return c.json({ error: String(e) }, 500);
@@ -1803,8 +9630,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const body = await c.req
       .json<{ mode?: string; brief?: string }>()
       .catch(() => ({ mode: "spot-fix", brief: undefined }));
+    const normalizedMode = body.mode ?? "spot-fix";
 
-    broadcast("revise:start", { bookId: id, chapter: chapterNum });
+    broadcast("revise:start", {
+      bookId: id,
+      chapter: chapterNum,
+      round: 1,
+      maxRounds: 0,
+      phase: "revise",
+      mode: normalizedMode,
+      autoTriggeredByAudit: false,
+    });
     try {
       const book = await state.loadBookConfig(id);
       const chaptersDir = join(bookDir, "chapters");
@@ -1816,13 +9652,75 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: body.brief,
       }));
-      const normalizedMode = body.mode ?? "spot-fix";
       const result = await pipeline.reviseDraft(
         id,
         chapterNum,
         normalizedMode as "polish" | "rewrite" | "rework" | "spot-fix" | "anti-detect",
       );
-      broadcast("revise:complete", { bookId: id, chapter: chapterNum });
+      const structuredAudit = normalizeReviseAuditSummary(
+        (result as { audit?: unknown }).audit,
+        chapterNum,
+        result.status !== "audit-failed",
+      );
+      broadcast("revise:complete", {
+        bookId: id,
+        chapter: chapterNum,
+        round: 1,
+        maxRounds: 0,
+        phase: "revise",
+        mode: normalizedMode,
+        autoTriggeredByAudit: false,
+        wordCount: result.wordCount,
+        status: result.status,
+        applied: result.applied,
+        ...(structuredAudit
+          ? {
+            audit: {
+              passed: structuredAudit.passed,
+              score: structuredAudit.score,
+              issueCount: structuredAudit.issueCount,
+              severityCounts: structuredAudit.severityCounts,
+              failureGate: structuredAudit.failureGate,
+              summary: structuredAudit.summary,
+              issues: structuredAudit.issueTexts,
+              report: structuredAudit.report,
+            },
+          }
+          : {}),
+      });
+      if (structuredAudit) {
+        broadcast("audit:start", {
+          bookId: id,
+          chapter: chapterNum,
+          round: 1,
+          maxRounds: 0,
+          phase: "audit",
+        });
+        const autoReviewState = buildAutoReviewAuditEventState({
+          round: 1,
+          maxReviseRounds: 0,
+          passed: structuredAudit.passed,
+        });
+        broadcast("audit:complete", {
+          bookId: id,
+          chapter: chapterNum,
+          round: 1,
+          maxRounds: 0,
+          phase: "audit",
+          wordCount: result.wordCount,
+          status: result.status,
+          applied: result.applied,
+          passed: structuredAudit.passed,
+          issueCount: structuredAudit.issueCount,
+          score: structuredAudit.score,
+          severityCounts: structuredAudit.severityCounts,
+          failureGate: structuredAudit.failureGate,
+          summary: structuredAudit.summary,
+          issues: structuredAudit.issueTexts,
+          report: structuredAudit.report,
+          ...autoReviewState,
+        });
+      }
       return c.json(result);
     } catch (e) {
       broadcast("revise:error", { bookId: id, error: String(e) });
@@ -2046,24 +9944,368 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.post("/api/v1/books/:id/rewrite/:chapter", async (c) => {
     const id = c.req.param("id");
     const chapterNum = parseInt(c.req.param("chapter"), 10);
-    const body: { brief?: string } = await c.req
-      .json<{ brief?: string }>()
+    const body: { brief?: string; destructive?: boolean } = await c.req
+      .json<{ brief?: string; destructive?: boolean }>()
       .catch(() => ({}));
+    const destructive = body.destructive === true;
+    const emitRewriteEndpointAuditLog = (args: {
+      readonly mode: "destructive" | "non-destructive";
+      readonly riskMessage?: string;
+    }): void => {
+      const briefSummary = compactInstructionForAuditLog(body.brief ?? "");
+      const message = [
+        "[entry=rewrite]",
+        `[rewrite:audit] mode=${args.mode}`,
+        `target=chapter:${chapterNum}`,
+        briefSummary ? `brief="${briefSummary}"` : null,
+        args.riskMessage ? `risk="${args.riskMessage}"` : null,
+      ].filter(Boolean).join(" ");
+      broadcast("log", {
+        bookId: id,
+        level: args.mode === "destructive" ? "warning" : "info",
+        tag: "studio",
+        message,
+      });
+    };
 
-    broadcast("rewrite:start", { bookId: id, chapter: chapterNum });
     try {
+      if (destructive) {
+        assertDestructiveRewriteEnabled();
+      }
+      broadcast("rewrite:start", {
+        bookId: id,
+        entry: "rewrite",
+        chapter: chapterNum,
+        mode: destructive ? "destructive" : "non-destructive",
+      });
+      if (!destructive) {
+        emitRewriteEndpointAuditLog({ mode: "non-destructive" });
+        const rewriteConsistencyBaseline = await buildNonDestructiveRewriteBaseline({
+          state,
+          bookId: id,
+          pivotChapter: chapterNum,
+        });
+        const pipeline = new PipelineRunner(await buildPipelineConfig({
+          externalContext: body.brief,
+        }));
+        pipeline.reviseDraft(id, chapterNum, "rewrite").then(
+          async (result) => {
+            try {
+              const currentConfig = await loadCurrentProjectConfig();
+              const autoReviewPolicy = resolveAutoReviewPolicy(currentConfig);
+              const unified = await runUnifiedReviewLoop({
+                state,
+                pipeline,
+                bookId: id,
+                chapterNumber: chapterNum,
+                entry: "rewrite",
+                onFinalized: ({ entry, finalAudit, autoReview }) => {
+                  recordReviewMetrics({
+                    bookId: id,
+                    entry,
+                    passed: finalAudit.passed,
+                    reviseRoundsUsed: autoReview.reviseRoundsUsed,
+                    finalState: autoReview.finalState,
+                    issueClassCounts: finalAudit.issueClassCounts,
+                    issueTexts: finalAudit.issueTexts,
+                  });
+                },
+                autoReviewPolicy,
+                onAuditStart: ({ round, maxReviseRounds }) => {
+                  broadcast("audit:start", {
+                    bookId: id,
+                    entry: "rewrite",
+                    chapter: chapterNum,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "audit",
+                  });
+                },
+                onAuditComplete: ({
+                  round,
+                  maxReviseRounds,
+                  audit,
+                  latestRevisionMustFixOutcomes,
+                  latestRevisionMustFixTotalCount,
+                  latestRevisionMustFixUnresolvedCount,
+                }) => {
+                  const autoReviewState = buildAutoReviewAuditEventState({
+                    round,
+                    maxReviseRounds,
+                    passed: audit.passed,
+                  });
+                  broadcast("audit:complete", {
+                    bookId: id,
+                    entry: "rewrite",
+                    chapter: audit.chapterNumber,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "audit",
+                    wordCount: result.wordCount,
+                    status: result.status,
+                    applied: result.applied,
+                    passed: audit.passed,
+                    issueCount: audit.issueCount,
+                    score: audit.score,
+                    severityCounts: audit.severityCounts,
+                    failureGate: audit.failureGate,
+                    summary: audit.summary,
+                    issues: audit.issueTexts,
+                    report: audit.report,
+                    ...(Array.isArray(latestRevisionMustFixOutcomes)
+                      ? { latestRevisionMustFixOutcomes }
+                      : {}),
+                    ...(typeof latestRevisionMustFixTotalCount === "number"
+                      ? { latestRevisionMustFixTotalCount }
+                      : {}),
+                    ...(typeof latestRevisionMustFixUnresolvedCount === "number"
+                      ? { latestRevisionMustFixUnresolvedCount }
+                      : {}),
+                    ...autoReviewState,
+                  });
+                },
+                onReviseStart: ({ round, maxReviseRounds, mode, strategyReason }) => {
+                  broadcast("revise:start", {
+                    bookId: id,
+                    entry: "rewrite",
+                    chapter: chapterNum,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "revise",
+                    mode,
+                    ...(typeof strategyReason === "string" && strategyReason.trim()
+                      ? { strategyReason: strategyReason.trim() }
+                      : {}),
+                    autoTriggeredByAudit: true,
+                  });
+                },
+                onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+                  broadcast("revise:complete", {
+                    bookId: id,
+                    entry: "rewrite",
+                    chapter: reviseResult.chapterNumber,
+                    round,
+                    maxRounds: maxReviseRounds,
+                    phase: "revise",
+                    mode,
+                    autoTriggeredByAudit: true,
+                    wordCount: reviseResult.wordCount,
+                    status: reviseResult.status,
+                    applied: reviseResult.applied,
+                    ...(reviseAudit
+                      ? {
+                        audit: {
+                          passed: reviseAudit.passed,
+                          score: reviseAudit.score,
+                          issueCount: reviseAudit.issueCount,
+                          severityCounts: reviseAudit.severityCounts,
+                          failureGate: reviseAudit.failureGate,
+                          summary: reviseAudit.summary,
+                          issues: reviseAudit.issueTexts,
+                          report: reviseAudit.report,
+                        },
+                      }
+                      : {}),
+                  });
+                },
+              });
+              const finalAudit = unified.finalAudit;
+              await enforceNonDestructiveRewriteConsistency({
+                state,
+                bookId: id,
+                baseline: rewriteConsistencyBaseline,
+              });
+              let rewriteImpact: RewriteImpactSummary | null = null;
+              try {
+                rewriteImpact = await markDownstreamChaptersForReview({
+                  state,
+                  bookId: id,
+                  pivotChapter: chapterNum,
+                  rewrittenStartChapter: chapterNum,
+                  rewrittenEndChapter: chapterNum,
+                });
+              } catch (error) {
+                broadcast("log", {
+                  bookId: id,
+                  level: "warning",
+                  tag: "studio",
+                  message: `标记受影响章节失败：${error instanceof Error ? error.message : String(error)}`,
+                });
+              }
+              broadcast("rewrite:complete", {
+                bookId: id,
+                entry: "rewrite",
+                chapterNumber: result.chapterNumber,
+                wordCount: result.wordCount,
+                status: result.status,
+                mode: "non-destructive",
+                autoReview: unified.autoReview,
+                ...(finalAudit
+                  ? {
+                    audit: {
+                      passed: finalAudit.passed,
+                      score: finalAudit.score,
+                      issueCount: finalAudit.issueCount,
+                      severityCounts: finalAudit.severityCounts,
+                      failureGate: finalAudit.failureGate,
+                      summary: finalAudit.summary,
+                      issues: finalAudit.issueTexts,
+                      report: finalAudit.report,
+                    },
+                  }
+                  : {}),
+                ...(rewriteImpact
+                  ? {
+                    rewriteImpact: {
+                      affectedCount: rewriteImpact.affectedCount,
+                      affectedChapterNumbers: rewriteImpact.affectedChapterNumbers,
+                      ...(typeof rewriteImpact.startChapter === "number" ? { startChapter: rewriteImpact.startChapter } : {}),
+                      ...(typeof rewriteImpact.endChapter === "number" ? { endChapter: rewriteImpact.endChapter } : {}),
+                    },
+                  }
+                  : {}),
+              });
+            } catch (error) {
+              broadcast("rewrite:error", {
+                bookId: id,
+                chapter: chapterNum,
+                mode: "non-destructive",
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          },
+          (e) => broadcast("rewrite:error", {
+            bookId: id,
+            chapter: chapterNum,
+            mode: "non-destructive",
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        );
+        return c.json({
+          status: "rewriting",
+          mode: "non-destructive",
+          destructive: false,
+          bookId: id,
+          chapter: chapterNum,
+          note: "后续章节已保留，不会回滚或删除。",
+        });
+      }
+
       const rollbackTarget = chapterNum - 1;
-      const discarded = await state.rollbackToChapter(id, rollbackTarget);
+      const rewriteRisk = await buildRewriteRiskSummary({
+        state,
+        bookId: id,
+        rollbackTarget,
+      });
+      const { discarded, usedFallbackRepair } = await prepareRewriteFromChapter({
+        state,
+        bookId: id,
+        chapterNumber: chapterNum,
+      });
+      emitRewriteEndpointAuditLog({
+        mode: "destructive",
+        riskMessage: rewriteRisk.message,
+      });
+      broadcast("rewrite:risk", {
+        bookId: id,
+        mode: "destructive",
+        rollbackTarget,
+        discardedChapterNumbers: rewriteRisk.discardedChapterNumbers,
+        discardedCount: rewriteRisk.discardedCount,
+        message: rewriteRisk.message,
+      });
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: body.brief,
+        writeStageHeartbeatMs: resolveWriteStageHeartbeatMs(),
       }));
-      pipeline.writeNextChapter(id).then(
-        (result) => broadcast("rewrite:complete", { bookId: id, chapterNumber: result.chapterNumber, title: result.title, wordCount: result.wordCount }),
+      const emitRewriteLog = (message: string, level: "info" | "warning" | "error" = "info"): void => {
+        broadcast("log", {
+          bookId: id,
+          level,
+          tag: "studio",
+          message,
+        });
+      };
+      if (usedFallbackRepair && rollbackTarget > 0) {
+        emitRewriteLog(`回滚目标第${rollbackTarget}章快照缺失，已切换到快照链自动修复并重建章节状态。`, "warning");
+        await pipeline.resyncChapterArtifacts(id, rollbackTarget);
+        emitRewriteLog(`已完成第${rollbackTarget}章状态重建，继续执行重写。`);
+      }
+      const rewriteBeforeIndex = normalizeChapterIndexEntries(
+        await state.loadChapterIndex(id).catch(() => [] as ChapterIndexEntryLike[]),
+      );
+      writeRewrittenChapter({
+        pipeline,
+        bookId: id,
+        chapterNumber: chapterNum,
+      }).then(
+        async (result) => {
+          try {
+            const writePersistence = await verifyWritePersistence({
+              state,
+              bookId: id,
+              beforeIndex: rewriteBeforeIndex,
+            });
+            if (!writePersistence.persisted) {
+              throw new Error(
+                writePersistence.addedChapterNumbers.length === 0
+                  ? "重写结束，但未检测到新章节写入索引。"
+                  : `重写结束，但第${writePersistence.missingChapterFiles.join("、")}章正文文件未落盘。`,
+              );
+            }
+            const degradedChapterNumbers = await findDegradedChapterNumbers({
+              state,
+              bookId: id,
+              chapterNumbers: writePersistence.addedChapterNumbers,
+            });
+            if (degradedChapterNumbers.length > 0) {
+              const degradedRecovery = await tryAutoRecoverDegradedWrite({
+                pipeline,
+                state,
+                bookId: id,
+                chapterNumbers: writePersistence.addedChapterNumbers,
+                log: emitRewriteLog,
+              });
+              if (!degradedRecovery.recovered) {
+                throw new Error(
+                  `重写已落盘，但第${degradedRecovery.remainingDegradedChapterNumbers.join("、")}章状态降级（state-degraded）。`
+                  + `${degradedRecovery.reason ? ` 自动修复失败：${degradedRecovery.reason}` : ""}`,
+                );
+              }
+            }
+            broadcast("rewrite:complete", {
+              bookId: id,
+              entry: "rewrite",
+              chapterNumber: result.chapterNumber,
+              title: result.title,
+              wordCount: result.wordCount,
+              mode: "destructive",
+              autoReview: buildSingleAuditAutoReviewPayload(true),
+            });
+          } catch (error) {
+            broadcast("rewrite:error", { bookId: id, error: error instanceof Error ? error.message : String(error) });
+          }
+        },
         (e) => broadcast("rewrite:error", { bookId: id, error: e instanceof Error ? e.message : String(e) }),
       );
-      return c.json({ status: "rewriting", bookId: id, chapter: chapterNum, rolledBackTo: rollbackTarget, discarded });
+      return c.json({
+        status: "rewriting",
+        mode: "destructive",
+        destructive: true,
+        bookId: id,
+        chapter: chapterNum,
+        rolledBackTo: rollbackTarget,
+        discarded,
+        risk: {
+          rollbackTarget,
+          discardedChapterNumbers: rewriteRisk.discardedChapterNumbers,
+          discardedCount: rewriteRisk.discardedCount,
+          message: rewriteRisk.message,
+        },
+      });
     } catch (e) {
       broadcast("rewrite:error", { bookId: id, error: String(e) });
+      if (e instanceof ApiError) throw e;
       return c.json({ error: String(e) }, 500);
     }
   });
@@ -2479,6 +10721,24 @@ export async function startStudioServer(
     }
   }
 
-  console.log(`InkOS Studio running on http://localhost:${port}`);
-  serve({ fetch: app.fetch, port });
+  const requestTimeoutMsRaw = Number.parseInt(process.env.INKOS_STUDIO_REQUEST_TIMEOUT_MS ?? "0", 10);
+  const requestTimeoutMs = Number.isFinite(requestTimeoutMsRaw) && requestTimeoutMsRaw >= 0
+    ? requestTimeoutMsRaw
+    : 0;
+  console.log(
+    `InkOS Studio running on http://localhost:${port}`
+    + ` (requestTimeout=${requestTimeoutMs === 0 ? "disabled" : `${requestTimeoutMs}ms`})`,
+  );
+  serve({
+    fetch: app.fetch,
+    port,
+    serverOptions: {
+      requestTimeout: requestTimeoutMs,
+    },
+  });
 }
+
+
+
+
+

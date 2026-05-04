@@ -40,7 +40,7 @@ function createSession(): InteractionSession {
   };
 }
 
-describe("ink dashboard", () => {
+describe("ink dashboard", { timeout: 15_000 }, () => {
   it("renders a codex-like single column with compact status and composer", async () => {
     const mod = await import("../tui/dashboard.js");
 

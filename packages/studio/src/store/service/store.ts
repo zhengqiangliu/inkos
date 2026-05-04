@@ -76,7 +76,7 @@ export const useServiceStore = create<ServiceStore>()((set, get) => ({
   },
 
   refreshServices: async () => {
-    set({ services: [], servicesLoading: false });
+    set({ services: [], servicesLoading: false, modelsByService: {} });
     await get().fetchServices();
   },
 

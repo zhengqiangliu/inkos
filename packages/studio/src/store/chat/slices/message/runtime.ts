@@ -19,6 +19,7 @@ const AGENT_LABELS: Record<string, string> = {
 };
 
 const TOOL_LABELS: Record<string, string> = {
+  sub_agent: "执行过程",
   read: "读取文件",
   edit: "编辑文件",
   grep: "搜索",
@@ -44,6 +45,22 @@ export function summarizeResult(result: unknown): string {
   if (result && typeof result === "object") {
     const record = result as Record<string, unknown>;
     if (typeof record.content === "string") return record.content.slice(0, 200);
+    if (typeof record.text === "string") return record.text.slice(0, 200);
+    if (record.content && Array.isArray(record.content)) {
+      const text = record.content
+        .filter((content): content is { type?: unknown; text?: unknown } => !!content && typeof content === "object")
+        .filter((content) => content.type === "text" && typeof content.text === "string")
+        .map((content) => String(content.text).trim())
+        .filter(Boolean)
+        .join("\n");
+      if (text) return text.slice(0, 200);
+    }
+    try {
+      const serialized = JSON.stringify(result);
+      if (serialized && serialized !== "{}") return serialized.slice(0, 200);
+    } catch {
+      // ignore stringify errors and fall back below
+    }
   }
   return String(result).slice(0, 200);
 }
@@ -53,9 +70,16 @@ export function extractToolError(result: unknown): string {
   if (result && typeof result === "object") {
     const record = result as Record<string, unknown>;
     if (typeof record.content === "string") return record.content.slice(0, 500);
+    if (typeof record.text === "string") return record.text.slice(0, 500);
     if (record.content && Array.isArray(record.content)) {
       const textPart = record.content.find((content: any) => content.type === "text");
       if (textPart) return (textPart as any).text?.slice(0, 500) ?? "";
+    }
+    try {
+      const serialized = JSON.stringify(result);
+      if (serialized && serialized !== "{}") return serialized.slice(0, 500);
+    } catch {
+      // ignore stringify errors and fall back below
     }
   }
   return String(result).slice(0, 500);
@@ -138,6 +162,9 @@ export function createSessionRuntime(input: {
     messages: input.messages ?? [],
     stream: null,
     isStreaming: false,
+    isStopping: false,
+    stoppedByUser: false,
+    currentRunId: null,
     lastError: null,
     pendingBookArgs: null,
     isDraft: input.isDraft ?? false,
@@ -163,6 +190,7 @@ export function deserializeMessages(
         role: message.role as "user" | "assistant",
         content: message.content,
         thinking: message.thinking,
+        audit: (message as { audit?: unknown }).audit as Message["audit"],
         toolExecutions,
         timestamp: message.timestamp,
         parts: parts.length > 0 ? parts : undefined,
@@ -210,7 +238,32 @@ export function mergeSessionIds(
   return [...existing, ...appended];
 }
 
-export function sessionMatchesEvent(sessionId: string, data: unknown): boolean {
+export function sessionMatchesEvent(sessionId: string, data: unknown, runId?: string): boolean {
   if (!data || typeof data !== "object") return false;
-  return (data as { sessionId?: unknown }).sessionId === sessionId;
+  const event = data as { sessionId?: unknown; runId?: unknown };
+  if (event.sessionId !== sessionId) return false;
+  if (!runId) return true;
+  return typeof event.runId === "string" && event.runId === runId;
+}
+
+export function buildAgentRunId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function isExplicitWriteNextCommand(input: string): boolean {
+  const text = input.trim();
+  if (!text) return false;
+  if (/^(写下一章|下一章|write next(?: chapter)?|next chapter)$/i.test(text)) {
+    return true;
+  }
+  if (/^(?:连写|连续写|写)\s*(\d+)\s*章$/i.test(text)) {
+    return true;
+  }
+  if (/^写第\s*(\d+)\s*章[。.!！?？]?$/i.test(text)) {
+    return true;
+  }
+  if (/^(?:write|continue)\s*(\d+)\s*chapters?(?:\s+continuously)?$/i.test(text)) {
+    return true;
+  }
+  return false;
 }

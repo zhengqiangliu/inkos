@@ -12,6 +12,20 @@ export interface FanficContext {
   readonly allowedDeviations: ReadonlyArray<string>;
 }
 
+function shouldInjectOpeningThreeChaptersRules(
+  chapterNumber: number | undefined,
+  bookRules: BookRules | null,
+  governed: boolean,
+): boolean {
+  if (chapterNumber === undefined || chapterNumber > 3) return false;
+  const openingCfg = bookRules?.openingThreeChapters;
+  const enabled = openingCfg?.enabled ?? true;
+  const applyInGovernedMode = openingCfg?.applyInGovernedMode ?? true;
+  if (!enabled) return false;
+  if (governed && !applyInGovernedMode) return false;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -38,6 +52,11 @@ export function buildWriterSystemPrompt(
   const outputSection = mode === "creative"
     ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec)
     : buildOutputFormat(book, genreProfile, resolvedLengthSpec);
+  const useOpeningThreeChaptersRules = shouldInjectOpeningThreeChaptersRules(
+    chapterNumber,
+    bookRules,
+    governed,
+  );
 
   const sections = isEnglish
     ? [
@@ -52,6 +71,7 @@ export function buildWriterSystemPrompt(
         buildBookRulesBody(bookRulesBody),
         buildStyleGuide(styleGuide),
         buildStyleFingerprint(styleFingerprint),
+        useOpeningThreeChaptersRules ? buildGoldenChaptersRules(chapterNumber, bookRules) : "",
         fanficContext ? buildFanficCanonSection(fanficContext.fanficCanon, fanficContext.fanficMode) : "",
         fanficContext ? buildCharacterVoiceProfiles(fanficContext.fanficCanon) : "",
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
@@ -69,7 +89,7 @@ export function buildWriterSystemPrompt(
         !governed ? buildReaderPsychologyMethod() : "",
         !governed ? buildEmotionalPacingMethod() : "",
         !governed ? buildImmersionTechniques() : "",
-        !governed ? buildGoldenChaptersRules(chapterNumber) : "",
+        useOpeningThreeChaptersRules ? buildGoldenChaptersRules(chapterNumber, bookRules) : "",
         bookRules?.enableFullCastTracking ? buildFullCastTracking() : "",
         buildGenreRules(genreProfile, genreBody),
         buildProtagonistRules(bookRules),
@@ -339,8 +359,12 @@ function buildImmersionTechniques(): string {
 // 黄金三章（前3章特殊指令）
 // ---------------------------------------------------------------------------
 
-function buildGoldenChaptersRules(chapterNumber?: number): string {
+function buildGoldenChaptersRules(chapterNumber?: number, bookRules?: BookRules | null): string {
   if (chapterNumber === undefined || chapterNumber > 3) return "";
+  const openingCfg = bookRules?.openingThreeChapters;
+  const enabled = openingCfg?.enabled ?? true;
+  if (!enabled) return "";
+  const maxCharacters = openingCfg?.maxCharacters ?? 5;
 
   const chapterRules: Record<number, string> = {
     1: `### 第一章：抛出核心冲突
@@ -371,7 +395,7 @@ function buildGoldenChaptersRules(chapterNumber?: number): string {
 
 - 开篇不要从第一块砖头开始砌楼——从炸了一栋楼开始写
 - 禁止信息轰炸：世界观、力量体系等设定随剧情自然揭示
-- 每章聚焦1条故事线，人物数量控制在3个以内
+- 每章聚焦1条故事线，人物数量控制在${maxCharacters}个以内
 - 强情绪优先：利用读者共情（亲情纽带、不公待遇、被低估）快速建立代入感
 
 ${chapterRules[chapterNumber] ?? ""}`;

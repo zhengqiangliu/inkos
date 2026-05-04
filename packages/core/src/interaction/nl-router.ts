@@ -170,12 +170,23 @@ export function routeNaturalLanguageIntent(
     };
   }
 
-  const rewriteMatch = trimmed.match(/(?:rewrite chapter|重写第)\s*(\d+)\s*(?:章)?/i);
+  const rewriteMatch = trimmed.match(/(?:rewrite chapter|重写(?:第)?)\s*(\d+)\s*(?:章)?/i);
   if (rewriteMatch) {
     return {
       intent: "rewrite_chapter",
       ...(bookId ? { bookId } : {}),
       chapterNumber: parseInt(rewriteMatch[1]!, 10),
+    };
+  }
+
+  const zhReviseMatch = trimmed.match(/(?:修订|重订|修改|改写|润色|精修)\s*(?:第)?\s*(\d+)\s*章(?:\s*(.*))?/);
+  if (zhReviseMatch) {
+    const trailing = zhReviseMatch[2]?.trim();
+    return {
+      intent: "revise_chapter",
+      ...(bookId ? { bookId } : {}),
+      chapterNumber: parseInt(zhReviseMatch[1]!, 10),
+      ...(trailing ? { instruction: trailing } : {}),
     };
   }
 

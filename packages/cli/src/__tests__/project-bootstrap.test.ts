@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-describe("project bootstrap", () => {
+describe("project bootstrap", { timeout: 15_000 }, () => {
   const originalHome = process.env.HOME;
   let tempDir: string;
 

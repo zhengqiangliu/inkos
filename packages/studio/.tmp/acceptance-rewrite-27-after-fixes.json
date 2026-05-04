@@ -1,0 +1,135 @@
+{
+  "runId": "rewrite-accept-20260425182449-cjq6ke",
+  "sessionId": "1777141489495-mugfvh",
+  "requestedSessionId": null,
+  "sessionCreated": true,
+  "instruction": "重写第27章",
+  "baseUrl": "http://localhost:4317",
+  "projectRoot": "E:\\my-novel",
+  "startedAt": 1777141489546,
+  "endedAt": 1777142389562,
+  "elapsedMs": 900016,
+  "response": {
+    "status": 0,
+    "error": "Error: request timeout after 900000ms",
+    "errorCode": null,
+    "errorMessage": null,
+    "persisted": false,
+    "expectedAddedChapters": [
+      27
+    ],
+    "addedChapterNumbers": [],
+    "addedChapterNumbersMatchExpected": false,
+    "missingChapterFiles": null,
+    "pass": false,
+    "bodyPreview": null
+  },
+  "artifacts": {
+    "indexPath": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\chapters\\index.json",
+    "perChapter": [
+      {
+        "chapter": 27,
+        "indexEntry": null,
+        "chapterFiles": [],
+        "snapshotDir": "E:\\my-novel\\books\\诡异复苏-我在夜里斩神-白天送外卖-\\story\\snapshots\\27",
+        "snapshotExists": false,
+        "snapshotCurrentStateExists": false,
+        "snapshotPendingHooksExists": false,
+        "pass": false
+      }
+    ],
+    "pass": false
+  },
+  "sse": {
+    "endpoint": "http://localhost:4317/api/v1/events",
+    "eventCount": 3238,
+    "maxGapMs": 12020,
+    "maxGapFromEvent": "llm:progress",
+    "maxGapToEvent": "llm:progress",
+    "limitMs": 15000,
+    "pass": true,
+    "sampleEvents": [
+      {
+        "ts": 1777141489566,
+        "event": "agent:start"
+      },
+      {
+        "ts": 1777141489572,
+        "event": "thinking:start"
+      },
+      {
+        "ts": 1777141489572,
+        "event": "thinking:delta"
+      },
+      {
+        "ts": 1777141489572,
+        "event": "tool:start"
+      },
+      {
+        "ts": 1777141489573,
+        "event": "thinking:delta"
+      },
+      {
+        "ts": 1777141489573,
+        "event": "tool:update"
+      },
+      {
+        "ts": 1777141489573,
+        "event": "thinking:delta"
+      },
+      {
+        "ts": 1777141489573,
+        "event": "tool:update"
+      },
+      {
+        "ts": 1777141489599,
+        "event": "thinking:delta"
+      },
+      {
+        "ts": 1777141489599,
+        "event": "tool:update"
+      },
+      {
+        "ts": 1777141489618,
+        "event": "log"
+      },
+      {
+        "ts": 1777141489740,
+        "event": "log"
+      },
+      {
+        "ts": 1777141489958,
+        "event": "log"
+      },
+      {
+        "ts": 1777141501939,
+        "event": "llm:progress"
+      },
+      {
+        "ts": 1777141513940,
+        "event": "llm:progress"
+      },
+      {
+        "ts": 1777141525950,
+        "event": "llm:progress"
+      },
+      {
+        "ts": 1777141537960,
+        "event": "llm:progress"
+      },
+      {
+        "ts": 1777141549962,
+        "event": "llm:progress"
+      },
+      {
+        "ts": 1777141561974,
+        "event": "llm:progress"
+      },
+      {
+        "ts": 1777141573983,
+        "event": "llm:progress"
+      }
+    ]
+  },
+  "overallPass": false
+}

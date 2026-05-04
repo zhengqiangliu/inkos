@@ -31,7 +31,7 @@ const GENRE: GenreProfile = {
 };
 
 describe("buildWriterSystemPrompt", () => {
-  it("demotes always-on methodology blocks in governed mode", () => {
+  it("demotes always-on methodology blocks in governed mode but keeps opening-three-chapters guardrail by default", () => {
     const prompt = buildWriterSystemPrompt(
       BOOK,
       GENRE,
@@ -51,7 +51,40 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("卷纲是默认规划");
     expect(prompt).not.toContain("## 六步走人物心理分析");
     expect(prompt).not.toContain("## 读者心理学框架");
-    expect(prompt).not.toContain("## 黄金三章规则");
+    expect(prompt).toContain("## 黄金三章特殊指令（当前第3章）");
+  });
+
+  it("allows disabling opening-three-chapters guardrail in governed mode via book rules", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      {
+        version: "1.0",
+        prohibitions: [],
+        chapterTypesOverride: [],
+        fatigueWordsOverride: [],
+        additionalAuditDimensions: [],
+        enableFullCastTracking: false,
+        allowedDeviations: [],
+        openingThreeChapters: {
+          enabled: true,
+          applyInGovernedMode: false,
+          strict: true,
+          maxCharacters: 5,
+        },
+      },
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide\n\nKeep the prose restrained.",
+      undefined,
+      2,
+      "creative",
+      undefined,
+      "zh",
+      "governed",
+    );
+
+    expect(prompt).not.toContain("## 黄金三章特殊指令");
   });
 
   it("uses target-range wording when a length spec is provided", () => {

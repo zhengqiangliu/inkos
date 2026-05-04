@@ -31,6 +31,19 @@ describe("interaction natural-language router", () => {
       bookId: "harbor",
       chapterNumber: 3,
     });
+    expect(routeNaturalLanguageIntent("重写3章", { activeBookId: "harbor" })).toEqual({
+      intent: "rewrite_chapter",
+      bookId: "harbor",
+      chapterNumber: 3,
+    });
+  });
+
+  it("maps chinese revise aliases like 重订 to revise_chapter", () => {
+    expect(routeNaturalLanguageIntent("重订13章", { activeBookId: "harbor" })).toEqual({
+      intent: "revise_chapter",
+      bookId: "harbor",
+      chapterNumber: 13,
+    });
   });
 
   it("maps revise chapter requests with freeform instructions", () => {

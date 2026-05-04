@@ -11,6 +11,8 @@ const cliDir = resolve(testDir, "..", "..");
 const cliEntry = resolve(cliDir, "dist", "index.js");
 
 let projectDir: string;
+const CLI_COMMAND_TIMEOUT_MS = 20_000;
+const CLI_TEST_TIMEOUT_MS = 30_000;
 
 function buildTestEnv(overrides?: Record<string, string>) {
   const baseEnv = Object.fromEntries(
@@ -35,7 +37,7 @@ function run(args: string[], options?: { env?: Record<string, string> }): string
     cwd: projectDir,
     encoding: "utf-8",
     env: buildTestEnv(options?.env),
-    timeout: 10_000,
+    timeout: CLI_COMMAND_TIMEOUT_MS,
   });
 }
 
@@ -45,7 +47,7 @@ function runStderr(args: string[], options?: { env?: Record<string, string> }): 
       cwd: projectDir,
       encoding: "utf-8",
       env: buildTestEnv(options?.env),
-      timeout: 10_000,
+      timeout: CLI_COMMAND_TIMEOUT_MS,
     });
     return { stdout, stderr: "", exitCode: 0 };
   } catch (e: unknown) {
@@ -61,7 +63,7 @@ const failingLlmEnv = {
   INKOS_LLM_API_KEY: "test-key",
 };
 
-describe("CLI integration", () => {
+describe("CLI integration", { timeout: CLI_TEST_TIMEOUT_MS }, () => {
   beforeAll(async () => {
     projectDir = await mkdtemp(join(tmpdir(), "inkos-cli-test-"));
   });

@@ -27,7 +27,10 @@
     "build:server": "tsc -p tsconfig.server.json",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "acceptance:rewrite": "node scripts/rewrite-e2e-acceptance.mjs",
+    "acceptance:write": "node scripts/write-e2e-acceptance.mjs",
+    "acceptance:audit-auto-review": "node scripts/audit-auto-review-e2e.mjs"
   },
   "dependencies": {
     "@actalk/inkos-core": "workspace:*",

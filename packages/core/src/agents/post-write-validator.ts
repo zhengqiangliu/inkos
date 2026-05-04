@@ -25,6 +25,21 @@ interface ParagraphShape {
   readonly maxConsecutiveShort: number;
 }
 
+interface ChineseDialoguePunctuationStats {
+  readonly doubleQuoted: number;
+  readonly cornerQuoted: number;
+  readonly dialogueCueLines: number;
+  readonly unquotedCueLines: number;
+}
+
+type DialogueQuotePolicyMode = "auto" | "force_double" | "force_corner" | "force_none";
+
+interface ResolvedDialogueQuotePolicy {
+  readonly mode: DialogueQuotePolicyMode;
+  readonly strict: boolean;
+  readonly autoNormalize: boolean;
+}
+
 // --- Marker word lists ---
 
 /** AI转折/惊讶标记词 */
@@ -254,6 +269,80 @@ export function validatePostWrite(
   }
 
   violations.push(...detectParagraphShapeWarnings(content, "zh"));
+
+  // 10.5 对话标点一致性（避免「」与“”同章混用）
+  const dialogueStats = collectChineseDialoguePunctuationStats(content);
+  const dialoguePolicy = resolveDialogueQuotePolicy(bookRules);
+  if (dialoguePolicy.mode === "force_double") {
+    if (dialogueStats.cornerQuoted > 0) {
+      violations.push({
+        rule: "对话引号强约束",
+        severity: "error",
+        description: `book_rules 要求对白使用“……”双引号，但检测到「……」共${dialogueStats.cornerQuoted}处。`,
+        suggestion: "将「……」统一改为“……”。",
+      });
+    }
+    if (dialoguePolicy.strict && dialogueStats.unquotedCueLines > 0) {
+      violations.push({
+        rule: "对话引号强约束",
+        severity: "error",
+        description: `book_rules 要求对白必须加双引号，但检测到${dialogueStats.unquotedCueLines}处“说话人：内容”未加引号。`,
+        suggestion: "将无引号对白改为“……”格式。",
+      });
+    }
+  } else if (dialoguePolicy.mode === "force_corner") {
+    if (dialogueStats.doubleQuoted > 0) {
+      violations.push({
+        rule: "对话引号强约束",
+        severity: "error",
+        description: `book_rules 要求对白使用「……」引号，但检测到“……”共${dialogueStats.doubleQuoted}处。`,
+        suggestion: "将“……”统一改为「……」。",
+      });
+    }
+    if (dialoguePolicy.strict && dialogueStats.unquotedCueLines > 0) {
+      violations.push({
+        rule: "对话引号强约束",
+        severity: "error",
+        description: `book_rules 要求对白必须加「……」引号，但检测到${dialogueStats.unquotedCueLines}处“说话人：内容”未加引号。`,
+        suggestion: "将无引号对白改为「……」格式。",
+      });
+    }
+  } else if (dialoguePolicy.mode === "force_none") {
+    if (dialogueStats.doubleQuoted + dialogueStats.cornerQuoted > 0) {
+      violations.push({
+        rule: "对话引号强约束",
+        severity: "error",
+        description: "book_rules 要求对白使用无引号体（说话人：内容），但检测到引号对白。",
+        suggestion: "去除对话引号，统一为说话人：内容格式。",
+      });
+    }
+  } else {
+    if (dialogueStats.doubleQuoted >= 2 && dialogueStats.cornerQuoted >= 2) {
+      const totalQuoted = dialogueStats.doubleQuoted + dialogueStats.cornerQuoted;
+      const dominantRatio = Math.max(dialogueStats.doubleQuoted, dialogueStats.cornerQuoted) / totalQuoted;
+      if (dominantRatio < 0.8) {
+        violations.push({
+          rule: "对话引号风格混用",
+          severity: "warning",
+          description: `同章混用了「……」(${dialogueStats.cornerQuoted}处) 与 “……”(${dialogueStats.doubleQuoted}处) 对话引号。`,
+          suggestion: "选择一种对白引号体系并全章统一。",
+        });
+      }
+    }
+
+    // 10.6 大量对白未加引号（支持「说话人：内容」体，但当占比过高时给出提醒）
+    if (dialogueStats.dialogueCueLines >= 6) {
+      const unquotedRatio = dialogueStats.unquotedCueLines / dialogueStats.dialogueCueLines;
+      if (unquotedRatio >= 0.7 && dialogueStats.doubleQuoted + dialogueStats.cornerQuoted <= 1) {
+        violations.push({
+          rule: "对话未标引号",
+          severity: "warning",
+          description: `检测到${dialogueStats.unquotedCueLines}/${dialogueStats.dialogueCueLines}处“说话人：内容”对白未使用引号，可能导致阅读辨识度下降。`,
+          suggestion: "若本书未明确采用无引号体，建议对白统一使用「……」或“……”。",
+        });
+      }
+    }
+  }
 
   // 11. Book-level prohibitions
   // Short prohibitions (2-30 chars): exact substring match
@@ -564,6 +653,50 @@ function extractParagraphs(content: string): string[] {
     .filter((paragraph) => paragraph.length > 0)
     .filter((paragraph) => paragraph !== "---")
     .filter((paragraph) => !paragraph.startsWith("#"));
+}
+
+function resolveDialogueQuotePolicy(bookRules: BookRules | null): ResolvedDialogueQuotePolicy {
+  const policy = bookRules?.dialogueQuotePolicy;
+  if (!policy) {
+    return {
+      mode: "auto",
+      strict: false,
+      autoNormalize: false,
+    };
+  }
+  return {
+    mode: policy.mode ?? "auto",
+    strict: policy.strict ?? false,
+    autoNormalize: policy.autoNormalize ?? false,
+  };
+}
+
+function collectChineseDialoguePunctuationStats(content: string): ChineseDialoguePunctuationStats {
+  const doubleQuoted = (content.match(/“[^”\n]{1,}”/g) ?? []).length;
+  const cornerQuoted = (content.match(/「[^」\n]{1,}」/g) ?? []).length;
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  let dialogueCueLines = 0;
+  let unquotedCueLines = 0;
+
+  for (const line of lines) {
+    if (/^(#|\||[-*]\s|\d+\.)/.test(line)) continue;
+    if (!/^[^\n]{0,20}[：:][^\n]{1,80}$/.test(line)) continue;
+    dialogueCueLines += 1;
+    if (!/[“「"][^”」"\n]{1,}[”」"]/.test(line)) {
+      unquotedCueLines += 1;
+    }
+  }
+
+  return {
+    doubleQuoted,
+    cornerQuoted,
+    dialogueCueLines,
+    unquotedCueLines,
+  };
 }
 
 const ENGLISH_NAME_STOP_WORDS = new Set([

@@ -73,12 +73,13 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 ## 可用工具
 
 - **sub_agent** — 委托子智能体执行重操作：
-  - agent="writer" **续写下一章**（接着已写的最后一章往下写，无法指定章节号。参数：chapterWordCount）
+  - 调用时始终传 \`agent\`；建议同时传 \`instruction\`（可直接复用用户原话作为 brief）
+  - agent="writer" **续写下一章**（接着已写的最后一章往下写，无法指定章节号。参数：chapterWordCount；如需连写多章可传 chapterCount）
   - agent="auditor" 审计**已有章节**（参数：chapterNumber 指定第几章，不传则审最新一章）
   - agent="reviser" 修改**已有章节**（**必须传 chapterNumber 指明改第几章**。参数：chapterNumber, mode: spot-fix/polish/rewrite/rework/anti-detect）
   - agent="exporter" 导出书籍（参数：format: txt/md/epub, approvedOnly: true/false）
   - **writer vs reviser 选择规则**（极易出错，看清楚）：
-    - 用户说"改/修订/重写第 N 章"、"第 N 章 xxx 写得不好" → **reviser** + chapterNumber=N（绝不能用 writer，writer 会写新的第 N+1 章）
+    - 用户说"改/修订/重订/重写第 N 章"、"第 N 章 xxx 写得不好" → **reviser** + chapterNumber=N（绝不能用 writer，writer 会写新的第 N+1 章）
     - 用户说"写下一章"、"继续写"、"再来一章" → **writer**（不要用 reviser，更不要不带 chapterNumber 调 reviser）
     - 用户没说章节号、只说"改一下刚才那章" → **reviser** + chapterNumber=最新已写章节号
 - **read** — 读取书籍的设定文件或章节内容
@@ -125,7 +126,8 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 ## Available Tools
 
 - **sub_agent** — Delegate to sub-agents:
-  - agent="writer" **continue writing the NEXT chapter** (always appends after the latest written chapter; cannot target a specific number. params: chapterWordCount)
+  - Always pass \`agent\`; also pass \`instruction\` when possible (you can reuse the user's request as the brief)
+  - agent="writer" **continue writing the NEXT chapter** (always appends after the latest written chapter; cannot target a specific number. params: chapterWordCount; use chapterCount for multi-chapter batch)
   - agent="auditor" audit an **EXISTING chapter** (params: chapterNumber to target a specific chapter; omit for the latest)
   - agent="reviser" modify an **EXISTING chapter** (**chapterNumber is required to identify which chapter**. params: chapterNumber, mode: spot-fix/polish/rewrite/rework/anti-detect)
   - agent="exporter" export book (params: format: txt/md/epub, approvedOnly: true/false)

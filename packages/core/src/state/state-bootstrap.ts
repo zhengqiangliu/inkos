@@ -7,6 +7,7 @@ import {
   StateManifestSchema,
   type ChapterSummariesState,
   type CurrentStateState,
+  type HooksState,
   type HookStatus,
   type StateManifest,
 } from "../models/runtime-state.js";
@@ -37,7 +38,7 @@ export interface BootstrapStructuredStateResult {
 
 interface MarkdownBootstrapState {
   readonly summariesState: ChapterSummariesState;
-  readonly hooksState: { readonly hooks: ReadonlyArray<StoredHook> };
+  readonly hooksState: HooksState;
   readonly currentState: CurrentStateState;
   readonly durableStoryProgress: number;
 }
@@ -66,21 +67,21 @@ export async function bootstrapStructuredStateFromMarkdown(params: {
     warnings,
   });
 
-  const summariesState = await loadOrBootstrapSummaries({
+  let summariesState = await loadOrBootstrapSummaries({
     storyDir,
     statePath: summariesPath,
     createdFiles,
     warnings,
     bootstrapState: markdownState.summariesState,
   });
-  const hooksState = await loadOrBootstrapHooks({
+  let hooksState = await loadOrBootstrapHooks({
     storyDir,
     statePath: hooksPath,
     createdFiles,
     warnings,
     bootstrapState: markdownState.hooksState,
   });
-  const currentState = await loadOrBootstrapCurrentState({
+  let currentState = await loadOrBootstrapCurrentState({
     storyDir,
     statePath: currentStatePath,
     fallbackChapter: markdownState.durableStoryProgress,
@@ -92,6 +93,28 @@ export async function bootstrapStructuredStateFromMarkdown(params: {
   // currentState.chapter comes from markdown which can contain
   // hallucinated numbers (e.g. year 1988 parsed as chapter 1988).
   const derivedProgress = markdownState.durableStoryProgress;
+  const normalized = normalizeStructuredRuntimeStateAgainstProgress({
+    currentState,
+    hooksState,
+    summariesState,
+    durableProgress: derivedProgress,
+    warnings,
+  });
+  currentState = normalized.currentState;
+  hooksState = normalized.hooksState;
+  summariesState = normalized.summariesState;
+  await Promise.all([
+    ...(normalized.currentStateChanged
+      ? [writeFile(currentStatePath, JSON.stringify(currentState, null, 2), "utf-8")]
+      : []),
+    ...(normalized.hooksStateChanged
+      ? [writeFile(hooksPath, JSON.stringify(hooksState, null, 2), "utf-8")]
+      : []),
+    ...(normalized.summariesStateChanged
+      ? [writeFile(summariesPath, JSON.stringify(summariesState, null, 2), "utf-8")]
+      : []),
+  ]);
+
   if ((existingManifest?.lastAppliedChapter ?? 0) > derivedProgress) {
     appendWarning(
       warnings,
@@ -144,9 +167,16 @@ export async function rewriteStructuredStateFromMarkdown(params: {
     fallbackChapter: params.fallbackChapter ?? 0,
     warnings,
   });
-  const summariesState = markdownState.summariesState;
-  const hooksState = markdownState.hooksState;
-  const currentState = markdownState.currentState;
+  const normalized = normalizeStructuredRuntimeStateAgainstProgress({
+    currentState: markdownState.currentState,
+    hooksState: markdownState.hooksState,
+    summariesState: markdownState.summariesState,
+    durableProgress: markdownState.durableStoryProgress,
+    warnings,
+  });
+  const summariesState = normalized.summariesState;
+  const hooksState = normalized.hooksState;
+  const currentState = normalized.currentState;
 
   const manifest = StateManifestSchema.parse({
     schemaVersion: 2,
@@ -170,6 +200,111 @@ export async function rewriteStructuredStateFromMarkdown(params: {
     createdFiles: [],
     warnings: manifest.migrationWarnings,
     manifest,
+  };
+}
+
+function normalizeStructuredRuntimeStateAgainstProgress(params: {
+  readonly currentState: CurrentStateState;
+  readonly hooksState: HooksState;
+  readonly summariesState: ChapterSummariesState;
+  readonly durableProgress: number;
+  readonly warnings: string[];
+}): {
+  currentState: CurrentStateState;
+  hooksState: HooksState;
+  summariesState: ChapterSummariesState;
+  currentStateChanged: boolean;
+  hooksStateChanged: boolean;
+  summariesStateChanged: boolean;
+} {
+  const progress = Math.max(0, params.durableProgress);
+
+  let currentStateChanged = false;
+  const normalizedFacts = params.currentState.facts.map((fact) => {
+    const nextValidFrom = Math.min(Math.max(0, fact.validFromChapter), progress);
+    const nextSource = Math.min(Math.max(0, fact.sourceChapter), progress);
+    const nextValidUntil = fact.validUntilChapter === null
+      ? null
+      : Math.min(Math.max(0, fact.validUntilChapter), progress);
+    const coherentValidUntil = nextValidUntil !== null && nextValidUntil < nextValidFrom
+      ? nextValidFrom
+      : nextValidUntil;
+    if (
+      nextValidFrom !== fact.validFromChapter
+      || nextSource !== fact.sourceChapter
+      || coherentValidUntil !== fact.validUntilChapter
+    ) {
+      currentStateChanged = true;
+    }
+    return {
+      ...fact,
+      validFromChapter: nextValidFrom,
+      sourceChapter: nextSource,
+      validUntilChapter: coherentValidUntil,
+    };
+  });
+  let nextCurrentState = params.currentState;
+  if (params.currentState.chapter > progress) {
+    appendWarning(
+      params.warnings,
+      `current_state chapter normalized from ${params.currentState.chapter} to ${progress}`,
+    );
+    currentStateChanged = true;
+    nextCurrentState = {
+      ...params.currentState,
+      chapter: progress,
+      facts: normalizedFacts,
+    };
+  } else if (currentStateChanged) {
+    nextCurrentState = {
+      ...params.currentState,
+      facts: normalizedFacts,
+    };
+  }
+  nextCurrentState = CurrentStateStateSchema.parse(nextCurrentState);
+
+  let hooksStateChanged = false;
+  const normalizedHooks = params.hooksState.hooks.map((hook) => {
+    const nextLastAdvanced = Math.min(Math.max(0, hook.lastAdvancedChapter), progress);
+    if (nextLastAdvanced !== hook.lastAdvancedChapter) {
+      hooksStateChanged = true;
+    }
+    return nextLastAdvanced === hook.lastAdvancedChapter
+      ? hook
+      : {
+          ...hook,
+          lastAdvancedChapter: nextLastAdvanced,
+        };
+  });
+  if (hooksStateChanged) {
+    appendWarning(
+      params.warnings,
+      `hooks lastAdvancedChapter normalized to <= ${progress}`,
+    );
+  }
+  const nextHooksState = HooksStateSchema.parse({
+    hooks: normalizedHooks,
+  });
+
+  const trimmedSummaries = params.summariesState.rows.filter((row) => row.chapter <= progress);
+  const summariesStateChanged = trimmedSummaries.length !== params.summariesState.rows.length;
+  if (summariesStateChanged) {
+    appendWarning(
+      params.warnings,
+      `chapter_summaries rows beyond chapter ${progress} were trimmed`,
+    );
+  }
+  const nextSummariesState = ChapterSummariesStateSchema.parse({
+    rows: trimmedSummaries,
+  });
+
+  return {
+    currentState: nextCurrentState,
+    hooksState: nextHooksState,
+    summariesState: nextSummariesState,
+    currentStateChanged,
+    hooksStateChanged,
+    summariesStateChanged,
   };
 }
 
@@ -212,7 +347,7 @@ async function loadOrBootstrapHooks(params: {
   readonly statePath: string;
   readonly createdFiles: string[];
   readonly warnings: string[];
-  readonly bootstrapState?: { readonly hooks: ReadonlyArray<StoredHook> };
+  readonly bootstrapState?: HooksState;
   readonly forceBootstrapFromMarkdown?: boolean;
 }) {
   if (!params.forceBootstrapFromMarkdown) {
@@ -223,6 +358,13 @@ async function loadOrBootstrapHooks(params: {
       "hooks.json",
     );
     if (existing) {
+      const dedupedExisting = deduplicateHookRows(existing.hooks);
+      if (dedupedExisting.length < existing.hooks.length) {
+        appendWarning(params.warnings, "hooks.json duplicate hook ids deduplicated");
+        const repaired = HooksStateSchema.parse({ hooks: dedupedExisting });
+        await writeFile(params.statePath, JSON.stringify(repaired, null, 2), "utf-8");
+        return repaired;
+      }
       return existing;
     }
   }
@@ -231,12 +373,17 @@ async function loadOrBootstrapHooks(params: {
     storyDir: params.storyDir,
     warnings: params.warnings,
   });
+  const dedupedHooks = deduplicateHookRows(hooksState.hooks);
+  if (dedupedHooks.length < hooksState.hooks.length) {
+    appendWarning(params.warnings, "pending_hooks markdown duplicate hook ids deduplicated");
+  }
+  const repairedHooksState = HooksStateSchema.parse({ hooks: dedupedHooks });
   const existed = await pathExists(params.statePath);
-  await writeFile(params.statePath, JSON.stringify(hooksState, null, 2), "utf-8");
+  await writeFile(params.statePath, JSON.stringify(repairedHooksState, null, 2), "utf-8");
   if (!existed) {
     params.createdFiles.push("hooks.json");
   }
-  return hooksState;
+  return repairedHooksState;
 }
 
 async function loadOrBootstrapSummaries(params: {
@@ -280,23 +427,28 @@ function parsePendingHooksStateMarkdown(markdown: string, warnings: string[]) {
     .filter((row) => (row[0] ?? "").toLowerCase() !== "hook_id");
 
   if (tableRows.length > 0) {
+    const tableHooks = tableRows
+      .filter((row) => normalizeHookId(row[0]).length > 0)
+      .map((row) => {
+        const hookId = normalizeHookId(row[0]);
+        const legacyShape = row.length < 8;
+        return {
+          hookId,
+          startChapter: parseStrictIntegerWithWarning(row[1], warnings, `${hookId}:startChapter`),
+          type: row[2] ?? "unspecified",
+          status: normalizeHookStatus(row[3], warnings, hookId),
+          lastAdvancedChapter: parseStrictIntegerWithWarning(row[4], warnings, `${hookId}:lastAdvancedChapter`),
+          expectedPayoff: row[5] ?? "",
+          payoffTiming: legacyShape ? undefined : normalizeHookPayoffTiming(row[6]),
+          notes: legacyShape ? (row[6] ?? "") : (row[7] ?? ""),
+        };
+      });
+    const dedupedTableHooks = deduplicateHookRows(tableHooks);
+    if (dedupedTableHooks.length < tableHooks.length) {
+      appendWarning(warnings, "pending_hooks markdown duplicate hook ids deduplicated");
+    }
     return HooksStateSchema.parse({
-      hooks: tableRows
-        .filter((row) => normalizeHookId(row[0]).length > 0)
-        .map((row) => {
-          const hookId = normalizeHookId(row[0]);
-          const legacyShape = row.length < 8;
-          return {
-            hookId,
-            startChapter: parseStrictIntegerWithWarning(row[1], warnings, `${hookId}:startChapter`),
-            type: row[2] ?? "unspecified",
-            status: normalizeHookStatus(row[3], warnings, hookId),
-            lastAdvancedChapter: parseStrictIntegerWithWarning(row[4], warnings, `${hookId}:lastAdvancedChapter`),
-            expectedPayoff: row[5] ?? "",
-            payoffTiming: legacyShape ? undefined : normalizeHookPayoffTiming(row[6]),
-            notes: legacyShape ? (row[6] ?? "") : (row[7] ?? ""),
-          };
-        }),
+      hooks: dedupedTableHooks,
     });
   }
 
@@ -456,7 +608,7 @@ async function loadMarkdownSummariesState(storyDir: string): Promise<ChapterSumm
 async function loadMarkdownHooksState(params: {
   readonly storyDir: string;
   readonly warnings: string[];
-}) {
+}): Promise<HooksState> {
   const markdown = await readFile(join(params.storyDir, "pending_hooks.md"), "utf-8").catch(() => "");
   return parsePendingHooksStateMarkdown(markdown, params.warnings);
 }
@@ -512,6 +664,14 @@ function deduplicateSummaryRows<T extends { chapter: number }>(rows: ReadonlyArr
     byChapter.set(row.chapter, row);
   }
   return [...byChapter.values()].sort((a, b) => a.chapter - b.chapter);
+}
+
+function deduplicateHookRows<T extends { hookId: string }>(rows: ReadonlyArray<T>): T[] {
+  const lastIndexByHookId = new Map<string, number>();
+  rows.forEach((row, index) => {
+    lastIndexByHookId.set(row.hookId, index);
+  });
+  return rows.filter((row, index) => lastIndexByHookId.get(row.hookId) === index);
 }
 
 export function resolveContiguousChapterPrefix(chapterNumbers: ReadonlyArray<number>): number {
