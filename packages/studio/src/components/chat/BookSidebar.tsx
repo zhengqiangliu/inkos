@@ -12,6 +12,16 @@ import { FoundationSection } from "../sidebar/FoundationSection";
 import { SummarySection } from "../sidebar/SummarySection";
 import { ChaptersSection } from "../sidebar/ChaptersSection";
 import { CharacterSection } from "../sidebar/CharacterSection";
+import { SidebarCard } from "../sidebar/SidebarCard";
+import {
+  parseDialogueQuotePolicyFromBookRules,
+  parseOpeningThreeChaptersPolicyFromBookRules,
+  upsertDialogueQuotePolicyInBookRules,
+  upsertOpeningThreeChaptersPolicyInBookRules,
+  type DialogueQuotePolicyMode,
+} from "../../utils/book-rules-policy";
+import { estimateAuditScoreFromIssueTexts, scoreBadgeClass } from "../../utils/audit-score";
+import { countChapterLengthByLanguage } from "../../utils/chapter-length";
 
 export interface BookSidebarProps {
   readonly bookId: string;
@@ -32,6 +42,59 @@ const FOUNDATION_LABELS: Record<string, string> = {
 };
 
 const streamdownPlugins = { cjk };
+const RIGHT_PANEL_TAB_STORAGE_PREFIX = "studio.book.right-tab.";
+
+type RightPanelTab = "chapters" | "outline" | "settings" | "review" | "assets";
+
+const RIGHT_PANEL_TABS: ReadonlyArray<{ id: RightPanelTab; label: string; compactLabel: string }> = [
+  { id: "chapters", label: "章节", compactLabel: "章节" },
+  { id: "outline", label: "大纲", compactLabel: "大纲" },
+  { id: "settings", label: "设定", compactLabel: "设定" },
+  { id: "review", label: "审计修订", compactLabel: "审计" },
+  { id: "assets", label: "资产版本", compactLabel: "版本" },
+];
+
+function isRightPanelTab(value: string): value is RightPanelTab {
+  return RIGHT_PANEL_TABS.some((item) => item.id === value);
+}
+
+function readRightPanelTab(bookId: string): RightPanelTab {
+  if (typeof window === "undefined") return "chapters";
+  const raw = window.localStorage.getItem(`${RIGHT_PANEL_TAB_STORAGE_PREFIX}${bookId}`)?.trim();
+  if (!raw || !isRightPanelTab(raw)) return "chapters";
+  return raw;
+}
+
+function writeRightPanelTab(bookId: string, tab: RightPanelTab): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(`${RIGHT_PANEL_TAB_STORAGE_PREFIX}${bookId}`, tab);
+}
+
+export function resolveEventBookId(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const payload = data as { bookId?: unknown; activeBookId?: unknown };
+  if (typeof payload.bookId === "string") return payload.bookId;
+  if (typeof payload.activeBookId === "string") return payload.activeBookId;
+  return null;
+}
+
+export function isSettingsConflictLog(message: string): boolean {
+  return /设定冲突|world\s+conflict|character\s+conflict|规则冲突|book_rules|story_bible|character_matrix/i.test(message);
+}
+
+export function countChapterStatusBuckets(
+  chapters: ReadonlyArray<{ status?: unknown }>,
+): { failed: number; unpublished: number } {
+  const failed = chapters.filter((chapter) => {
+    const status = typeof chapter.status === "string" ? chapter.status : "";
+    return status === "audit-failed" || status === "needs-revision" || status === "state-degraded";
+  }).length;
+  const unpublished = chapters.filter((chapter) => {
+    const status = typeof chapter.status === "string" ? chapter.status : "";
+    return status === "ready-for-review";
+  }).length;
+  return { failed, unpublished };
+}
 
 function chapterStatusLabel(status: string, t: TFunction): string {
   const map: Record<string, Parameters<TFunction>[0]> = {
@@ -46,11 +109,30 @@ function chapterStatusLabel(status: string, t: TFunction): string {
   return hit ? t(hit) : status;
 }
 
-function chapterWordCountFromContent(content: string): number {
-  const lines = content.split("\n");
-  const titleLineIndex = lines.findIndex((line) => line.startsWith("# "));
-  if (titleLineIndex >= 0) lines.splice(titleLineIndex, 1);
-  return lines.join("\n").trim().length;
+function QuickFileLinks({
+  title,
+  files,
+}: {
+  readonly title: string;
+  readonly files: ReadonlyArray<{ file: string; label: string }>;
+}) {
+  const openArtifact = useChatStore((s) => s.openArtifact);
+
+  return (
+    <SidebarCard title={title}>
+      <div className="space-y-1">
+        {files.map((item) => (
+          <button
+            key={item.file}
+            onClick={() => openArtifact(item.file)}
+            className="w-full rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground"
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </SidebarCard>
+  );
 }
 
 function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFunction }) {
@@ -64,8 +146,17 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [contentWordCount, setContentWordCount] = useState<number | null>(null);
+  const [dialogueQuoteMode, setDialogueQuoteMode] = useState<DialogueQuotePolicyMode>("auto");
+  const [dialogueQuoteStrict, setDialogueQuoteStrict] = useState(false);
+  const [dialogueQuoteAutoNormalize, setDialogueQuoteAutoNormalize] = useState(false);
+  const [openingEnabled, setOpeningEnabled] = useState(true);
+  const [openingApplyInGovernedMode, setOpeningApplyInGovernedMode] = useState(true);
+  const [openingStrict, setOpeningStrict] = useState(true);
+  const [openingMaxCharacters, setOpeningMaxCharacters] = useState(5);
 
   const isChapter = artifactChapter !== null;
+  const isBookRules = !isChapter && artifactFile === "book_rules.md";
   const label = isChapter
     ? t("chapter.label").replace("{n}", String(artifactChapter))
     : artifactFile ? FOUNDATION_LABELS[artifactFile] ?? artifactFile : "";
@@ -73,12 +164,18 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
   useEffect(() => {
     setEditing(false);
     setEditContent("");
+    setContentWordCount(null);
     setLoading(true);
     if (isChapter) {
-      fetchJson<{ content: string }>(`/books/${bookId}/chapters/${artifactChapter}`)
+      fetchJson<{ content: string; wordCount?: number }>(`/books/${bookId}/chapters/${artifactChapter}`)
         .then((data) => {
           const nextContent = data.content ?? "";
           setContent(nextContent);
+          setContentWordCount(
+            typeof data.wordCount === "number" && Number.isFinite(data.wordCount)
+              ? data.wordCount
+              : countChapterLengthByLanguage(nextContent),
+          );
           if (artifactEditMode) {
             setEditContent(nextContent);
             setEditing(true);
@@ -88,7 +185,10 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
         .finally(() => setLoading(false));
     } else if (artifactFile) {
       fetchJson<{ content: string | null }>(`/books/${bookId}/truth/${artifactFile}`)
-        .then((data) => setContent(data.content ?? ""))
+        .then((data) => {
+          setContent(data.content ?? "");
+          setContentWordCount(null);
+        })
         .catch(() => setContent(null))
         .finally(() => setLoading(false));
     }
@@ -100,6 +200,33 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
     setEditing(true);
   }, [artifactEditMode, content, isChapter]);
 
+  useEffect(() => {
+    if (!isBookRules || content === null) return;
+    const parsed = parseDialogueQuotePolicyFromBookRules(content);
+    if (!parsed) {
+      setDialogueQuoteMode("auto");
+      setDialogueQuoteStrict(false);
+      setDialogueQuoteAutoNormalize(false);
+      return;
+    }
+    setDialogueQuoteMode(parsed.mode);
+    setDialogueQuoteStrict(parsed.strict);
+    setDialogueQuoteAutoNormalize(parsed.autoNormalize);
+
+    const opening = parseOpeningThreeChaptersPolicyFromBookRules(content);
+    if (!opening) {
+      setOpeningEnabled(true);
+      setOpeningApplyInGovernedMode(true);
+      setOpeningStrict(true);
+      setOpeningMaxCharacters(5);
+      return;
+    }
+    setOpeningEnabled(opening.enabled);
+    setOpeningApplyInGovernedMode(opening.applyInGovernedMode);
+    setOpeningStrict(opening.strict);
+    setOpeningMaxCharacters(opening.maxCharacters);
+  }, [isBookRules, content]);
+
   const handleEdit = useCallback(() => {
     setEditContent(content ?? "");
     setEditing(true);
@@ -109,17 +236,23 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
     setSaving(true);
     try {
       if (isChapter) {
-        await fetchJson(`/books/${bookId}/chapters/${artifactChapter}`, {
+        const result = await fetchJson<{ wordCount?: number }>(`/books/${bookId}/chapters/${artifactChapter}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: editContent }),
         });
+        setContentWordCount(
+          typeof result.wordCount === "number" && Number.isFinite(result.wordCount)
+            ? result.wordCount
+            : countChapterLengthByLanguage(editContent),
+        );
       } else if (artifactFile) {
         await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: editContent }),
         });
+        setContentWordCount(null);
       }
       setContent(editContent);
       setEditing(false);
@@ -130,12 +263,137 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
     }
   }, [bookId, artifactFile, artifactChapter, isChapter, editContent]);
 
+  const handleApplyDialogueQuotePolicy = useCallback(async () => {
+    if (!isBookRules) return;
+    const source = editing ? editContent : (content ?? "");
+    const next = upsertDialogueQuotePolicyInBookRules(source, {
+      mode: dialogueQuoteMode,
+      strict: dialogueQuoteStrict,
+      autoNormalize: dialogueQuoteAutoNormalize,
+    });
+    setEditContent(next);
+    setSaving(true);
+    try {
+      if (artifactFile) {
+        await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: next }),
+        });
+      }
+      setContent(next);
+      if (!editing) {
+        setEditing(false);
+      }
+    } catch {
+      setEditing(true);
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    bookId,
+    artifactFile,
+    isBookRules,
+    editing,
+    editContent,
+    content,
+    dialogueQuoteMode,
+    dialogueQuoteStrict,
+    dialogueQuoteAutoNormalize,
+  ]);
+
+  const handleApplyOpeningThreeChaptersPolicy = useCallback(async () => {
+    if (!isBookRules) return;
+    const source = editing ? editContent : (content ?? "");
+    const next = upsertOpeningThreeChaptersPolicyInBookRules(source, {
+      enabled: openingEnabled,
+      applyInGovernedMode: openingApplyInGovernedMode,
+      strict: openingStrict,
+      maxCharacters: openingMaxCharacters,
+    });
+    setEditContent(next);
+    setSaving(true);
+    try {
+      if (artifactFile) {
+        await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: next }),
+        });
+      }
+      setContent(next);
+      if (!editing) {
+        setEditing(false);
+      }
+    } catch {
+      setEditing(true);
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    bookId,
+    artifactFile,
+    isBookRules,
+    editing,
+    editContent,
+    content,
+    openingEnabled,
+    openingApplyInGovernedMode,
+    openingStrict,
+    openingMaxCharacters,
+  ]);
+
+  const handleApplyRecommendedOpeningPolicy = useCallback(async () => {
+    if (!isBookRules) return;
+    const recommended = {
+      enabled: true,
+      applyInGovernedMode: true,
+      strict: true,
+      maxCharacters: 5,
+    };
+    const source = editing ? editContent : (content ?? "");
+    const next = upsertOpeningThreeChaptersPolicyInBookRules(source, recommended);
+    setOpeningEnabled(recommended.enabled);
+    setOpeningApplyInGovernedMode(recommended.applyInGovernedMode);
+    setOpeningStrict(recommended.strict);
+    setOpeningMaxCharacters(recommended.maxCharacters);
+    setEditContent(next);
+    setSaving(true);
+    try {
+      if (artifactFile) {
+        await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: next }),
+        });
+      }
+      setContent(next);
+      if (!editing) {
+        setEditing(false);
+      }
+    } catch {
+      setEditing(true);
+    } finally {
+      setSaving(false);
+    }
+  }, [bookId, artifactFile, isBookRules, editing, editContent, content]);
+
   const chapterStatus = artifactChapterMeta?.status ?? t("sidebar.chapter.statusUnknown");
+  const chapterIssues = artifactChapterMeta?.auditIssues ?? [];
+  const chapterScoreRaw = Number(artifactChapterMeta?.audit?.score);
+  const chapterScore = Number.isFinite(chapterScoreRaw)
+    ? Math.max(0, Math.min(100, Math.trunc(chapterScoreRaw)))
+    : estimateAuditScoreFromIssueTexts(chapterIssues);
+  const showChapterScore = chapterStatus === "audit-failed"
+    || chapterStatus === "ready-for-review"
+    || Number.isFinite(chapterScoreRaw);
   const displayedWords = editing
-    ? chapterWordCountFromContent(editContent)
-    : content !== null
-      ? chapterWordCountFromContent(content)
-      : (artifactChapterMeta?.wordCount ?? 0);
+    ? countChapterLengthByLanguage(editContent)
+    : typeof contentWordCount === "number"
+      ? contentWordCount
+      : content !== null
+        ? countChapterLengthByLanguage(content)
+        : (artifactChapterMeta?.wordCount ?? 0);
 
   return (
     <div className="flex flex-col h-full">
@@ -152,6 +410,11 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
             <span className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-muted/50 text-muted-foreground">
               {chapterStatusLabel(chapterStatus, t)}
             </span>
+            {showChapterScore && (
+              <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums ${scoreBadgeClass(chapterScore)}`}>
+                评分 {chapterScore}
+              </span>
+            )}
             <span className="inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-muted/50 text-muted-foreground tabular-nums">
               {displayedWords.toLocaleString()} {t("book.words")}
             </span>
@@ -184,6 +447,112 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
         )}
       </div>
       <div className="flex-1 overflow-y-auto">
+        {isBookRules && !loading && content !== null && (
+          <div className="px-4 py-3 border-b border-border/20 bg-secondary/20">
+            <div className="text-xs font-medium text-foreground mb-2">对话引号策略</div>
+            <div className="space-y-2">
+              <label className="text-xs text-muted-foreground block">
+                模式
+              </label>
+              <select
+                value={dialogueQuoteMode}
+                onChange={(e) => setDialogueQuoteMode(e.target.value as DialogueQuotePolicyMode)}
+                className="w-full h-8 rounded-md border border-border/40 bg-background px-2 text-xs outline-none"
+              >
+                <option value="auto">自动跟随历史</option>
+                <option value="force_double">强制中文双引号“……”</option>
+                <option value="force_corner">强制日式引号「……」</option>
+                <option value="force_none">强制无引号体（说话人：内容）</option>
+              </select>
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={dialogueQuoteStrict}
+                  onChange={(e) => setDialogueQuoteStrict(e.target.checked)}
+                  className="rounded border-border/40"
+                />
+                严格模式（无引号对白也算违规）
+              </label>
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={dialogueQuoteAutoNormalize}
+                  onChange={(e) => setDialogueQuoteAutoNormalize(e.target.checked)}
+                  className="rounded border-border/40"
+                />
+                自动规范化（写作后统一引号）
+              </label>
+              <button
+                onClick={handleApplyDialogueQuotePolicy}
+                disabled={saving}
+                className="h-8 px-2 rounded-md border border-border/40 text-xs text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50"
+              >
+                应用并保存到 book_rules.md
+              </button>
+            </div>
+            <div className="mt-4 pt-3 border-t border-border/20">
+              <div className="text-xs font-medium text-foreground mb-2">开篇前三章策略</div>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={openingEnabled}
+                    onChange={(e) => setOpeningEnabled(e.target.checked)}
+                    className="rounded border-border/40"
+                  />
+                  启用前三章开篇规则
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={openingApplyInGovernedMode}
+                    onChange={(e) => setOpeningApplyInGovernedMode(e.target.checked)}
+                    className="rounded border-border/40"
+                  />
+                  在 governed 模式生效
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={openingStrict}
+                    onChange={(e) => setOpeningStrict(e.target.checked)}
+                    className="rounded border-border/40"
+                  />
+                  严格模式（优先修开篇硬伤）
+                </label>
+                <label className="text-xs text-muted-foreground block">
+                  前三章人物上限（3-8）
+                </label>
+                <input
+                  type="number"
+                  min={3}
+                  max={8}
+                  value={openingMaxCharacters}
+                  onChange={(e) => {
+                    const parsed = Number.parseInt(e.target.value, 10);
+                    if (!Number.isFinite(parsed)) return;
+                    setOpeningMaxCharacters(Math.min(8, Math.max(3, parsed)));
+                  }}
+                  className="w-full h-8 rounded-md border border-border/40 bg-background px-2 text-xs outline-none"
+                />
+                <button
+                  onClick={handleApplyOpeningThreeChaptersPolicy}
+                  disabled={saving}
+                  className="h-8 px-2 rounded-md border border-border/40 text-xs text-foreground hover:bg-secondary/50 transition-colors disabled:opacity-50"
+                >
+                  应用并保存到 book_rules.md
+                </button>
+                <button
+                  onClick={handleApplyRecommendedOpeningPolicy}
+                  disabled={saving}
+                  className="h-8 px-2 rounded-md border border-emerald-500/30 text-xs text-emerald-600 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"
+                >
+                  一键推荐配置并保存
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 size={16} className="text-muted-foreground animate-spin" />
@@ -207,12 +576,46 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
 }
 
 function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
+  const [activeTab, setActiveTab] = useState<RightPanelTab>(() => readRightPanelTab(bookId));
   // Show writing indicator only during pipeline operations (write/audit/revise)
   const [activeOp, setActiveOp] = useState<string | null>(null);
+  const bookDataVersion = useChatStore((s) => s.bookDataVersion);
+  const [failedChapterCount, setFailedChapterCount] = useState(0);
+  const [unpublishedChapterCount, setUnpublishedChapterCount] = useState(0);
+
+  useEffect(() => {
+    setActiveTab(readRightPanelTab(bookId));
+  }, [bookId]);
+
+  useEffect(() => {
+    writeRightPanelTab(bookId, activeTab);
+  }, [bookId, activeTab]);
+
+  const refreshChapterStats = useCallback(() => {
+    void fetchJson<{ chapters?: ReadonlyArray<{ status?: unknown }> }>(`/books/${bookId}`)
+      .then((data) => {
+        const chapters = Array.isArray(data.chapters) ? data.chapters : [];
+        const buckets = countChapterStatusBuckets(chapters);
+        setFailedChapterCount(buckets.failed);
+        setUnpublishedChapterCount(buckets.unpublished);
+      })
+      .catch(() => {
+        setFailedChapterCount(0);
+        setUnpublishedChapterCount(0);
+      });
+  }, [bookId]);
+
+  useEffect(() => {
+    refreshChapterStats();
+  }, [refreshChapterStats, bookDataVersion]);
+
   useEffect(() => {
     const latest = sse.messages;
     if (latest.length === 0) return;
     const last = latest[latest.length - 1];
+    const eventBookId = resolveEventBookId(last.data);
+    if (eventBookId && eventBookId !== bookId) return;
+
     if (last.event === "write:start") setActiveOp("write");
     else if (last.event === "tool:start") {
       const data = last.data as { tool?: string; args?: { agent?: string } } | null;
@@ -222,8 +625,34 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
         else if (agent === "auditor") setActiveOp("audit");
         else if (agent === "reviser") setActiveOp("revise");
       }
-    } else if (last.event === "write:complete" || last.event === "tool:end") {
+    } else if (
+      last.event === "write:complete"
+      || last.event === "tool:end"
+      || last.event === "agent:complete"
+      || last.event === "agent:error"
+      || last.event === "agent:stopped"
+    ) {
       setActiveOp(null);
+    }
+
+    if (
+      last.event === "audit:complete"
+      || last.event === "audit:error"
+      || last.event === "revise:complete"
+      || last.event === "revise:error"
+      || last.event === "rewrite:complete"
+      || last.event === "rewrite:error"
+    ) {
+      setActiveTab("review");
+      refreshChapterStats();
+      return;
+    }
+
+    if (last.event === "log") {
+      const payload = last.data as { message?: unknown } | null;
+      if (typeof payload?.message === "string" && isSettingsConflictLog(payload.message)) {
+        setActiveTab("settings");
+      }
     }
   }, [sse.messages]);
 
@@ -233,21 +662,140 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
     revise: t("sidebar.op.revise"),
   };
 
+  const tabBadge = useCallback((tab: RightPanelTab): React.ReactNode => {
+    if (tab === "chapters" && activeOp) {
+      return <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />;
+    }
+    if (tab === "review" && failedChapterCount > 0) {
+      return (
+        <span className="rounded-full bg-destructive/15 px-1.5 py-0.5 text-[10px] text-destructive">
+          {Math.min(failedChapterCount, 99)}
+        </span>
+      );
+    }
+    if (tab === "assets" && unpublishedChapterCount > 0) {
+      return (
+        <span className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-400">
+          {Math.min(unpublishedChapterCount, 99)}
+        </span>
+      );
+    }
+    return null;
+  }, [activeOp, failedChapterCount, unpublishedChapterCount]);
+
+  const renderTabPanel = () => {
+    if (activeTab === "chapters") {
+      return (
+        <>
+          <ProgressSection sse={sse} />
+          <ChaptersSection bookId={bookId} t={t} sse={sse} />
+        </>
+      );
+    }
+    if (activeTab === "outline") {
+      return (
+        <>
+          <QuickFileLinks
+            title="大纲导航"
+            files={[
+              { file: "volume_outline.md", label: "卷纲规划" },
+              { file: "pending_hooks.md", label: "伏笔池" },
+              { file: "subplot_board.md", label: "支线进度" },
+              { file: "current_state.md", label: "状态卡" },
+            ]}
+          />
+          <FoundationSection bookId={bookId} />
+        </>
+      );
+    }
+    if (activeTab === "settings") {
+      return (
+        <>
+          <QuickFileLinks
+            title="设定文件"
+            files={[
+              { file: "story_bible.md", label: "世界观设定" },
+              { file: "character_matrix.md", label: "角色矩阵" },
+              { file: "book_rules.md", label: "叙事规则" },
+              { file: "emotional_arcs.md", label: "感情线" },
+            ]}
+          />
+          <SummarySection bookId={bookId} />
+          <CharacterSection bookId={bookId} />
+        </>
+      );
+    }
+    if (activeTab === "review") {
+      return (
+        <>
+          <SidebarCard title="审计修订">
+            <p className="text-xs text-muted-foreground">
+              这里聚焦章节审计与修订动作，优先处理未通过章节。
+            </p>
+          </SidebarCard>
+          <ChaptersSection bookId={bookId} t={t} sse={sse} />
+        </>
+      );
+    }
+    return (
+      <>
+        <QuickFileLinks
+          title="资产文件"
+          files={[
+            { file: "story_bible.md", label: "世界观设定" },
+            { file: "volume_outline.md", label: "卷纲规划" },
+            { file: "book_rules.md", label: "叙事规则" },
+            { file: "current_state.md", label: "状态卡" },
+            { file: "pending_hooks.md", label: "伏笔池" },
+            { file: "subplot_board.md", label: "支线进度" },
+            { file: "emotional_arcs.md", label: "感情线" },
+            { file: "character_matrix.md", label: "角色矩阵" },
+          ]}
+        />
+        <FoundationSection bookId={bookId} />
+      </>
+    );
+  };
+
   return (
-    <div className="flex flex-col gap-2 p-3">
-      {activeOp && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-primary/5 border border-primary/10">
-          <Loader2 size={12} className="text-primary animate-spin shrink-0" />
-          <span className="text-xs text-primary font-medium">
-            {OP_LABELS[activeOp] ?? activeOp}
-          </span>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0 border-b border-border/20 px-2 pb-2 pt-2 sm:px-3 sm:pt-3">
+        <div className="flex items-center gap-1 overflow-x-auto">
+          {RIGHT_PANEL_TABS.map((tab) => {
+            const active = tab.id === activeTab;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setActiveTab(tab.id)}
+                className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
+                  active
+                    ? "bg-primary/15 text-primary"
+                    : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+                }`}
+              >
+                <span className="sm:hidden">{tab.compactLabel}</span>
+                <span className="hidden sm:inline">{tab.label}</span>
+                {tabBadge(tab.id)}
+              </button>
+            );
+          })}
         </div>
-      )}
-      <ProgressSection sse={sse} />
-      <ChaptersSection bookId={bookId} t={t} sse={sse} />
-      <CharacterSection bookId={bookId} />
-      <FoundationSection bookId={bookId} />
-      <SummarySection bookId={bookId} />
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="flex flex-col gap-2 p-3">
+          {activeOp && (
+            <div className="flex items-center gap-2 rounded-lg border border-primary/10 bg-primary/5 px-3 py-2">
+              <Loader2 size={12} className="shrink-0 animate-spin text-primary" />
+              <span className="text-xs font-medium text-primary">
+                {OP_LABELS[activeOp] ?? activeOp}
+              </span>
+            </div>
+          )}
+          {renderTabPanel()}
+        </div>
+      </div>
     </div>
   );
 }
