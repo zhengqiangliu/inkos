@@ -156,3 +156,13 @@ export const ChapterTraceSchema = z.object({
 });
 
 export type ChapterTrace = z.infer<typeof ChapterTraceSchema>;
+
+export const ChapterMemoSchema = z.object({
+  chapter: z.number().int().min(1),
+  goal: z.string().min(1).max(50),
+  isGoldenOpening: z.boolean(),
+  body: z.string().min(1),
+  threadRefs: z.array(z.string()).default([]),
+});
+
+export type ChapterMemo = z.infer<typeof ChapterMemoSchema>;

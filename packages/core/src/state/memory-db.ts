@@ -54,6 +54,18 @@ export interface StoredHook {
   readonly expectedPayoff: string;
   readonly payoffTiming?: string;
   readonly notes: string;
+  /** True when this hook is a core narrative hook (not a branch/optional thread). */
+  readonly coreHook?: boolean;
+  /** Hook ids that must be resolved before this one can pay off. */
+  readonly dependsOn?: ReadonlyArray<string>;
+  /** Number of times this hook has been advanced (default 0). */
+  readonly advancedCount?: number;
+  /** Arc identifier used by hook-promotion to extract volume index. */
+  readonly paysOffInArc?: string;
+  /** Half-life for stale detection (chapters). */
+  readonly halfLifeChapters?: number;
+  /** Whether this hook has been promoted from seed to active ledger entry. */
+  readonly promoted?: boolean;
 }
 
 export class MemoryDB {

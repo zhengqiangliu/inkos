@@ -2220,6 +2220,27 @@ export class PipelineRunner {
       });
     }
 
+    // 3.5 Pre-persist raw chapter draft for crash safety
+    // Write to drafts/ dir to avoid bootstrapping durable-progress detection
+    // (bootstrapStructuredStateFromMarkdown scans chapters/, not drafts/).
+    {
+      const draftsDir = join(bookDir, "drafts");
+      const paddedNum = String(chapterNumber).padStart(4, "0");
+      const safeTitle = output.title.replace(/[/\\?%*:|"<>]/g, "_");
+      const draftFilename = `${paddedNum}_${safeTitle}.md`;
+      const heading = pipelineLang === "en"
+        ? `# Chapter ${chapterNumber}: ${output.title}`
+        : `# 第${chapterNumber}章 ${output.title}`;
+      await mkdir(draftsDir, { recursive: true });
+      await writeFile(
+        join(draftsDir, draftFilename),
+        [heading, "", finalContent].join("\n"),
+        "utf-8",
+      ).catch((error: unknown) => {
+        this.config.logger?.warn(`[draft] failed to save raw chapter draft: ${String(error)}`);
+      });
+    }
+
     // 4. Save the final chapter and truth files from a single persistence source
     this.logStage(stageLanguage, { zh: "落盘最终章节", en: "persisting final chapter" });
     this.logStage(stageLanguage, { zh: "生成最终真相文件", en: "rebuilding final truth files" });
@@ -2235,22 +2256,32 @@ export class PipelineRunner {
       ? output
       : { ...output, title: initialTitleResolution.title };
     const truthRebuildStartedAt = this.nowMs();
-    let persistenceOutput = await this.withStageHeartbeat(
-      stageLanguage,
-      { zh: "生成最终真相文件", en: "rebuilding final truth files" },
-      () => this.buildPersistenceOutput(
-        bookId,
-        book,
-        bookDir,
-        chapterNumber,
-        persistenceSeedOutput,
-        finalContent,
-        lengthSpec.countingMode,
-        reducedControlInput,
-        { skipTruthRebuild: skipTruthRebuildReason !== null },
-      ),
-      { suppressElapsedLog: true },
-    );
+    let persistenceOutput: WriteChapterOutput;
+    try {
+      persistenceOutput = await this.withStageHeartbeat(
+        stageLanguage,
+        { zh: "生成最终真相文件", en: "rebuilding final truth files" },
+        () => this.buildPersistenceOutput(
+          bookId,
+          book,
+          bookDir,
+          chapterNumber,
+          persistenceSeedOutput,
+          finalContent,
+          lengthSpec.countingMode,
+          reducedControlInput,
+          { skipTruthRebuild: skipTruthRebuildReason !== null },
+        ),
+        { suppressElapsedLog: true },
+      );
+    } catch (error: unknown) {
+      this.config.logger?.warn(`[persist] truth rebuild failed; falling back to raw output: ${String(error)}`);
+      persistenceOutput = {
+        ...persistenceSeedOutput,
+        content: finalContent,
+        wordCount: finalWordCount,
+      };
+    }
     truthRebuildMs += this.elapsedMs(truthRebuildStartedAt);
     const finalTitleResolution = resolveDuplicateTitle(
       persistenceOutput.title,
@@ -2326,34 +2357,39 @@ export class PipelineRunner {
         readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
       ]);
       const validator = new StateValidatorAgent(this.agentCtxFor("state-validator", bookId));
-      const truthValidation = await this.withStageHeartbeat(
-        stageLanguage,
-        { zh: "校验真相文件变更", en: "validating truth file updates" },
-        () => validateChapterTruthPersistence({
-          writer,
-          validator,
-          book,
-          bookDir,
-          chapterNumber,
-          title: persistenceOutput.title,
-          content: finalContent,
-          persistenceOutput,
-          auditResult,
-          previousTruth: {
-            oldState,
-            oldHooks,
-            oldLedger,
-          },
-          reducedControlInput,
-          language: pipelineLang,
-          logWarn: (message) => this.logWarn(pipelineLang, message),
-          logger: this.config.logger,
-        }),
-      );
-      chapterStatus = truthValidation.chapterStatus;
-      degradedIssues = truthValidation.degradedIssues;
-      persistenceOutput = truthValidation.persistenceOutput;
-      auditResult = truthValidation.auditResult;
+      let truthValidation;
+      try {
+        truthValidation = await this.withStageHeartbeat(
+          stageLanguage,
+          { zh: "校验真相文件变更", en: "validating truth file updates" },
+          () => validateChapterTruthPersistence({
+            writer,
+            validator,
+            book,
+            bookDir,
+            chapterNumber,
+            title: persistenceOutput.title,
+            content: finalContent,
+            persistenceOutput,
+            auditResult,
+            previousTruth: {
+              oldState,
+              oldHooks,
+              oldLedger,
+            },
+            reducedControlInput,
+            language: pipelineLang,
+            logWarn: (message) => this.logWarn(pipelineLang, message),
+            logger: this.config.logger,
+          }),
+        );
+        chapterStatus = truthValidation.chapterStatus;
+        degradedIssues = truthValidation.degradedIssues;
+        persistenceOutput = truthValidation.persistenceOutput;
+        auditResult = truthValidation.auditResult;
+      } catch (error: unknown) {
+        this.config.logger?.warn(`[persist] state validation failed; continuing: ${String(error)}`);
+      }
       stateValidationMs += this.elapsedMs(stateValidationStartedAt);
     } else {
       this.logWarn(stageLanguage, {

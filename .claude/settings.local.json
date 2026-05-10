@@ -5,7 +5,14 @@
       "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/pipeline-runner.test.ts -t \"fails write-next in governed mode when chapter outline anchor is missing\" --reporter=verbose)",
       "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/pipeline-runner.test.ts --reporter=verbose)",
       "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/state-manager.test.ts --reporter=verbose)",
-      "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/chapter-persistence.test.ts --reporter=verbose)"
+      "Bash(pnpm --filter @actalk/inkos-core exec vitest run src/__tests__/chapter-persistence.test.ts --reporter=verbose)",
+      "Bash(git stash *)",
+      "Bash(npx vitest *)",
+      "Bash(npx tsc *)",
+      "Bash(pnpm build *)",
+      "Bash(awk \"{print \\\\$2}\")",
+      "Bash(python -c *)",
+      "Bash(pnpm --filter @actalk/inkos-studio build)"
     ]
   }
 }

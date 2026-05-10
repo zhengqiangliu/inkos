@@ -159,6 +159,33 @@ function buildSettlerOutputFormat(gp: GenreProfile): string {
 8. chapterSummary.chapter 必须等于当前章节号`;
 }
 
+export interface PastDeadlineHook {
+  readonly hookId: string;
+  readonly startChapter: number;
+  readonly age: number;
+  readonly deadline: number;
+  readonly expectedPayoff: string;
+}
+
+function buildPastDeadlineEnforcementBlock(
+  hooks: ReadonlyArray<PastDeadlineHook>,
+  cap?: number,
+): string {
+  const hookLines = hooks.map((hook) => {
+    const ageText = `已逾期${hook.age}章`;
+    const deadlineText = `死线为第${hook.deadline}章`;
+    const payoffText = hook.expectedPayoff;
+    const startText = `种于第${hook.startChapter}章`;
+    return `- **${hook.hookId}**（${startText}，${deadlineText}）：${payoffText}（${ageText}）`;
+  }).join("\n");
+
+  const capBlock = cap !== undefined
+    ? `\n## 回收上限\n每章最多回收 ${cap} 个超死线伏笔。`
+    : "";
+
+  return `\n\n## 强制回收指令（必须执行）\n以下伏笔已超出强制回收死线，本章必须推进或回收至少一个：\n\n${hookLines}${capBlock}`;
+}
+
 export function buildSettlerUserPrompt(params: {
   readonly chapterNumber: number;
   readonly title: string;
@@ -175,6 +202,8 @@ export function buildSettlerUserPrompt(params: {
   readonly selectedEvidenceBlock?: string;
   readonly governedControlBlock?: string;
   readonly validationFeedback?: string;
+  readonly pastDeadlineHooks?: ReadonlyArray<PastDeadlineHook>;
+  readonly forceResolveCap?: number;
 }): string {
   const ledgerBlock = params.ledger
     ? `\n## 当前资源账本\n${params.ledger}\n`
@@ -210,7 +239,13 @@ export function buildSettlerUserPrompt(params: {
     ? `\n## 状态校验反馈\n${params.validationFeedback}\n\n请严格纠正这些矛盾，只修正 truth files，不要改写正文，不要引入正文中不存在的新事实。\n`
     : "";
 
-  return `请分析第${params.chapterNumber}章「${params.title}」的正文，更新所有追踪文件。
+  const pastDeadlineBlock = params.pastDeadlineHooks && params.pastDeadlineHooks.length > 0
+    ? buildPastDeadlineEnforcementBlock(params.pastDeadlineHooks, params.forceResolveCap)
+    : "";
+
+  return `请分析第${params.chapterNumber}章「${params.title}」的正文，更新所有追踪文件。${pastDeadlineBlock}
+${observationsBlock}
+${validationFeedbackBlock}
 ${observationsBlock}
 ${validationFeedbackBlock}
 ## 本章正文

@@ -144,7 +144,6 @@ function extractToolError(result: unknown): string {
   return String(result).slice(0, 500);
 }
 
-<<<<<<< HEAD
 function shouldSuppressStageHeartbeatLog(message: string): boolean {
   return /（进行中\s*\d+s）|\(\d+s elapsed\)/i.test(message);
 }
@@ -1946,26 +1945,26 @@ function emitSyntheticDraftDeltas(args: {
       text: chunk,
     });
   }
-=======
-function parseExplicitAuditChapter(instruction: string): number | null {
-  const text = instruction.trim();
-  const patterns = [
-    /^\/audit\s+(\d+)\s*$/i,
-    /^audit\s+chapter\s+(\d+)\s*$/i,
-    /^审计第?\s*(\d+)\s*(?:章|章节)?\s*$/u,
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (!match) continue;
-    const chapter = Number.parseInt(match[1], 10);
-    if (Number.isInteger(chapter) && chapter > 0) {
-      return chapter;
-    }
-  }
-
-  return null;
 }
+
+interface CollectedToolExec {
+  id: string;
+  tool: string;
+  agent?: string;
+  label: string;
+  status: "running" | "completed" | "error";
+  args?: Record<string, unknown>;
+  logs?: string[];
+  result?: string;
+  error?: string;
+  stages?: Array<{ label: string; status: "pending" | "completed" }>;
+  startedAt: number;
+  completedAt?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Audit tool report helpers
+// ---------------------------------------------------------------------------
 
 interface AuditIssueReport {
   severity: string;
@@ -1985,9 +1984,7 @@ interface AuditToolReport {
 
 function parseAuditToolReport(result: unknown): AuditToolReport | null {
   if (!result || typeof result !== "object") return null;
-  const payload = result as {
-    details?: unknown;
-  };
+  const payload = result as { details?: unknown };
   if (!payload.details || typeof payload.details !== "object") return null;
   const details = payload.details as {
     kind?: unknown;
@@ -1999,34 +1996,42 @@ function parseAuditToolReport(result: unknown): AuditToolReport | null {
     issues?: unknown;
   };
   if (details.kind !== "audit_report") return null;
-  if (typeof details.chapterNumber !== "number" || !Number.isInteger(details.chapterNumber) || details.chapterNumber < 1) {
-    return null;
-  }
+  if (typeof details.chapterNumber !== "number" || !Number.isFinite(details.chapterNumber)) return null;
   if (typeof details.passed !== "boolean") return null;
-  const issuesInput = Array.isArray(details.issues) ? details.issues : [];
-  const issues: AuditIssueReport[] = issuesInput.map((issue) => {
-    const parsed = issue as { severity?: unknown; category?: unknown; description?: unknown; suggestion?: unknown };
-    return {
-      severity: typeof parsed.severity === "string" ? parsed.severity : "warning",
-      category: typeof parsed.category === "string" ? parsed.category : "unknown",
-      description: typeof parsed.description === "string" ? parsed.description : String(parsed.description ?? ""),
-      suggestion: typeof parsed.suggestion === "string" ? parsed.suggestion : "",
-    };
-  });
+  const issues: AuditIssueReport[] = Array.isArray(details.issues)
+    ? details.issues.filter((i): i is AuditIssueReport =>
+      i && typeof i === "object" && typeof i.severity === "string")
+    : [];
   return {
-    ...(typeof details.bookId === "string" && details.bookId.trim().length > 0 ? { bookId: details.bookId } : {}),
+    bookId: typeof details.bookId === "string" ? details.bookId : undefined,
     chapterNumber: details.chapterNumber,
     passed: details.passed,
-    issueCount: typeof details.issueCount === "number" ? details.issueCount : issues.length,
+    issueCount: typeof details.issueCount === "number" && Number.isFinite(details.issueCount) ? details.issueCount : issues.length,
     summary: typeof details.summary === "string" ? details.summary : "",
     issues,
   };
 }
 
+function parseExplicitAuditChapter(instruction: string): number | null {
+  const text = instruction.trim();
+  const patterns = [
+    /^\/audit\s+(\d+)\s*$/i,
+    /^audit\s+chapter\s+(\d+)\s*$/i,
+    /^审计第?\s*(\d+)\s*(?:章|章节)?\s*$/u,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+    const chapter = Number.parseInt(match[1], 10);
+    if (Number.isInteger(chapter) && chapter > 0) return chapter;
+  }
+  return null;
+}
+
 function buildAuditInstruction(originalInstruction: string, chapter: number): string {
   return [
     `请执行审计第${chapter}章。`,
-    "必须调用且仅调用一次 sub_agent 工具，agent=\"auditor\"，并传入 chapterNumber。",
+    '必须调用且仅调用一次 sub_agent 工具，agent="auditor"，并传入 chapterNumber。',
     "不要改写章节，不要调用 revise/rewrite 工具。",
     "基于工具输出，最后用中文给出完整审计报告：是否通过、summary、问题总数、逐条问题（严重级别/类别/描述/建议）。",
     `用户原始指令：${originalInstruction}`,
@@ -2042,22 +2047,6 @@ function formatAuditReportForChat(report: AuditToolReport): string {
       + (issue.suggestion.trim().length > 0 ? `；建议：${issue.suggestion}` : ""))
     : ["无问题。"];
   return [header, summary, "审计明细：", ...issueLines].join("\n");
->>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
-}
-
-interface CollectedToolExec {
-  id: string;
-  tool: string;
-  agent?: string;
-  label: string;
-  status: "running" | "completed" | "error";
-  args?: Record<string, unknown>;
-  logs?: string[];
-  result?: string;
-  error?: string;
-  stages?: Array<{ label: string; status: "pending" | "completed" }>;
-  startedAt: number;
-  completedAt?: number;
 }
 
 interface BatchProgressState {
@@ -4560,7 +4549,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     };
   }
 
-<<<<<<< HEAD
   async function resolvePipelineClientFromSelection(args: {
     readonly currentConfig: ProjectConfig;
     readonly selectedService?: string;
@@ -4603,113 +4591,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   }
 
-=======
-  type AuditOutcome =
-    | {
-      ok: true;
-      result: unknown;
-      passed: boolean;
-      issueCount: number;
-      summary: string;
-    }
-    | {
-      ok: false;
-      status: 404 | 500;
-      error: string;
-    };
-
-  function formatAuditIssue(issue: unknown): string {
-    if (!issue || typeof issue !== "object") {
-      return "";
-    }
-    const parsed = issue as { severity?: unknown; description?: unknown };
-    const description = typeof parsed.description === "string" ? parsed.description.trim() : "";
-    if (!description) return "";
-    const severity = typeof parsed.severity === "string" ? parsed.severity.trim() : "";
-    return severity ? `[${severity}] ${description}` : description;
-  }
-
-  async function runChapterAudit(bookId: string, chapterNum: number): Promise<AuditOutcome> {
-    try {
-      const bookDir = state.bookDir(bookId);
-      const book = await state.loadBookConfig(bookId);
-      const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(chapterNum).padStart(4, "0");
-      const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-      if (!match) {
-        return { ok: false, status: 404, error: "Chapter not found" };
-      }
-
-      const content = await readFile(join(chaptersDir, match), "utf-8");
-      const currentConfig = await loadCurrentProjectConfig();
-      const { ContinuityAuditor } = await import("@actalk/inkos-core");
-      const auditor = new ContinuityAuditor({
-        client: createLLMClient(currentConfig.llm),
-        model: currentConfig.llm.model,
-        projectRoot: root,
-        bookId,
-      });
-      const result = await auditor.auditChapter(bookDir, content, chapterNum, book.genre) as {
-        passed?: unknown;
-        summary?: unknown;
-        issues?: unknown;
-      };
-
-      const passed = result.passed === true;
-      const rawIssues = Array.isArray(result.issues) ? result.issues : [];
-      const issueCount = rawIssues.length;
-      const issueMessages = rawIssues
-        .map((issue) => formatAuditIssue(issue))
-        .filter((entry) => entry.length > 0);
-      const summaryText = typeof result.summary === "string" ? result.summary.trim() : "";
-      const summary = summaryText.length > 0 ? summaryText : (!passed ? issueMessages[0] ?? "" : "");
-
-      const chapterIndex = await state.loadChapterIndex(bookId);
-      const updatedAt = new Date().toISOString();
-      const updatedIndex = chapterIndex.map((chapter) =>
-        chapter.number === chapterNum
-          ? {
-              ...chapter,
-              status: (passed ? "ready-for-review" : "audit-failed") as typeof chapter.status,
-              updatedAt,
-              auditIssues: issueMessages,
-            }
-          : chapter,
-      );
-      await state.saveChapterIndex(bookId, updatedIndex);
-
-      return {
-        ok: true,
-        result,
-        passed,
-        issueCount,
-        summary,
-      };
-    } catch (e) {
-      return { ok: false, status: 500, error: e instanceof Error ? e.message : String(e) };
-    }
-  }
-
-  async function runChapterAuditWithEvents(bookId: string, chapterNum: number): Promise<AuditOutcome> {
-    broadcast("audit:start", { bookId, chapter: chapterNum });
-    const outcome = await runChapterAudit(bookId, chapterNum);
-    if (!outcome.ok) {
-      broadcast("audit:error", { bookId, chapter: chapterNum, error: outcome.error });
-      return outcome;
-    }
-
-    broadcast("audit:complete", {
-      bookId,
-      chapter: chapterNum,
-      passed: outcome.passed,
-      issueCount: outcome.issueCount,
-      summary: outcome.summary,
-    });
-    return outcome;
-  }
-
->>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
   // --- Books ---
 
   app.get("/api/v1/books", async (c) => {
@@ -6040,13 +5921,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       // Run pi-agent session
       const collectedToolExecs: CollectedToolExec[] = [];
-<<<<<<< HEAD
       const batchProgressByToolCallId = new Map<string, BatchProgressState>();
       let sawDraftDelta = false;
       let sawWriterToolStart = false;
       let sawWriterToolSuccess = false;
       let sawWriterToolError = false;
       let precomputedWritePersistence: WritePersistenceCheckResult | null = null;
+      let latestAuditReport: AuditToolReport | null = null;
+      let explicitAuditToolCalled = false;
 
       const persistTelemetryHooks = {
         onPersistCheck: (payload: PersistCheckTelemetry) => {
@@ -6459,47 +6341,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 });
               }
             }
-=======
-      let latestAuditReport: AuditToolReport | null = null;
-      let explicitAuditToolCalled = false;
-      const result = await runAgentSession(
-        {
-          model,
-          apiKey: agentApiKey,
-          pipeline,
-          projectRoot: root,
-          bookId: activeBookId ?? null,
-          sessionId: bookSession.sessionId,
-          language: config.language ?? "zh",
-          onEvent: (event) => {
-            if (event.type === "message_update") {
-              const ame = event.assistantMessageEvent;
-              if (ame.type === "text_delta") {
-                broadcast("draft:delta", { sessionId: streamSessionId, text: ame.delta });
-              } else if (ame.type === "thinking_delta") {
-                broadcast("thinking:delta", { sessionId: streamSessionId, text: (ame as any).delta });
-              } else if (ame.type === "thinking_start") {
-                broadcast("thinking:start", { sessionId: streamSessionId });
-              } else if (ame.type === "thinking_end") {
-                broadcast("thinking:end", { sessionId: streamSessionId });
-              }
-            }
-            if (event.type === "tool_execution_start") {
-              const args = event.args as Record<string, unknown> | undefined;
-              const agent = event.toolName === "sub_agent" ? (args?.agent as string | undefined) : undefined;
-              const stages = agent ? (PIPELINE_STAGES[agent] ?? []) : [];
-              if (event.toolName === "sub_agent" && agent === "auditor") {
-                const eventBookId = typeof args?.bookId === "string" && args.bookId.trim().length > 0
-                  ? args.bookId
-                  : targetBookId;
-                const eventChapter = typeof args?.chapterNumber === "number" && Number.isInteger(args.chapterNumber)
-                  ? args.chapterNumber
-                  : explicitAuditChapter;
-                if (eventBookId && typeof eventChapter === "number" && eventChapter > 0) {
-                  broadcast("audit:start", { bookId: eventBookId, chapter: eventChapter });
-                }
-              }
->>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
 
             await clearRewriteImpactNotes({
               state,
@@ -7576,7 +7417,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 baseline: rewriteConsistencyBaseline,
               });
             }
-<<<<<<< HEAD
             const rewriteImpact = mode === "rewrite"
               ? await markDownstreamChaptersForReview({
                 state,
@@ -8759,50 +8599,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   content: [{ type: "text", text: repairSummary }],
                 },
               });
-=======
-            if (event.type === "tool_execution_end") {
-              const exec = collectedToolExecs.find(t => t.id === event.toolCallId);
-              const execArgs = exec?.args;
-              const execAgent = exec?.agent;
-              if (exec) {
-                exec.status = event.isError ? "error" : "completed";
-                exec.completedAt = Date.now();
-                exec.stages = exec.stages?.map(s => ({ ...s, status: "completed" as const }));
-                if (event.isError) exec.error = extractToolError(event.result);
-                else exec.result = summarizeResult(event.result);
-              }
-              if (event.toolName === "sub_agent" && execAgent === "auditor") {
-                explicitAuditToolCalled = explicitAuditToolCalled || explicitAuditChapter !== null;
-                const eventBookId = typeof execArgs?.bookId === "string" && execArgs.bookId.trim().length > 0
-                  ? execArgs.bookId
-                  : targetBookId;
-                const parsedReport = parseAuditToolReport(event.result);
-                if (parsedReport) {
-                  latestAuditReport = parsedReport;
-                }
-                const eventChapter = parsedReport?.chapterNumber
-                  ?? (typeof execArgs?.chapterNumber === "number" && Number.isInteger(execArgs.chapterNumber)
-                    ? execArgs.chapterNumber
-                    : explicitAuditChapter);
-                if (eventBookId && typeof eventChapter === "number" && eventChapter > 0) {
-                  if (event.isError) {
-                    broadcast("audit:error", {
-                      bookId: eventBookId,
-                      chapter: eventChapter,
-                      error: extractToolError(event.result),
-                    });
-                  } else if (parsedReport) {
-                    broadcast("audit:complete", {
-                      bookId: eventBookId,
-                      chapter: eventChapter,
-                      passed: parsedReport.passed,
-                      issueCount: parsedReport.issueCount,
-                      summary: parsedReport.summary,
-                    });
-                  }
-                }
-              }
->>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
               broadcast("tool:end", {
                 sessionId: streamSessionId,
                 runId,
@@ -9345,7 +9141,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             response: message,
             runId,
           },
-<<<<<<< HEAD
           409,
         );
       }
@@ -9518,12 +9313,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           );
         }
       }
-=======
-        },
-        effectiveInstruction,
-        initialMessages,
-      );
->>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
 
       // Persist user + assistant messages to BookSession
       bookSession = appendBookSessionMessage(bookSession, {
@@ -9703,7 +9492,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
 
       return c.json({
-<<<<<<< HEAD
         response: result.responseText,
         runId,
         ...(destructiveInstructionRequested ? { destructive: true } : {}),
@@ -9741,9 +9529,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               },
             }
           : {}),
-=======
-        response: responseText,
->>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
         session: {
           sessionId: bookSession.sessionId,
           ...(bookSession.bookId ? { activeBookId: bookSession.bookId } : {}),
@@ -9823,7 +9608,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.post("/api/v1/books/:id/audit/:chapter", async (c) => {
     const id = c.req.param("id");
     const chapterNum = parseInt(c.req.param("chapter"), 10);
-<<<<<<< HEAD
     try {
       const currentConfig = await loadCurrentProjectConfig();
       const autoReviewPolicy = resolveAutoReviewPolicy(currentConfig);
@@ -9957,13 +9741,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       broadcast("audit:error", { bookId: id, chapter: chapterNum, error: String(e) });
       return c.json({ error: String(e) }, 500);
-=======
-    const outcome = await runChapterAuditWithEvents(id, chapterNum);
-    if (!outcome.ok) {
-      return c.json({ error: outcome.error }, outcome.status);
->>>>>>> 337d73d47aa79ea774bbc14d4afb8129d510f519
     }
-    return c.json(outcome.result);
   });
 
   // --- Revise ---
@@ -10958,6 +10736,137 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       broadcast("fanfic:refresh:error", { bookId: id, error: String(e) });
       return c.json({ error: String(e) }, 500);
     }
+  });
+
+  // --- Chapter Plans ---
+
+  app.get("/api/v1/books/:id/chapter-plans", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const data = JSON.parse(raw);
+      const plans = Array.isArray(data.plans) ? data.plans : [];
+      return c.json({ count: plans.length, plans });
+    } catch {
+      return c.json({ count: 0, plans: [] });
+    }
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/generate-batch", async (c) => {
+    return c.json({ error: "Not implemented: use agent workflow instead" }, 501);
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/precheck-generate", async (c) => {
+    return c.json({ error: "Not implemented" }, 501);
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/fill-missing", async (c) => {
+    return c.json({ error: "Not implemented: use agent workflow instead" }, 501);
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/backfill-from-chapter", async (c) => {
+    return c.json({ error: "Not implemented: use agent workflow instead" }, 501);
+  });
+
+  app.put("/api/v1/books/:id/chapter-plans/:num", async (c) => {
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const body = await c.req.json();
+    const bookDir = state.bookDir(id);
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const data = JSON.parse(raw);
+      const plans = Array.isArray(data.plans) ? data.plans : [];
+      const idx = plans.findIndex((p: any) => p.chapterNumber === num);
+      const updated = { ...body, chapterNumber: num, updatedAt: new Date().toISOString() };
+      if (idx >= 0) {
+        plans[idx] = { ...plans[idx], ...updated };
+      } else {
+        updated.createdAt = new Date().toISOString();
+        plans.push(updated);
+      }
+      await writeFile(plansPath, JSON.stringify({ plans }, null, 2), "utf-8");
+      return c.json({ ok: true, plan: updated });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/:num/approve", async (c) => {
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const bookDir = state.bookDir(id);
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const data = JSON.parse(raw);
+      const plans = Array.isArray(data.plans) ? data.plans : [];
+      const idx = plans.findIndex((p: any) => p.chapterNumber === num);
+      if (idx < 0) return c.json({ error: "Chapter plan not found" }, 404);
+      plans[idx] = { ...plans[idx], status: "approved", updatedAt: new Date().toISOString() };
+      await writeFile(plansPath, JSON.stringify({ plans }, null, 2), "utf-8");
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/:num/lock-fields", async (c) => {
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const { fields } = await c.req.json();
+    const bookDir = state.bookDir(id);
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const data = JSON.parse(raw);
+      const plans = Array.isArray(data.plans) ? data.plans : [];
+      const idx = plans.findIndex((p: any) => p.chapterNumber === num);
+      if (idx < 0) return c.json({ error: "Chapter plan not found" }, 404);
+      plans[idx] = { ...plans[idx], lockedFields: Array.isArray(fields) ? fields : [], updatedAt: new Date().toISOString() };
+      await writeFile(plansPath, JSON.stringify({ plans }, null, 2), "utf-8");
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/:num/unlock-fields", async (c) => {
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const bookDir = state.bookDir(id);
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const data = JSON.parse(raw);
+      const plans = Array.isArray(data.plans) ? data.plans : [];
+      const idx = plans.findIndex((p: any) => p.chapterNumber === num);
+      if (idx < 0) return c.json({ error: "Chapter plan not found" }, 404);
+      plans[idx] = { ...plans[idx], lockedFields: [], updatedAt: new Date().toISOString() };
+      await writeFile(plansPath, JSON.stringify({ plans }, null, 2), "utf-8");
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/:num/optimize", async (c) => {
+    return c.json({ error: "Not implemented: AI optimization requires agent" }, 501);
+  });
+
+  app.get("/api/v1/books/:id/chapter-plans/:num/history", async (c) => {
+    return c.json({ versions: [] });
+  });
+
+  app.get("/api/v1/books/:id/chapter-plans/:num/diff", async (c) => {
+    return c.json({ left: null, right: null, diff: null });
+  });
+
+  app.post("/api/v1/books/:id/chapter-plans/:num/rollback", async (c) => {
+    return c.json({ error: "Not implemented" }, 501);
   });
 
   // --- Radar Scan ---

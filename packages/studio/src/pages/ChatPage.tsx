@@ -18,7 +18,6 @@ import {
 } from "../components/ai-elements/reasoning";
 import { ChatMessage } from "../components/chat/ChatMessage";
 import { QuickActions } from "../components/chat/QuickActions";
-import { ExecutionPanel } from "../components/chat/ExecutionPanel";
 import {
   Loader2,
   BotMessageSquare,
@@ -40,11 +39,6 @@ import {
   resolveModelSelection,
   setBookCreateSessionId,
 } from "./chat-page-state";
-import {
-  buildExecutionPanelStorageKey,
-  pickLatestAssistantToolExecutions,
-  readExecutionPanelCollapsedFromStorage,
-} from "./chat-execution-panel";
 
 // -- Types --
 
@@ -174,7 +168,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
         if (msg) setCreateProgress(msg);
       } catch { /* ignore */ }
     });
-    return () => { es.close(); };
+  return () => { es.close(); };
   }, [bookCreating, setCreateProgress]);
 
   // Entering a book loads its latest session; book-create mode persists its orphan session in localStorage.
@@ -222,7 +216,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
       }
     })();
 
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, [activeBookId, activateSession, createSession, loadSessionDetail, loadSessionList]);
@@ -245,7 +239,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
       void stopMessage(activeSessionId);
     };
     window.addEventListener("keydown", onEscStop);
-    return () => window.removeEventListener("keydown", onEscStop);
+  return () => window.removeEventListener("keydown", onEscStop);
   }, [activeSessionId, canStop, stopMessage, stopping]);
 
   const onCreateBook = async () => {
@@ -266,52 +260,9 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
     ? "\u544A\u8BC9\u6211\u4F60\u60F3\u5199\u4EC0\u4E48\u2014\u2014\u9898\u6750\u3001\u4E16\u754C\u89C2\u3001\u4E3B\u89D2\u3001\u6838\u5FC3\u51B2\u7A81"
     : "Tell me what you want to write \u2014 genre, world, protagonist, core conflict";
 
-  const executionPanelStorageKey = useMemo(
-    () => buildExecutionPanelStorageKey(activeSessionId),
-    [activeSessionId],
-  );
-  const [executionPanelCollapsed, setExecutionPanelCollapsed] = useState<boolean>(() => {
-    if (typeof window === "undefined") return true;
-    return readExecutionPanelCollapsedFromStorage(
-      (key) => window.localStorage.getItem(key),
-      buildExecutionPanelStorageKey(null),
-      true,
-    );
-  });
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    setExecutionPanelCollapsed(
-      readExecutionPanelCollapsedFromStorage(
-        (key) => window.localStorage.getItem(key),
-        executionPanelStorageKey,
-        true,
-      ),
-    );
-  }, [executionPanelStorageKey]);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(executionPanelStorageKey, executionPanelCollapsed ? "1" : "0");
-  }, [executionPanelCollapsed, executionPanelStorageKey]);
-
-  const panelExecutions = useMemo(
-    () => pickLatestAssistantToolExecutions(messages),
-    [messages],
-  );
-
   return (
     <div className="flex flex-col h-full flex-1 min-w-0">
-      {panelExecutions.length > 0 && (
-        <div className="shrink-0 px-3 pt-2 sm:px-4 sm:pt-3">
-          <div className="sticky top-2 z-20 mx-auto w-full max-w-[min(1600px,calc(100vw-1rem))] sm:max-w-[min(1600px,calc(100vw-2rem))]">
-            <ExecutionPanel
-              executions={panelExecutions}
-              collapsed={executionPanelCollapsed}
-              onCollapsedChange={setExecutionPanelCollapsed}
-            />
-          </div>
-        </div>
-      )}
-      {/* Message scroll area */}
+            {/* Message scroll area */}
       <div
         ref={scrollRef}
         className="flex-1 overflow-y-auto px-4 py-6"
@@ -339,7 +290,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                       content: msg.content,
                       hasAudit: Boolean(msg.audit),
                     });
-                    return (
+                  return (
                       <div className="space-y-2">
                         {!!msg.thinking && (
                           <div className="rounded-xl border border-border/40 bg-card/40 px-3 py-2">
@@ -595,7 +546,7 @@ function ModelPickerContent({
             </div>
             {group.models.map((m) => {
               const isSelected = selectedModel === m.id && selectedService === group.service;
-              return (
+            return (
                 <DropdownMenuItem
                   key={`${group.service}:${m.id}`}
                   onClick={() => onSelect(m.id, group.service)}

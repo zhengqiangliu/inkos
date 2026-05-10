@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import type { Theme } from "../../hooks/use-theme";
 import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
-import { useChatStore } from "../../store/chat";
+import { chatSelectors, useChatStore } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
 import { PanelRightClose, PanelRightOpen, ArrowLeft, Loader2, Pencil, Save, X } from "lucide-react";
 import { Streamdown } from "streamdown";
@@ -22,6 +22,13 @@ import {
 } from "../../utils/book-rules-policy";
 import { estimateAuditScoreFromIssueTexts, scoreBadgeClass } from "../../utils/audit-score";
 import { countChapterLengthByLanguage } from "../../utils/chapter-length";
+import { ExecutionPanel } from "./ExecutionPanel";
+import { ChapterPlansSection } from "../sidebar/ChapterPlansSection";
+import {
+  buildExecutionPanelStorageKey,
+  pickLatestAssistantToolExecutions,
+  readExecutionPanelCollapsedFromStorage,
+} from "../../pages/chat-execution-panel";
 
 export interface BookSidebarProps {
   readonly bookId: string;
@@ -44,9 +51,11 @@ const FOUNDATION_LABELS: Record<string, string> = {
 const streamdownPlugins = { cjk };
 const RIGHT_PANEL_TAB_STORAGE_PREFIX = "studio.book.right-tab.";
 
-type RightPanelTab = "chapters" | "outline" | "settings" | "assets";
+type RightPanelTab = "chapter-design" | "execution" | "chapters" | "outline" | "settings" | "assets";
 
 const RIGHT_PANEL_TABS: ReadonlyArray<{ id: RightPanelTab; label: string; compactLabel: string }> = [
+  { id: "execution", label: "执行阶段", compactLabel: "执行" },
+    { id: "chapter-design", label: "分章设计", compactLabel: "设计" },
   { id: "chapters", label: "章节", compactLabel: "章节" },
   { id: "outline", label: "大纲", compactLabel: "大纲" },
   { id: "settings", label: "设定", compactLabel: "设定" },
@@ -580,6 +589,38 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
   const [activeOp, setActiveOp] = useState<string | null>(null);
   const [chapterFilter, setChapterFilter] = useState<"all" | "pending-review" | "failed">("all");
   const bookDataVersion = useChatStore((s) => s.bookDataVersion);
+  const messages = useChatStore(chatSelectors.activeMessages);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const panelExecutions = useMemo(
+    () => pickLatestAssistantToolExecutions(messages),
+    [messages],
+  );
+  const executionPanelStorageKey = useMemo(
+    () => buildExecutionPanelStorageKey(activeSessionId),
+    [activeSessionId],
+  );
+  const [executionPanelCollapsed, setExecutionPanelCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return readExecutionPanelCollapsedFromStorage(
+      (key) => window.localStorage.getItem(key),
+      buildExecutionPanelStorageKey(null),
+      true,
+    );
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setExecutionPanelCollapsed(
+      readExecutionPanelCollapsedFromStorage(
+        (key) => window.localStorage.getItem(key),
+        executionPanelStorageKey,
+        true,
+      ),
+    );
+  }, [executionPanelStorageKey]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(executionPanelStorageKey, executionPanelCollapsed ? "1" : "0");
+  }, [executionPanelCollapsed, executionPanelStorageKey]);
   const [failedChapterCount, setFailedChapterCount] = useState(0);
   const [unpublishedChapterCount, setUnpublishedChapterCount] = useState(0);
 
@@ -685,6 +726,20 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
   }, [activeOp, failedChapterCount, unpublishedChapterCount]);
 
   const renderTabPanel = () => {
+    if (activeTab === "chapter-design") {
+      return <ChapterPlansSection bookId={bookId} />;
+    }
+    if (activeTab === "execution") {
+      return panelExecutions.length > 0 ? (
+        <ExecutionPanel
+          executions={panelExecutions}
+          collapsed={executionPanelCollapsed}
+          onCollapsedChange={setExecutionPanelCollapsed}
+        />
+      ) : (
+        <p className="text-xs text-muted-foreground px-1">暂无执行记录</p>
+      );
+    }
     if (activeTab === "chapters") {
       return (
         <>

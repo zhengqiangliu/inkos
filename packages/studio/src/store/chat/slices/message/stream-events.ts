@@ -485,7 +485,7 @@ function updateExecutionAutoReviewProgress(args: {
       runId: args.runId,
       toolId: `review-${args.runId}`,
       tool: "sub_agent",
-      agent: progress.phase === "revise" ? "reviser" : "auditor",
+      agent: progress?.phase === "revise" ? "reviser" : "auditor",
     });
     parts = ensured.parts;
     targetToolId = ensured.toolId;
