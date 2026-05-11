@@ -91,6 +91,26 @@ export interface PipelineConfig {
     readonly text: string;
     readonly mode: ReviseMode;
   }) => void;
+  readonly onReviserThinkingDelta?: (payload: {
+    readonly bookId: string;
+    readonly chapterNumber: number;
+    readonly mode: ReviseMode;
+    readonly text: string;
+  }) => void;
+  readonly onReviserThinkingEnd?: (payload: {
+    readonly bookId: string;
+    readonly chapterNumber: number;
+    readonly mode: ReviseMode;
+  }) => void;
+  readonly onAuditorTextDelta?: (payload: {
+    readonly bookId: string;
+    readonly chapterNumber: number;
+    readonly text: string;
+  }) => void;
+  readonly onAuditorThinkingEnd?: (payload: {
+    readonly bookId: string;
+    readonly chapterNumber: number;
+  }) => void;
   readonly onWriteNextAuditStart?: (payload: {
     readonly bookId: string;
     readonly chapterNumber: number;
@@ -1366,6 +1386,12 @@ export class PipelineRunner {
       chapterNumber: targetChapter,
       language,
       lengthSpec,
+      onThinkingDelta: (text) => {
+        this.config.onAuditorTextDelta?.({ bookId, chapterNumber: targetChapter, text });
+      },
+      onThinkingEnd: () => {
+        this.config.onAuditorThinkingEnd?.({ bookId, chapterNumber: targetChapter });
+      },
     });
     const result: AuditResult = evaluation.auditResult;
 
@@ -1512,6 +1538,12 @@ export class PipelineRunner {
         chapterNumber: targetChapter,
         language,
         lengthSpec,
+        onThinkingDelta: (text) => {
+          this.config.onAuditorTextDelta?.({ bookId, chapterNumber: targetChapter, text });
+        },
+        onThinkingEnd: () => {
+          this.config.onAuditorThinkingEnd?.({ bookId, chapterNumber: targetChapter });
+        },
         auditOptions: reviseAuditControlInputWithPreflight
           ? {
               chapterIntent: reviseAuditControlInputWithPreflight.chapterIntent,
@@ -1569,6 +1601,13 @@ export class PipelineRunner {
               ruleStack: reviseAuditControlInputWithPreflight.ruleStack,
               lengthSpec,
               reviseContext: options?.reviseContext,
+              onThinkingDelta: (text) => {
+                if (!text) return;
+                this.config.onReviserThinkingDelta?.({ bookId, chapterNumber: targetChapter, mode, text });
+              },
+              onThinkingEnd: () => {
+                this.config.onReviserThinkingEnd?.({ bookId, chapterNumber: targetChapter, mode });
+              },
               onRevisedContentDelta: (text) => {
                 if (!text) return;
                 sawReviserDelta = true;
@@ -1594,6 +1633,13 @@ export class PipelineRunner {
               userBrief: options?.userBrief,
               lengthSpec,
               reviseContext: options?.reviseContext,
+              onThinkingDelta: (text) => {
+                if (!text) return;
+                this.config.onReviserThinkingDelta?.({ bookId, chapterNumber: targetChapter, mode, text });
+              },
+              onThinkingEnd: () => {
+                this.config.onReviserThinkingEnd?.({ bookId, chapterNumber: targetChapter, mode });
+              },
               onRevisedContentDelta: (text) => {
                 if (!text) return;
                 sawReviserDelta = true;
@@ -1677,6 +1723,12 @@ export class PipelineRunner {
         chapterNumber: targetChapter,
         language,
         lengthSpec,
+        onThinkingDelta: (text) => {
+          this.config.onAuditorTextDelta?.({ bookId, chapterNumber: targetChapter, text });
+        },
+        onThinkingEnd: () => {
+          this.config.onAuditorThinkingEnd?.({ bookId, chapterNumber: targetChapter });
+        },
         auditOptions: reviseAuditControlInputWithPreflight
           ? {
               temperature: 0,
@@ -2082,6 +2134,12 @@ export class PipelineRunner {
       initialUsage: totalUsage,
       createReviser: () => new ReviserAgent(this.agentCtxFor("reviser", bookId)),
       auditor,
+      onThinkingDelta: (text) => {
+        this.config.onAuditorTextDelta?.({ bookId, chapterNumber, text });
+      },
+      onThinkingEnd: () => {
+        this.config.onAuditorThinkingEnd?.({ bookId, chapterNumber });
+      },
       normalizeDraftLengthIfNeeded: (chapterContent) => this.normalizeDraftLengthIfNeeded({
         bookId,
         chapterNumber,
@@ -4219,6 +4277,8 @@ ${matrix}`,
     chapterNumber: number;
     language: LengthLanguage;
     lengthSpec?: LengthSpec;
+    onThinkingDelta?: (text: string) => void;
+    onThinkingEnd?: () => void;
     auditOptions?: {
       temperature?: number;
       chapterIntent?: string;
@@ -4236,7 +4296,11 @@ ${matrix}`,
       params.chapterContent,
       params.chapterNumber,
       params.book.genre,
-      params.auditOptions,
+      {
+        ...params.auditOptions,
+        onThinkingDelta: params.onThinkingDelta,
+        onThinkingEnd: params.onThinkingEnd,
+      },
     );
     const aiTells = analyzeAITells(params.chapterContent, params.language);
     const sensitiveResult = analyzeSensitiveWords(params.chapterContent, undefined, params.language);

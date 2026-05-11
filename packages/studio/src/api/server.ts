@@ -4391,6 +4391,42 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           text: payload.text,
         });
       },
+      onReviserThinkingDelta: (payload) => {
+        broadcast("thinking:delta", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+          text: payload.text,
+        });
+      },
+      onReviserThinkingEnd: (payload) => {
+        broadcast("thinking:end", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          mode: payload.mode,
+        });
+      },
+      onAuditorTextDelta: (payload) => {
+        broadcast("thinking:delta", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          text: payload.text,
+        });
+      },
+      onAuditorThinkingEnd: (payload) => {
+        broadcast("thinking:end", {
+          ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
+          ...(overrides?.runIdForSSE ? { runId: overrides.runIdForSSE } : {}),
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+        });
+      },
       onWriteNextAuditStart: (payload) => {
         broadcast("audit:start", {
           ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),

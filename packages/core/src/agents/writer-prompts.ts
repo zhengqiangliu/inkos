@@ -2,6 +2,7 @@ import type { BookConfig, FanficMode } from "../models/book.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { LengthSpec } from "../models/length-governance.js";
+import type { ChapterPlan } from "../models/chapter-plan.js";
 import { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeInstructions } from "./fanfic-prompt-sections.js";
 import { buildEnglishCoreRules, buildEnglishAntiAIRules, buildEnglishCharacterMethod, buildEnglishPreWriteChecklist, buildEnglishGenreIntro } from "./en-prompt-sections.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
@@ -30,6 +31,43 @@ function shouldInjectOpeningThreeChaptersRules(
 // Public API
 // ---------------------------------------------------------------------------
 
+function buildChapterPlanBlock(plan: ChapterPlan, isEnglish: boolean): string {
+  const items: string[] = [];
+  if (isEnglish) {
+    items.push("## Chapter Design Constraints");
+    items.push(`- Highlight: ${plan.highlight}`);
+    items.push(`- Core Conflict: ${plan.coreConflict}`);
+    items.push(`- Plot & Conflict: ${plan.plotAndConflict}`);
+    items.push(`- Ending Hook: ${plan.endingHook}`);
+    if (plan.endingHook) items.push(`- Required ending hook: ${plan.endingHook}`);
+    if (plan.hookAssignment.length > 0) {
+      items.push("- Hooks to resolve this chapter:");
+      for (const h of plan.hookAssignment) items.push(`  - ${h}`);
+    }
+    if (plan.requiredRecoverHooks.length > 0) {
+      items.push("- Required recovery hooks:");
+      for (const h of plan.requiredRecoverHooks) items.push(`  - ${h}`);
+    }
+    items.push(`- Max new hooks to plant: ${plan.maxNewHooks}`);
+  } else {
+    items.push("## 分章设计约束");
+    items.push(`- 核心看点：${plan.highlight}`);
+    items.push(`- 核心冲突：${plan.coreConflict}`);
+    items.push(`- 剧情与冲突：${plan.plotAndConflict}`);
+    if (plan.endingHook) items.push(`- 结尾钩子（必须实现）：${plan.endingHook}`);
+    if (plan.hookAssignment.length > 0) {
+      items.push("- 本章需回收的伏笔：");
+      for (const h of plan.hookAssignment) items.push(`  - ${h}`);
+    }
+    if (plan.requiredRecoverHooks.length > 0) {
+      items.push("- 强制回收伏笔：");
+      for (const h of plan.requiredRecoverHooks) items.push(`  - ${h}`);
+    }
+    items.push(`- 本章最多新增伏笔数：${plan.maxNewHooks}`);
+  }
+  return items.join("\n");
+}
+
 export function buildWriterSystemPrompt(
   book: BookConfig,
   genreProfile: GenreProfile,
@@ -44,6 +82,7 @@ export function buildWriterSystemPrompt(
   languageOverride?: "zh" | "en",
   inputProfile: "legacy" | "governed" = "legacy",
   lengthSpec?: LengthSpec,
+  chapterPlan?: ChapterPlan,
 ): string {
   const isEnglish = (languageOverride ?? genreProfile.language) === "en";
   const governed = inputProfile === "governed";
@@ -57,6 +96,7 @@ export function buildWriterSystemPrompt(
     bookRules,
     governed,
   );
+  const chapterPlanBlock = chapterPlan ? buildChapterPlanBlock(chapterPlan, isEnglish) : "";
 
   const sections = isEnglish
     ? [
@@ -76,6 +116,7 @@ export function buildWriterSystemPrompt(
         fanficContext ? buildCharacterVoiceProfiles(fanficContext.fanficCanon) : "",
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
         !governed ? buildEnglishPreWriteChecklist(book, genreProfile) : "",
+        chapterPlanBlock,
         outputSection,
       ]
     : [
@@ -100,6 +141,7 @@ export function buildWriterSystemPrompt(
         fanficContext ? buildCharacterVoiceProfiles(fanficContext.fanficCanon) : "",
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
         !governed ? buildPreWriteChecklist(book, genreProfile) : "",
+        chapterPlanBlock,
         outputSection,
       ];
 

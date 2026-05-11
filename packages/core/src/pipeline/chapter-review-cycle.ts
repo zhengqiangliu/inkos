@@ -371,6 +371,8 @@ export async function runChapterReviewCycle(params: {
       },
     ) => Promise<ReviseOutput>;
   };
+  readonly onThinkingDelta?: (text: string) => void;
+  readonly onThinkingEnd?: () => void;
   readonly auditor: {
     auditChapter: (
       bookDir: string,
@@ -382,6 +384,8 @@ export async function runChapterReviewCycle(params: {
         chapterIntent?: string;
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
+        onThinkingDelta?: (text: string) => void;
+        onThinkingEnd?: () => void;
       },
     ) => Promise<AuditResult>;
   };
@@ -514,7 +518,11 @@ export async function runChapterReviewCycle(params: {
     finalContent,
     params.chapterNumber,
     params.book.genre,
-    params.reducedControlInput,
+    params.reducedControlInput
+      ? { ...params.reducedControlInput, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd }
+      : params.onThinkingDelta || params.onThinkingEnd
+        ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd }
+        : undefined,
   );
   totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
   const aiTellsResult = params.analyzeAITells(finalContent);
@@ -638,8 +646,8 @@ export async function runChapterReviewCycle(params: {
       params.chapterNumber,
       params.book.genre,
       params.reducedControlInput
-        ? { ...params.reducedControlInput, temperature: 0 }
-        : { temperature: 0 },
+        ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd }
+        : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}) },
     );
     totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
     const reAuditReturnedNoIssues = Array.isArray(reAudit.issues) && reAudit.issues.length === 0;

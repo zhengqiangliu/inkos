@@ -28,6 +28,9 @@ export const CHAPTER_DESIGN_SYSTEM_PROMPT_ZH = `你是一位资深小说分章�
 - **plotAndConflict**: 剧情与冲突（详细描述本章剧情走向和冲突推进，包含具体事件和冲突点，100-200字）
 - **emotionalTone**: 情感基调（紧张/温情/悬疑/热血/压抑等，1-3个字）
 - **endingHook**: 结尾钩子（本章结尾留下的悬念或转折，吸引读者继续阅读，30-50字）
+- **hookAssignment**: 伏笔回收分配（本章计划回收的伏笔，用列表格式，每行一条）
+- **requiredRecoverHooks**: 强制回收伏笔（必须在回收的逾期或高优伏笔，不可跳过）
+- **maxNewHooks**: 最大新增伏笔数（本章最多埋下的新伏笔数量，推荐1-3，不可超过5）
 
 ## 批量生成策略
 
@@ -50,6 +53,12 @@ plotAndConflict: |
   剧情与冲突详细描述
 emotionalTone: 情感基调
 endingHook: 结尾钩子
+hookAssignment:
+  - 回收伏笔1描述
+  - 回收伏笔2描述
+requiredRecoverHooks:
+  - 强制回收伏笔描述
+maxNewHooks: 3
 ---
 
 不要输出除了 YAML 之外的任何解释性文字。`;
@@ -77,6 +86,9 @@ Each chapter design contains:
 - **plotAndConflict**: Plot and conflict (detailed description of this chapter's plot direction and conflict advancement, 100-200 chars)
 - **emotionalTone**: Emotional tone (tense/warm/suspenseful/passionate/depressing, 1-3 words)
 - **endingHook**: Ending hook (the cliffhanger or twist at the end of this chapter, 30-50 chars)
+- **hookAssignment**: Hook recovery assignment (hooks planned to resolve in this chapter, list format, one per line)
+- **requiredRecoverHooks**: Required recovery hooks (overdue or high-priority hooks that must be recovered, cannot skip)
+- **maxNewHooks**: Maximum new hooks to plant (max number of new hooks to plant in this chapter, recommended 1-3, max 5)
 
 ## Batch Generation Strategy
 
@@ -99,6 +111,12 @@ plotAndConflict: |
   Detailed plot and conflict description
 emotionalTone: Emotional tone
 endingHook: Ending hook
+hookAssignment:
+  - Hook recovery description 1
+  - Hook recovery description 2
+requiredRecoverHooks:
+  - Required hook recovery description
+maxNewHooks: 3
 ---
 
 Do not output any explanatory text other than YAML.`;
@@ -206,11 +224,7 @@ export function buildChapterDesignUserMessage(
  * Parse YAML-like output from the LLM into structured chapter design objects.
  * Handles the --- delimiter format.
  */
-export function parseChapterDesignOutput(
-  output: string,
-  startChapter: number,
-  count: number,
-): Array<{
+export interface ParsedChapterDesign {
   chapterNumber: number;
   chapterName: string;
   highlight: string;
@@ -218,16 +232,17 @@ export function parseChapterDesignOutput(
   plotAndConflict: string;
   emotionalTone: string;
   endingHook: string;
-}> {
-  const chapters: Array<{
-    chapterNumber: number;
-    chapterName: string;
-    highlight: string;
-    coreConflict: string;
-    plotAndConflict: string;
-    emotionalTone: string;
-    endingHook: string;
-  }> = [];
+  hookAssignment: readonly string[];
+  requiredRecoverHooks: readonly string[];
+  maxNewHooks: number;
+}
+
+export function parseChapterDesignOutput(
+  output: string,
+  startChapter: number,
+  count: number,
+): Array<ParsedChapterDesign> {
+  const chapters: Array<ParsedChapterDesign> = [];
 
   // Split by YAML document separators
   const documents = output.split(/^---$/m).filter((doc) => doc.trim());
@@ -243,18 +258,12 @@ export function parseChapterDesignOutput(
   return chapters;
 }
 
+const LIST_FIELDS = new Set(["hookAssignment", "requiredRecoverHooks"]);
+
 function parseYamlDocument(
   doc: string,
   expectedChapter: number,
-): {
-  chapterNumber: number;
-  chapterName: string;
-  highlight: string;
-  coreConflict: string;
-  plotAndConflict: string;
-  emotionalTone: string;
-  endingHook: string;
-} | null {
+): ParsedChapterDesign | null {
   const lines = doc.split("\n");
   let chapterNumber = expectedChapter;
   let chapterName = "";
@@ -263,66 +272,90 @@ function parseYamlDocument(
   let plotAndConflict = "";
   let emotionalTone = "";
   let endingHook = "";
+  const hookAssignment: string[] = [];
+  const requiredRecoverHooks: string[] = [];
+  let maxNewHooks = 3;
 
   let currentKey: string | null = null;
   let currentValue: string[] = [];
+  let currentList: string[] | null = null;
+  let inBlockScalar = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed === "---") continue;
 
+    // YAML list item
+    const listMatch = trimmed.match(/^-\s+(.*)$/);
+    if (listMatch && currentList !== null) {
+      currentList.push(listMatch[1]!.trim());
+      continue;
+    }
+
+    // Flush previous key
+    if (currentKey && currentList === null) {
+      const value = currentValue.join("\n").trim();
+      switch (currentKey) {
+        case "chapterNumber":
+          chapterNumber = parseInt(value, 10) || expectedChapter;
+          break;
+        case "chapterName":
+          chapterName = value;
+          break;
+        case "highlight":
+          highlight = value;
+          break;
+        case "coreConflict":
+          coreConflict = value;
+          break;
+        case "plotAndConflict":
+          plotAndConflict = value;
+          break;
+        case "emotionalTone":
+          emotionalTone = value;
+          break;
+        case "endingHook":
+          endingHook = value;
+          break;
+        case "maxNewHooks":
+          maxNewHooks = Math.max(0, Math.min(5, parseInt(value, 10) || 3));
+          break;
+      }
+    }
+
     // Check for key: value pattern
     const keyMatch = trimmed.match(/^(\w+):\s*(.*)$/);
     if (keyMatch) {
-      // Save previous key
-      if (currentKey) {
-        const value = currentValue.join("\n").trim();
-        switch (currentKey) {
-          case "chapterNumber":
-            chapterNumber = parseInt(value, 10) || expectedChapter;
-            break;
-          case "chapterName":
-            chapterName = value;
-            break;
-          case "highlight":
-            highlight = value;
-            break;
-          case "coreConflict":
-            coreConflict = value;
-            break;
-          case "plotAndConflict":
-            plotAndConflict = value;
-            break;
-          case "emotionalTone":
-            emotionalTone = value;
-            break;
-          case "endingHook":
-            endingHook = value;
-            break;
-        }
-      }
       currentKey = keyMatch[1]!;
       currentValue = keyMatch[2] ? [keyMatch[2]] : [];
+      inBlockScalar = false;
+      currentList = null;
 
-      // Handle empty value with next lines
-      if (!keyMatch[2]) continue;
-
-      // Single line value
-      const singleValue = keyMatch[2]!.trim();
-      if (singleValue && !singleValue.startsWith("|")) {
-        // Single line, already handled
+      if (LIST_FIELDS.has(currentKey)) {
+        currentList = currentKey === "hookAssignment" ? hookAssignment : requiredRecoverHooks;
+      } else if (!keyMatch[2]) {
+        // Empty value, wait for next lines
+        continue;
+      } else {
+        // Single line value
+        const singleValue = keyMatch[2]!.trim();
+        if (singleValue.startsWith("|")) {
+          inBlockScalar = true;
+          const rest = singleValue.slice(1).trim();
+          if (rest) currentValue = [rest];
+        }
       }
-    } else if (currentKey === "plotAndConflict" && trimmed.startsWith("|")) {
-      // Multi-line block scalar
-      currentValue.push(trimmed.slice(1).trim());
-    } else if (currentKey) {
+    } else if (currentKey && currentList === null && (inBlockScalar || trimmed.startsWith("|"))) {
+      // Multi-line block scalar continuation
+      currentValue.push(inBlockScalar ? trimmed : trimmed.slice(1).trim());
+    } else if (currentKey && currentList === null) {
       // Continuation of previous value
       currentValue.push(trimmed);
     }
   }
 
   // Save last key
-  if (currentKey) {
+  if (currentKey && currentList === null) {
     const value = currentValue.join("\n").trim();
     switch (currentKey) {
       case "chapterNumber":
@@ -346,6 +379,9 @@ function parseYamlDocument(
       case "endingHook":
         endingHook = value;
         break;
+      case "maxNewHooks":
+        maxNewHooks = Math.max(0, Math.min(5, parseInt(value, 10) || 3));
+        break;
     }
   }
 
@@ -361,5 +397,8 @@ function parseYamlDocument(
     plotAndConflict,
     emotionalTone,
     endingHook,
+    hookAssignment,
+    requiredRecoverHooks,
+    maxNewHooks,
   };
 }

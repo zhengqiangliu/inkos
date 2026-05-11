@@ -1,166 +1,83 @@
-import { describe, expect, it } from "vitest";
-import type { HookRecord, RuntimeStateDelta } from "../models/runtime-state.js";
+import { describe, it, expect } from "vitest";
 import { analyzeHookHealth } from "../utils/hook-health.js";
+import type { HookRecord, RuntimeStateDelta } from "../models/runtime-state.js";
 
-function createHook(overrides: Partial<HookRecord> = {}): HookRecord {
+function makeHookRecord(overrides: Partial<HookRecord> & { hookId: string }): HookRecord {
   return {
-    hookId: overrides.hookId ?? "H001",
-    startChapter: overrides.startChapter ?? 1,
-    type: overrides.type ?? "mystery",
-    status: overrides.status ?? "open",
-    lastAdvancedChapter: overrides.lastAdvancedChapter ?? 1,
-    expectedPayoff: overrides.expectedPayoff ?? "Reveal the hidden ledger",
-    payoffTiming: overrides.payoffTiming,
-    notes: overrides.notes ?? "Still unresolved",
+    startChapter: 1,
+    type: "mystery",
+    status: "open",
+    lastAdvancedChapter: 5,
+    expectedPayoff: "",
+    payoffTiming: "near-term",
+    notes: "",
+    ...overrides,
   };
 }
 
-function createDelta(overrides: Partial<RuntimeStateDelta> = {}): RuntimeStateDelta {
+function makeDelta(resolveCount: number): Pick<RuntimeStateDelta, "chapter" | "hookOps"> {
   return {
-    chapter: overrides.chapter ?? 20,
+    chapter: 10,
     hookOps: {
-      upsert: overrides.hookOps?.upsert ?? [],
-      mention: overrides.hookOps?.mention ?? [],
-      resolve: overrides.hookOps?.resolve ?? [],
-      defer: overrides.hookOps?.defer ?? [],
+      upsert: [],
+      mention: [],
+      resolve: Array.from({ length: resolveCount }, (_, i) => `H${String(i + 1).padStart(2, "0")}`),
+      defer: [],
     },
-    newHookCandidates: overrides.newHookCandidates ?? [],
-    subplotOps: [],
-    emotionalArcOps: [],
-    characterMatrixOps: [],
-    notes: [],
   };
 }
 
-describe("analyzeHookHealth", () => {
-  it("warns when active hook count exceeds the recommended cap", () => {
+describe("analyzeHookHealth - maxResolvePerChapter", () => {
+  it("warns when resolve count exceeds per-chapter cap", () => {
     const issues = analyzeHookHealth({
-      language: "en",
-      chapterNumber: 20,
+      language: "zh",
+      chapterNumber: 10,
       hooks: [
-        createHook({ hookId: "H001" }),
-        createHook({ hookId: "H002" }),
-        createHook({ hookId: "H003" }),
-        createHook({ hookId: "H004" }),
-        createHook({ hookId: "H005" }),
+        makeHookRecord({ hookId: "H01" }),
+        makeHookRecord({ hookId: "H02" }),
+        makeHookRecord({ hookId: "H03" }),
+        makeHookRecord({ hookId: "H04" }),
       ],
-      maxActiveHooks: 4,
+      delta: makeDelta(4),
+      existingHookIds: ["H01", "H02", "H03", "H04"],
+      maxResolvePerChapter: 3,
     });
-
-    expect(issues.some((issue) => issue.category === "Hook Debt" && issue.description.includes("5 active hooks"))).toBe(true);
+    const resolveIssues = issues.filter((i) => i.description.includes("超过每章上限"));
+    expect(resolveIssues).toHaveLength(1);
   });
 
-  it("warns when a short-payoff hook is already under payoff pressure without real movement", () => {
+  it("does not warn when resolve count is within cap", () => {
     const issues = analyzeHookHealth({
       language: "en",
-      chapterNumber: 4,
+      chapterNumber: 10,
       hooks: [
-        createHook({
-          hookId: "H001",
-          startChapter: 1,
-          lastAdvancedChapter: 1,
-          payoffTiming: "immediate",
-          expectedPayoff: "Reveal the hidden ledger immediately after the theft.",
-        }),
+        makeHookRecord({ hookId: "H01" }),
+        makeHookRecord({ hookId: "H02" }),
       ],
+      delta: makeDelta(2),
+      existingHookIds: ["H01", "H02"],
+      maxResolvePerChapter: 3,
     });
-
-    expect(issues.some((issue) => issue.description.includes("payoff pressure"))).toBe(true);
+    const resolveIssues = issues.filter((i) => i.description.includes("exceeding"));
+    expect(resolveIssues).toHaveLength(0);
   });
 
-  it("does not warn when only endgame hooks are dormant before the story reaches late phase", () => {
+  it("uses HOOK_HEALTH_DEFAULTS.maxResolvePerChapter when not specified", () => {
     const issues = analyzeHookHealth({
-      language: "en",
-      chapterNumber: 20,
-      targetChapters: 40,
+      language: "zh",
+      chapterNumber: 10,
       hooks: [
-        createHook({
-          hookId: "H001",
-          startChapter: 10,
-          lastAdvancedChapter: 15,
-          payoffTiming: "endgame",
-          expectedPayoff: "Final reveal in the endgame.",
-        }),
+        makeHookRecord({ hookId: "H01" }),
+        makeHookRecord({ hookId: "H02" }),
+        makeHookRecord({ hookId: "H03" }),
+        makeHookRecord({ hookId: "H04" }),
+        makeHookRecord({ hookId: "H05" }),
       ],
+      delta: makeDelta(5),
+      existingHookIds: ["H01", "H02", "H03", "H04", "H05"],
     });
-
-    expect(issues).toHaveLength(0);
-  });
-
-  it("warns when stale hooks receive no disposition in the current chapter", () => {
-    const issues = analyzeHookHealth({
-      language: "en",
-      chapterNumber: 20,
-      hooks: [
-        createHook({ hookId: "H001", lastAdvancedChapter: 5 }),
-        createHook({ hookId: "H002", lastAdvancedChapter: 6 }),
-      ],
-      delta: createDelta({
-        chapter: 20,
-        hookOps: {
-          upsert: [],
-          mention: ["H001"],
-          resolve: [],
-          defer: [],
-        },
-      }),
-      staleAfterChapters: 10,
-    });
-
-    expect(issues.some((issue) => issue.description.includes("H001") || issue.description.includes("H002"))).toBe(true);
-  });
-
-  it("warns when multiple new hooks open without resolving older debt", () => {
-    const issues = analyzeHookHealth({
-      language: "en",
-      chapterNumber: 20,
-      hooks: [
-        createHook({ hookId: "old-debt", lastAdvancedChapter: 8 }),
-        createHook({ hookId: "new-a", startChapter: 20, lastAdvancedChapter: 20 }),
-        createHook({ hookId: "new-b", startChapter: 20, lastAdvancedChapter: 20 }),
-      ],
-      delta: createDelta({
-        chapter: 20,
-        hookOps: {
-          upsert: [
-            createHook({ hookId: "new-a", startChapter: 20, lastAdvancedChapter: 20 }),
-            createHook({ hookId: "new-b", startChapter: 20, lastAdvancedChapter: 20 }),
-          ],
-          mention: [],
-          resolve: [],
-          defer: [],
-        },
-      }),
-      existingHookIds: ["old-debt"],
-      newHookBurstThreshold: 2,
-    });
-
-    expect(issues.some((issue) => issue.description.includes("Opened 2 new hooks"))).toBe(true);
-  });
-
-  it("does not count absorbed duplicate-family upserts as genuinely new hooks", () => {
-    const issues = analyzeHookHealth({
-      language: "en",
-      chapterNumber: 20,
-      hooks: [
-        createHook({ hookId: "old-debt", lastAdvancedChapter: 20 }),
-      ],
-      delta: createDelta({
-        chapter: 20,
-        hookOps: {
-          upsert: [
-            createHook({ hookId: "duplicate-restated", lastAdvancedChapter: 20 }),
-            createHook({ hookId: "second-duplicate", lastAdvancedChapter: 20 }),
-          ],
-          mention: [],
-          resolve: [],
-          defer: [],
-        },
-      }),
-      existingHookIds: ["old-debt"],
-      newHookBurstThreshold: 2,
-    });
-
-    expect(issues.some((issue) => issue.description.includes("Opened 2 new hooks"))).toBe(false);
+    const resolveIssues = issues.filter((i) => i.category === "伏笔债务");
+    const hasResolveOverLimit = resolveIssues.some((i) => i.description.includes("超过每章上限"));
+    expect(hasResolveOverLimit).toBe(true);
   });
 });

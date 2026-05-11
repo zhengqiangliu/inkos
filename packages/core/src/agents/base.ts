@@ -10,6 +10,7 @@ export interface AgentContext {
   readonly bookId?: string;
   readonly logger?: Logger;
   readonly onStreamProgress?: OnStreamProgress;
+  readonly onTextDelta?: (text: string) => void;
 }
 
 export abstract class BaseAgent {
@@ -29,6 +30,7 @@ export abstract class BaseAgent {
   ): Promise<LLMResponse> {
     return chatCompletion(this.ctx.client, this.ctx.model, messages, {
       ...options,
+      onTextDelta: options?.onTextDelta ?? this.ctx.onTextDelta,
       onStreamProgress: this.ctx.onStreamProgress,
     });
   }

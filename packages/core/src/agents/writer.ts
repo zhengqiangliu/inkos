@@ -21,6 +21,7 @@ import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import { buildLengthSpec, countChapterLength } from "../utils/length-metrics.js";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
+import { buildHookDebtHardConstraintBlock } from "../utils/hook-agenda.js";
 import {
   buildGovernedCharacterMatrixWorkingSet,
   buildGovernedHookWorkingSet,
@@ -34,6 +35,7 @@ import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
+import type { ChapterPlan } from "../models/chapter-plan.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -51,6 +53,7 @@ export interface WriteChapterInput {
   readonly temperatureOverride?: number;
   readonly allowReapply?: boolean;
   readonly onTextDelta?: (text: string) => void;
+  readonly chapterPlan?: ChapterPlan;
 }
 
 export interface SettleChapterStateInput {
@@ -246,6 +249,7 @@ export class WriterAgent extends BaseAgent {
       chapterNumber, "creative", fanficContext, resolvedLanguage,
       input.chapterIntent ? "governed" : "legacy",
       resolvedLengthSpec,
+      input.chapterPlan,
     );
 
     const creativeUserPrompt = input.chapterIntent && input.contextPackage && input.ruleStack
@@ -882,6 +886,17 @@ ${params.parentCanon}\n`
         : `\n## 对话引号约定\n${params.dialogueQuoteGuideline}\n`
       : "";
     const lengthRequirementBlock = this.buildLengthRequirementBlock(params.lengthSpec, params.language ?? "zh");
+    const parsedHooks = parsePendingHooksMarkdown(params.hooks);
+    const hookDebtConstraint = buildHookDebtHardConstraintBlock({
+      hooks: parsedHooks,
+      chapterNumber: params.chapterNumber,
+      language: params.language ?? "zh",
+    });
+    const hookDebtConstraintBlock = hookDebtConstraint
+      ? (params.language === "en"
+        ? `\n## Hook Debt Hard Constraint (Must Follow)\n${hookDebtConstraint}\n`
+        : `\n## 伏笔债务硬约束（必须遵守）\n${hookDebtConstraint}\n`)
+      : "";
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
@@ -891,6 +906,7 @@ ${params.currentState}
 ${ledgerBlock}
 ## Plot Threads
 ${params.hooks}
+${hookDebtConstraintBlock}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## Recent Chapters
 ${params.recentChapters || "(This is the first chapter, no previous text)"}
@@ -920,6 +936,7 @@ ${params.currentState}
 ${ledgerBlock}
 ## 伏笔池
 ${params.hooks}
+${hookDebtConstraintBlock}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}

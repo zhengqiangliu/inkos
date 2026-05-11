@@ -355,6 +355,7 @@ export class ContinuityAuditor extends BaseAgent {
         hooks?: string;
       };
       onThinkingDelta?: (text: string) => void;
+      onThinkingEnd?: () => void;
     },
   ): Promise<AuditResult> {
     const [diskCurrentState, diskLedger, diskHooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon, fanficCanon, volumeOutline] =
@@ -585,6 +586,7 @@ ${chapterContent}`;
       ? await this.chatWithSearch(chatMessages, chatOptions)
       : await this.chat(chatMessages, chatOptions);
 
+    options?.onThinkingEnd?.();
     const result = this.parseAuditResult(response.content, resolvedLanguage);
     return { ...result, tokenUsage: response.usage };
   }

@@ -15,11 +15,13 @@ export function analyzeHookHealth(params: {
   readonly staleAfterChapters?: number;
   readonly noAdvanceWindow?: number;
   readonly newHookBurstThreshold?: number;
+  readonly maxResolvePerChapter?: number;
 }): AuditIssue[] {
   const maxActiveHooks = params.maxActiveHooks ?? HOOK_HEALTH_DEFAULTS.maxActiveHooks;
   const staleAfterChapters = params.staleAfterChapters ?? HOOK_HEALTH_DEFAULTS.staleAfterChapters;
   const noAdvanceWindow = params.noAdvanceWindow ?? HOOK_HEALTH_DEFAULTS.noAdvanceWindow;
   const newHookBurstThreshold = params.newHookBurstThreshold ?? HOOK_HEALTH_DEFAULTS.newHookBurstThreshold;
+  const maxResolvePerChapter = params.maxResolvePerChapter ?? HOOK_HEALTH_DEFAULTS.maxResolvePerChapter;
   const issues: AuditIssue[] = [];
 
   const activeHooks = params.hooks.filter((hook) => hook.status !== "resolved");
@@ -121,6 +123,19 @@ export function analyzeHookHealth(params: {
         params.language === "en"
           ? "Keep the hook table from ballooning by pairing new openings with old payoffs."
           : "控制伏笔膨胀，新开伏笔时尽量配套回收旧伏笔。",
+      ));
+    }
+
+    const resolveCount = params.delta.hookOps.resolve.length;
+    if (resolveCount > maxResolvePerChapter) {
+      issues.push(warning(
+        params.language,
+        params.language === "en"
+          ? `This chapter resolves ${resolveCount} hooks, exceeding the per-chapter cap of ${maxResolvePerChapter}.`
+          : `本章回收了 ${resolveCount} 个伏笔，超过每章上限 ${maxResolvePerChapter} 个。`,
+        params.language === "en"
+          ? `Consider spreading resolves across multiple chapters (cap: ${maxResolvePerChapter}/chapter).`
+          : `建议将伏笔回收分散到多章，避免单章回收过多（上限：${maxResolvePerChapter} 个/章）。`,
       ));
     }
   }

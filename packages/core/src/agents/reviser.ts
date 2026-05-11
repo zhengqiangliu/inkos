@@ -14,8 +14,11 @@ import {
   mergeTableMarkdownByKey,
 } from "../utils/governed-working-set.js";
 import { applySpotFixPatches, parseSpotFixPatches } from "../utils/spot-fix-patches.js";
+import type { ChapterPlan } from "../models/chapter-plan.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { parsePendingHooksMarkdown } from "../utils/story-markdown.js";
+import { buildHookDebtHardConstraintBlock } from "../utils/hook-agenda.js";
 
 export type ReviseMode = "polish" | "rewrite" | "rework" | "anti-detect" | "spot-fix";
 
@@ -139,6 +142,9 @@ export class ReviserAgent extends BaseAgent {
       };
       onRevisedContentDelta?: (text: string) => void;
       onSpotFixPatchDelta?: (text: string) => void;
+      onThinkingDelta?: (text: string) => void;
+      onThinkingEnd?: () => void;
+      chapterPlan?: ChapterPlan;
     },
   ): Promise<ReviseOutput> {
     const [currentState, ledger, hooks, styleGuideRaw, volumeOutline, storyBible, characterMatrix, chapterSummaries, parentCanon, fanficCanon] = await Promise.all([
@@ -192,6 +198,10 @@ export class ReviserAgent extends BaseAgent {
     const isEnglish = (bookLanguage ?? gp.language) === "en";
     const resolvedLanguage = isEnglish ? "en" : "zh";
     const dialogueConstraint = this.buildDialogueQuoteConstraint(bookRules, resolvedLanguage);
+    const chapterPlanBlock = options?.chapterPlan
+      ? `\n## 分章设计约束（硬约束，修正时必须匹配）\n- 核心冲突：${options.chapterPlan.coreConflict}\n- 剧情与冲突：${options.chapterPlan.plotAndConflict}\n${options.chapterPlan.endingHook ? `- 结尾钩子（必须实现）：${options.chapterPlan.endingHook}\n` : ""}${options.chapterPlan.hookAssignment.length > 0 ? `- 需回收伏笔：\n${options.chapterPlan.hookAssignment.map((h) => `  - ${h}`).join("\n")}\n` : ""}${options.chapterPlan.requiredRecoverHooks.length > 0 ? `- 强制回收伏笔：\n${options.chapterPlan.requiredRecoverHooks.map((h) => `  - ${h}`).join("\n")}\n` : ""}- 本章最多新增伏笔数：${options.chapterPlan.maxNewHooks}`
+      : "";
+
     const chapterBoundaryGuardrail = mode === "rewrite" || mode === "rework"
       ? "\n11. 章节边界保护：REVISED_CONTENT 只能包含“本章正文”，禁止输出任何其他章节标题（如“第N章”/“Chapter N”），禁止跨章拼接。"
       : "";
@@ -327,8 +337,11 @@ ${lengthGuardrail}
 ${mode === "spot-fix" ? "\n11. spot-fix 只能输出局部补丁，禁止输出整章改写；TARGET_TEXT 必须能在原文中唯一命中\n12. 如果需要大面积改写，说明无法安全 spot-fix，并让 PATCHES 留空" : ""}
 ${chapterBoundaryGuardrail}
 ${openingThreeChaptersGuardrail}
+${chapterPlanBlock}
 
 输出格式：
+
+先输出分析思路（包含对每个审稿问题的判断），然后再输出结构化内容。分析思路和结构化内容之间用 === FIXED_ISSUES === 分隔。
 
 ${outputFormat}${structuralIssueRequiredBlock ? `\n=== STRUCTURAL_TRUTH_ACTIONS ===\n(结构性问题的 truth-file 修订动作；每行必须以 [ISSUE-XX] 开头，格式建议：file=... action=... reason=...)` : ""}${structuralIssueRequiredBlock}`;
 
@@ -341,6 +354,16 @@ ${outputFormat}${structuralIssueRequiredBlock ? `\n=== STRUCTURAL_TRUTH_ACTIONS 
     const hookDebtBlock = governedMemoryBlocks?.hookDebtBlock ?? "";
     const hooksBlock = governedMemoryBlocks?.hooksBlock
       ?? `\n## 伏笔池\n${hooksWorkingSet}\n`;
+    const hookDebtHardConstraint = buildHookDebtHardConstraintBlock({
+      hooks: parsePendingHooksMarkdown(hooksWorkingSet),
+      chapterNumber,
+      language: resolvedLanguage,
+    });
+    const hookDebtHardConstraintBlock = hookDebtHardConstraint
+      ? (resolvedLanguage === "en"
+        ? `\n## Hook Debt Hard Constraint (Must Follow)\n${hookDebtHardConstraint}\n`
+        : `\n## 伏笔债务硬约束（必须遵守）\n${hookDebtHardConstraint}\n`)
+      : "";
     const outlineBlock = volumeOutline !== "(文件不存在)"
       ? `\n## 卷纲\n${volumeOutline}\n`
       : "";
@@ -391,7 +414,7 @@ ${userBriefBlock}
 ## 当前状态卡
 ${currentState}
 ${ledgerBlock}
-${hookDebtBlock}${hooksBlock}${volumeSummariesBlock}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}
+${hookDebtBlock}${hookDebtHardConstraintBlock}${hooksBlock}${volumeSummariesBlock}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}
 ${auditGateBlock}${failedDimensionsBlock}
 
 ## 待修正章节
@@ -402,6 +425,33 @@ ${chapterContent}`;
     let streamedResponse = "";
     let emittedRevisedLength = 0;
     let emittedPatchLength = 0;
+    let emittedThinkingLength = 0;
+    let thinkingSectionDone = false;
+    const tryEmitThinkingDelta = (buffer: string): void => {
+      if (thinkingSectionDone) return;
+      if (!options?.onThinkingDelta) return;
+      // Everything before the first === section marker is thinking
+      const sectionMatch = buffer.match(/=== [A-Z_]+ ===/);
+      const thinkingEndIndex = sectionMatch ? sectionMatch.index! : -1;
+      if (thinkingEndIndex >= 0) {
+        // Thinking section ends at the first === marker
+        const thinkingText = buffer.slice(0, thinkingEndIndex).trim();
+        if (thinkingText.length > emittedThinkingLength) {
+          const delta = thinkingText.slice(emittedThinkingLength);
+          emittedThinkingLength = thinkingText.length;
+          if (delta) options.onThinkingDelta(delta);
+        }
+        thinkingSectionDone = true;
+        options.onThinkingEnd?.();
+        return;
+      }
+      // No === marker yet, entire buffer is thinking
+      if (buffer.length > emittedThinkingLength) {
+        const delta = buffer.slice(emittedThinkingLength);
+        emittedThinkingLength = buffer.length;
+        if (delta) options.onThinkingDelta(delta);
+      }
+    };
     const tryEmitRevisedContentDelta = (buffer: string): void => {
       if (mode === "spot-fix") return;
       if (!options?.onRevisedContentDelta) return;
@@ -433,15 +483,20 @@ ${chapterContent}`;
       {
         temperature: 0.3,
         maxTokens,
-        onTextDelta: (options?.onRevisedContentDelta || options?.onSpotFixPatchDelta)
+        onTextDelta: (options?.onRevisedContentDelta || options?.onSpotFixPatchDelta || options?.onThinkingDelta)
           ? (text) => {
               streamedResponse += text;
+              tryEmitThinkingDelta(streamedResponse);
               tryEmitRevisedContentDelta(streamedResponse);
               tryEmitSpotFixPatchDelta(streamedResponse);
             }
           : undefined,
       },
     );
+    if (!thinkingSectionDone) {
+      // No === marker in streamed response — check full content
+      tryEmitThinkingDelta(response.content);
+    }
     if (options?.onRevisedContentDelta && mode !== "spot-fix") {
       streamedResponse = response.content;
       tryEmitRevisedContentDelta(streamedResponse);

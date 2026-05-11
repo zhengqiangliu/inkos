@@ -80,6 +80,9 @@ export class ChapterDesignAgent extends BaseAgent {
       plotAndConflict: first.plotAndConflict,
       emotionalTone: first.emotionalTone || "推进",
       endingHook: first.endingHook,
+      hookAssignment: first.hookAssignment,
+      requiredRecoverHooks: first.requiredRecoverHooks,
+      maxNewHooks: first.maxNewHooks,
       status: "planned",
       source: "auto",
       version: 1,
@@ -117,7 +120,7 @@ export class ChapterDesignAgent extends BaseAgent {
     const parsed = parseChapterDesignOutput(response.content, input.startChapter, input.count);
     const now = new Date().toISOString();
 
-    return parsed.map((p, index) =>
+    return parsed.map((p) =>
       ChapterPlanSchema.parse({
         chapterNumber: p.chapterNumber,
         chapterName: p.chapterName,
@@ -126,6 +129,9 @@ export class ChapterDesignAgent extends BaseAgent {
         plotAndConflict: p.plotAndConflict,
         emotionalTone: p.emotionalTone || "推进",
         endingHook: p.endingHook,
+        hookAssignment: p.hookAssignment,
+        requiredRecoverHooks: p.requiredRecoverHooks,
+        maxNewHooks: p.maxNewHooks,
         status: "planned",
         source: "auto",
         version: 1,
@@ -324,6 +330,9 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
       plotAndConflict: first?.plotAndConflict || `第${input.chapterNumber}章剧情与冲突待确认`,
       emotionalTone: first?.emotionalTone || "待确认",
       endingHook: first?.endingHook || "待确认",
+      hookAssignment: first?.hookAssignment ?? [],
+      requiredRecoverHooks: first?.requiredRecoverHooks ?? [],
+      maxNewHooks: first?.maxNewHooks ?? 3,
       status: "backfilled",
       source: "inferred_from_text",
       version: 1,

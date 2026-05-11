@@ -54,6 +54,9 @@ export const ChapterPlanSchema = z.object({
   }),
   driftFlags: z.array(ChapterPlanDriftFlagSchema).default([]),
   lockedFields: z.array(z.string()).default([]),
+  hookAssignment: z.array(z.string()).default([]),
+  requiredRecoverHooks: z.array(z.string()).default([]),
+  maxNewHooks: z.number().int().min(0).default(3),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });

@@ -17,7 +17,8 @@
       "Bash(cat)",
       "Bash(python3 /tmp/patch_reviser.py)",
       "Bash(python3 /tmp/patch_reviser2.py)",
-      "Bash(python3 /tmp/patch_reviser3.py)"
+      "Bash(python3 /tmp/patch_reviser3.py)",
+      "Bash(npx -p typescript tsc --noEmit --pretty)"
     ]
   }
 }
