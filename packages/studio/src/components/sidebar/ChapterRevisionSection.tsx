@@ -48,8 +48,8 @@ export function ChapterRevisionSection({
       }
 
       const instruction = mode === "selected" && selectedText
-        ? `修订第${chapterNumber}章选中内容：\n[选中文本]\n${selectedText}\n\n[要求]\n${brief}`
-        : `修订第${chapterNumber}章：${brief}`;
+        ? `请对第${chapterNumber}章选中的文本按要求修改，不要改动其他内容：\n\n[选中文本]\n${selectedText}\n\n[要求]\n${brief}`
+        : `请按要求修改第${chapterNumber}章，不要改动其他内容：\n${brief}`;
 
       await sendMessage(sessionId, instruction, bookId);
     } finally {

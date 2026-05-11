@@ -5,6 +5,7 @@ import type { FanficMode } from "../models/book.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import { readGenreProfile, readBookLanguage, readBookRules } from "./rules-reader.js";
 import { getFanficDimensionConfig, FANFIC_DIMENSIONS } from "./fanfic-dimensions.js";
+import { extractChapterTail } from "../utils/chapter-tail.js";
 import { readFile, readdir } from "node:fs/promises";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
@@ -75,6 +76,7 @@ const DIMENSION_LABELS: Record<number, { readonly zh: string; readonly en: strin
   35: { zh: "世界规则遵守", en: "World Rule Compliance Check" },
   36: { zh: "关系动态", en: "Relationship Dynamics Check" },
   37: { zh: "正典事件一致性", en: "Canon Event Consistency Check" },
+  38: { zh: "章节衔接检查", en: "Chapter Transition Check" },
 };
 
 function containsChinese(text: string): boolean {
@@ -247,6 +249,10 @@ function buildDimensionNote(
         ? `${baseNote} ${formatFanficSeverityNote(severity, language)}`
         : "";
     }
+    case 38:
+      return language === "en"
+        ? "Compare the end of the previous chapter with the start of this chapter. Check: do events, location, time, character state, and emotional tone connect naturally? Are there missing transitions, contradictions, or abrupt jumps between the two chapters? If no previous chapter exists, skip this dimension."
+        : "对比上一章结尾与本章开头：事件、地点、时间、角色状态、情绪基调是否自然衔接？是否有跳跃、矛盾或缺少过渡？如无上一章则跳过本维度。";
     default:
       return "";
   }
@@ -294,6 +300,7 @@ function buildDimensionList(
   // Always-active dimensions
   activeIds.add(32); // 读者期待管理 — universal
   activeIds.add(33); // 大纲偏离检测 — universal
+  activeIds.add(38); // 章节衔接检查 — universal
 
   // Conditional overrides
   if (gp.eraResearch || bookRules?.eraConstraints?.enabled) {

@@ -31,7 +31,8 @@
       "Bash(packages/core/node_modules/.bin/tsc --noEmit -p packages/studio/tsconfig.json)",
       "Bash(packages/studio/node_modules/.bin/tsc --noEmit -p packages/studio/tsconfig.json)",
       "Bash(npx --no-install tsc --noEmit)",
-      "PowerShell(Get-ChildItem \"F:\\\\InkOSv2\\\\MyInkos\\\\node_modules\\\\streamdown\" -ErrorAction SilentlyContinue; if \\(-not \\(Test-Path \"F:\\\\InkOSv2\\\\MyInkos\\\\node_modules\\\\streamdown\"\\)\\) { Get-ChildItem \"F:\\\\InkOSv2\\\\MyInkos\\\\node_modules\\\\@streamdown\" -ErrorAction SilentlyContinue })"
+      "PowerShell(Get-ChildItem \"F:\\\\InkOSv2\\\\MyInkos\\\\node_modules\\\\streamdown\" -ErrorAction SilentlyContinue; if \\(-not \\(Test-Path \"F:\\\\InkOSv2\\\\MyInkos\\\\node_modules\\\\streamdown\"\\)\\) { Get-ChildItem \"F:\\\\InkOSv2\\\\MyInkos\\\\node_modules\\\\@streamdown\" -ErrorAction SilentlyContinue })",
+      "Bash(npx --no tsc --noEmit)"
     ]
   }
 }
