@@ -364,6 +364,11 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           const parts = [...(message.parts ?? [])];
           const lastPart = parts[parts.length - 1];
           if (lastPart?.type === "text") {
+            // Preserve streamed content (e.g. chapter:delta events) when it's
+            // more substantial than the finalization summary.
+            if (content && lastPart.content.length > content.length) {
+              return { ...message, toolCall, parts };
+            }
             parts[parts.length - 1] = { ...lastPart, content };
           } else if (content) {
             parts.push({ type: "text", content });

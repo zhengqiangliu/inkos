@@ -4,6 +4,7 @@ import type { BookRules } from "../models/book-rules.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import type { AuditIssue } from "./continuity.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
+import { extractChapterTail } from "../utils/chapter-tail.js";
 import { readGenreProfile, readBookLanguage, readBookRules } from "./rules-reader.js";
 import { countChapterLength } from "../utils/length-metrics.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
@@ -123,6 +124,7 @@ export class ReviserAgent extends BaseAgent {
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
       lengthSpec?: LengthSpec;
+      previousChapterContent?: string;
       reviseContext?: {
         failureGate?: "critical" | "score" | "none";
         score?: number;
@@ -406,6 +408,33 @@ ${options.userBrief}
 `
       : "";
 
+    const previousChapterTail = options?.previousChapterContent
+      ? extractChapterTail(options.previousChapterContent)
+      : undefined;
+    const previousChapterTailBlock = previousChapterTail
+      ? (isEnglish
+        ? `\n## Seamless Transition Protection
+The opening of this chapter must naturally connect to the end of the previous chapter. The ending portion of the previous chapter is provided below — do not break this connection during revision.
+
+${previousChapterTail}
+
+Rules:
+1. The first paragraph must not detach from the previous chapter's ending context — if rewriting, ensure the rewritten first paragraph still connects naturally.
+2. Do not delete or alter key transition sentences that bridge the chapters.
+3. If the chapter opening needs adjustment during revision, ensure it still transitions smoothly.
+`
+        : `\n## 衔接保护要求
+本章开头必须与上一章结尾自然衔接。以下是上一章的结尾部分，改写时不得破坏衔接关系：
+
+${previousChapterTail}
+
+保护规则：
+1. 本章第一段不能脱离上一章结尾的语境——如果是重写，必须保证重写后的第一段仍然能自然衔接
+2. 不要删除或改变与上一章衔接的关键过渡句
+3. 如果本章因改写需要调整开头，需确保调整后依然平滑衔接
+`)
+      : "";
+
     const userPrompt = `请修正第${chapterNumber}章。
 
 ## 审稿问题
@@ -416,6 +445,7 @@ ${currentState}
 ${ledgerBlock}
 ${hookDebtBlock}${hookDebtHardConstraintBlock}${hooksBlock}${volumeSummariesBlock}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}
 ${auditGateBlock}${failedDimensionsBlock}
+${previousChapterTailBlock}
 
 ## 待修正章节
 ${chapterContent}`;

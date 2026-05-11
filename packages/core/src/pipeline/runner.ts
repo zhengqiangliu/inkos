@@ -44,6 +44,7 @@ import { persistChapterArtifacts } from "./chapter-persistence.js";
 import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir } from "./persisted-governed-plan.js";
+import { ChapterPlanSchema, type ChapterPlan } from "../models/chapter-plan.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -1197,6 +1198,9 @@ export class PipelineRunner {
             mode: "draft",
           });
         },
+        onThinkingDelta: (text) => {
+          this.config.onAuditorTextDelta?.({ bookId, chapterNumber, text });
+        },
         ...(wordCount ? { wordCountOverride: wordCount } : {}),
       });
       const writerCount = countChapterLength(output.content, lengthSpec.countingMode);
@@ -1584,6 +1588,12 @@ export class PipelineRunner {
         zh: `${reviseActionZh}第${targetChapter}章`,
         en: `${mode === "rewrite" ? "rewriting" : "revising"} chapter ${targetChapter}`,
       });
+
+      // Load previous chapter tail for衔接 protection (only for rewrite/rework modes)
+      const previousChapterForRevise = (mode === "rewrite" || mode === "rework") && targetChapter > 1
+        ? await this.readChapterContent(bookDir, targetChapter - 1).catch(() => undefined)
+        : undefined;
+
       let sawReviserDelta = false;
       let sawReviserPatchDelta = false;
       const reviseOutput = await reviser.reviseChapter(
@@ -1601,6 +1611,7 @@ export class PipelineRunner {
               ruleStack: reviseAuditControlInputWithPreflight.ruleStack,
               lengthSpec,
               reviseContext: options?.reviseContext,
+              previousChapterContent: previousChapterForRevise,
               onThinkingDelta: (text) => {
                 if (!text) return;
                 this.config.onReviserThinkingDelta?.({ bookId, chapterNumber: targetChapter, mode, text });
@@ -1633,6 +1644,7 @@ export class PipelineRunner {
               userBrief: options?.userBrief,
               lengthSpec,
               reviseContext: options?.reviseContext,
+              previousChapterContent: previousChapterForRevise,
               onThinkingDelta: (text) => {
                 if (!text) return;
                 this.config.onReviserThinkingDelta?.({ bookId, chapterNumber: targetChapter, mode, text });
@@ -2115,6 +2127,9 @@ export class PipelineRunner {
           mode: "write-next",
         });
       },
+      onThinkingDelta: (text) => {
+        this.config.onAuditorTextDelta?.({ bookId, chapterNumber, text });
+      },
       ...(wordCount ? { wordCountOverride: wordCount } : {}),
       ...(temperatureOverride ? { temperatureOverride } : {}),
     });
@@ -2139,6 +2154,18 @@ export class PipelineRunner {
       },
       onThinkingEnd: () => {
         this.config.onAuditorThinkingEnd?.({ bookId, chapterNumber });
+      },
+      onRevisedContentDelta: (text) => {
+        this.config.onReviserTextDelta?.({ bookId, chapterNumber, text, mode: "spot-fix" });
+      },
+      onSpotFixPatchDelta: (text) => {
+        this.config.onReviserPatchDelta?.({ bookId, chapterNumber, text, mode: "spot-fix" });
+      },
+      onReviserThinkingDelta: (text) => {
+        this.config.onReviserThinkingDelta?.({ bookId, chapterNumber, mode: "spot-fix", text });
+      },
+      onReviserThinkingEnd: () => {
+        this.config.onReviserThinkingEnd?.({ bookId, chapterNumber, mode: "spot-fix" });
       },
       normalizeDraftLengthIfNeeded: (chapterContent) => this.normalizeDraftLengthIfNeeded({
         bookId,
@@ -3404,9 +3431,22 @@ ${matrix}`,
     bookDir: string,
     chapterNumber: number,
     externalContext?: string,
-  ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "contextPackage" | "ruleStack" | "trace">> {
+  ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "contextPackage" | "ruleStack" | "trace" | "chapterPlan">> {
+    // Load chapter plan if available
+    let chapterPlan: ChapterPlan | undefined;
+    try {
+      const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+      const raw = await readFile(plansPath, "utf-8");
+      const data = JSON.parse(raw);
+      const plans: ChapterPlan[] = Array.isArray(data.plans) ? data.plans : [];
+      const matched = plans.find((p) => p.chapterNumber === chapterNumber);
+      if (matched) {
+        chapterPlan = ChapterPlanSchema.parse(matched);
+      }
+    } catch { /* no chapter-plans.json — ignore */ }
+
     if ((this.config.inputGovernanceMode ?? "v2") === "legacy") {
-      return { externalContext };
+      return { externalContext, chapterPlan };
     }
 
     const { plan, composed } = await this.createGovernedArtifacts(
@@ -3422,6 +3462,7 @@ ${matrix}`,
       contextPackage: composed.contextPackage,
       ruleStack: composed.ruleStack,
       trace: composed.trace,
+      chapterPlan,
     };
   }
 
@@ -4566,7 +4607,9 @@ ${matrix}`,
 
     if (this.config.enforceOutlineAnchorMatch && plan.intent.outlineAnchorMatched !== true) {
       await this.extendVolumeOutlineForChapter(bookDir, chapterNumber, book.language);
-      plan = await this.resolveGovernedPlan(book, bookDir, chapterNumber, externalContext, options);
+      // Don't pass options on retry — the persisted plan may be stale
+      // (outlineAnchorMatched: false from a prior run), so force a fresh planner run.
+      plan = await this.resolveGovernedPlan(book, bookDir, chapterNumber, externalContext);
     }
 
     this.assertGovernedOutlineAnchor(plan, chapterNumber);

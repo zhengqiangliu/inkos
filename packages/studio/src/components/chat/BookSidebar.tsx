@@ -60,9 +60,9 @@ type RightPanelTab = "chapter-design" | "execution" | "chapters" | "outline" | "
 
 const RIGHT_PANEL_TABS: ReadonlyArray<{ id: RightPanelTab; label: string; compactLabel: string }> = [
   { id: "execution", label: "执行阶段", compactLabel: "执行" },
-    { id: "chapter-design", label: "分章设计", compactLabel: "设计" },
   { id: "chapters", label: "章节", compactLabel: "章节" },
   { id: "outline", label: "大纲", compactLabel: "大纲" },
+  { id: "chapter-design", label: "分章设计", compactLabel: "设计" },
   { id: "settings", label: "设定", compactLabel: "设定" },
   { id: "assets", label: "资产版本", compactLabel: "版本" },
 ];
@@ -250,11 +250,6 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
       setEditContent(newContent);
       setContentWordCount(countChapterLengthByLanguage(newContent));
     }
-  }, []);
-
-  const handleSendToRevision = useCallback(() => {
-    const el = document.querySelector("[data-revision-section]");
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, []);
 
   const handleEdit = useCallback(() => {
@@ -608,8 +603,10 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
           <div ref={contentContainerRef} className="px-4 py-3 text-sm leading-7">
             {isChapter && isSelecting && selectedText && (
               <ChapterSelectionToolbar
+                bookId={bookId}
+                chapterNumber={artifactChapter!}
                 selectedText={selectedText}
-                onSendToRevision={handleSendToRevision}
+                selectionRect={selectionRect}
                 onDismiss={clearSelection}
               />
             )}

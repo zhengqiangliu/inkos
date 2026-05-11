@@ -242,17 +242,22 @@ function PipelineExecutionAuto({
               </div>
               <ul className="space-y-1">
                 {exec.stages.map((stage, index) => {
+                  const hasWordCount = stage.progress && stage.progress.totalChars > 0;
+                  const showWordCount = hasWordCount && (
+                    stage.status === "active"
+                    || (/^(撰写章节草稿|落盘最终章节)/.test(stage.label))
+                  );
                   return (
                     <li key={`${exec.id}-stage-${index}`} className="flex items-start justify-between gap-3 text-xs">
                       <div className="flex items-center gap-2 min-w-0">
                         <StageIcon status={stage.status} />
                         <span className="truncate text-foreground/90">{stage.label}</span>
                       </div>
-                      {stage.status === "active" && (
-                        <span className="shrink-0 text-[11px] text-primary/90">
-                          {stage.progress
-                            ? formatProgress(stage.progress)
-                            : "进行中"}
+                      {showWordCount && (
+                        <span className={`shrink-0 text-[11px] ${stage.status === "active" ? "text-primary/90" : "text-muted-foreground/70"}`}>
+                          {stage.status === "active"
+                            ? formatProgress(stage.progress!)
+                            : stage.progress!.chineseChars > 0 ? `${stage.progress!.totalChars}字` : `${stage.progress!.totalChars} chars`}
                         </span>
                       )}
                     </li>
@@ -365,16 +370,6 @@ function PipelineExecutionAuto({
                 </ul>
               </CollapsibleContent>
             </Collapsible>
-          )}
-          {exec.previewKind === "patch" && exec.previewText && (
-            <div className="mt-2 rounded-lg border border-border/40 bg-background/40 px-2.5 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
-                {exec.previewChapterNumber ? `第 ${exec.previewChapterNumber} 章修订补丁预览` : "修订补丁预览"}
-              </div>
-              <div className="text-xs leading-6 whitespace-pre-wrap break-words text-foreground/90">
-                {exec.previewText}
-              </div>
-            </div>
           )}
           {exec.status === "completed" && exec.result && (
             <div className="mt-2 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-2 text-xs text-emerald-700 dark:text-emerald-300 break-words">

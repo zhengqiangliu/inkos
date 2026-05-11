@@ -613,12 +613,13 @@ describe("attachSessionStreamListeners", () => {
 
     const session = state.get().sessions.s1;
     const last = session.messages[session.messages.length - 1];
+    expect(last?.content).toContain("PATCH 1");
+    // previewType: "patch" text now streams into the chat panel directly,
+    // not into the tool execution preview.
     const tool = last?.parts?.find((part) => part.type === "tool");
-    expect(tool?.type).toBe("tool");
     if (tool?.type === "tool") {
-      expect(tool.execution.previewKind).toBe("patch");
-      expect(tool.execution.previewText).toContain("PATCH 1");
-      expect(tool.execution.previewChapterNumber).toBe(12);
+      expect(tool.execution.previewKind).toBeUndefined();
+      expect(tool.execution.previewText).toBeUndefined();
     }
   });
 

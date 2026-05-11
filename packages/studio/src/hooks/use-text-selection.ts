@@ -37,9 +37,6 @@ export function useTextSelection(
       }
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || !sel.rangeCount) {
-        setSelectedText("");
-        setSelectionRect(null);
-        setIsSelecting(false);
         return;
       }
       const range = sel.getRangeAt(0);
@@ -54,21 +51,6 @@ export function useTextSelection(
     };
     document.addEventListener("selectionchange", handleSelectionChange);
     return () => document.removeEventListener("selectionchange", handleSelectionChange);
-  }, [containerRef]);
-
-  // Clear persisted range on mousedown outside the container
-  useEffect(() => {
-    const handleMouseDown = (e: MouseEvent) => {
-      const container = containerRef.current;
-      if (container && !container.contains(e.target as Node)) {
-        setPersistedRange(null);
-        setSelectedText("");
-        setSelectionRect(null);
-        setIsSelecting(false);
-      }
-    };
-    document.addEventListener("mousedown", handleMouseDown);
-    return () => document.removeEventListener("mousedown", handleMouseDown);
   }, [containerRef]);
 
   const clearSelection = () => {

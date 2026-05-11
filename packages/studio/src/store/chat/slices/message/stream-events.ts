@@ -201,7 +201,7 @@ function promoteStage(stages: PipelineStage[] | undefined, targetLabel: string):
     if (i < index) {
       return stage.status === "completed"
         ? stage
-        : { ...stage, status: "completed" as const, progress: undefined };
+        : { ...stage, status: "completed" as const };
     }
     if (i === index) {
       return stage.status === "active"
@@ -209,7 +209,7 @@ function promoteStage(stages: PipelineStage[] | undefined, targetLabel: string):
         : { ...stage, status: "active" as const, activatedAt: now };
     }
     if (stage.status === "active") {
-      return { ...stage, status: "pending" as const, progress: undefined };
+      return { ...stage, status: "pending" as const };
     }
     return stage;
   });
@@ -310,39 +310,6 @@ function appendTextPart(parts: MessagePart[], text: string): MessagePart[] {
   }
   next.push({ type: "text", content: text });
   return next;
-}
-
-function appendPatchPreviewToExecution(args: {
-  readonly parts: MessagePart[];
-  readonly runId: string;
-  readonly chapterNumber?: number;
-  readonly text: string;
-}): MessagePart[] {
-  let parts = [...args.parts];
-  let targetToolId = findRunningToolPart(parts)?.execution.id;
-  if (!targetToolId) {
-    const ensured = ensureFallbackExecutionPart({
-      parts,
-      runId: args.runId,
-      toolId: `preview-${args.runId}`,
-      tool: "sub_agent",
-      agent: "reviser",
-    });
-    parts = ensured.parts;
-    targetToolId = ensured.toolId;
-  }
-  return parts.map((part) => {
-    if (part.type !== "tool" || part.execution.id !== targetToolId) return part;
-    return {
-      type: "tool" as const,
-      execution: {
-        ...part.execution,
-        previewText: (part.execution.previewText ?? "") + args.text,
-        ...(args.chapterNumber ? { previewChapterNumber: args.chapterNumber } : {}),
-        previewKind: "patch",
-      },
-    };
-  });
 }
 
 function normalizeAutoReviewStateValue(value: unknown): AutoReviewProgressState["state"] | undefined {
@@ -635,7 +602,12 @@ export function attachSessionStreamListeners({
             }))
             : undefined;
 
-          parts.push({
+          // Tool starts often create a full execution with stages, while log-based
+          // estimates (e.g. ensureFallbackExecutionPart) may have left a stale
+          // telemetry-only entry behind. Remove any such placeholder for this runId.
+          const filtered = parts.filter((p) => p.type !== "tool" || !p.execution.id.startsWith(`telemetry-${runId}`));
+
+          filtered.push({
             type: "tool",
             execution: {
               id: data.id as string,
@@ -653,7 +625,7 @@ export function attachSessionStreamListeners({
             },
           });
 
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, mergeStreamMessage(stream, filtered)) };
         }),
       }));
     } catch {
@@ -675,7 +647,7 @@ export function attachSessionStreamListeners({
             execution.completedAt = Date.now();
             execution.stages = execution.stages?.map((stage) =>
               stage.status !== "completed"
-                ? { ...stage, status: "completed" as const, progress: undefined }
+                ? { ...stage, status: "completed" as const }
                 : stage,
             );
             if (data.isError) execution.error = extractToolError(data.result);
@@ -857,12 +829,7 @@ export function attachSessionStreamListeners({
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
-          const parts = appendPatchPreviewToExecution({
-            parts: [...(stream.parts ?? [])],
-            runId,
-            chapterNumber,
-            text,
-          });
+          const parts = appendTextPart([...(stream.parts ?? [])], text);
           return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
         }),
       }));

@@ -62,8 +62,15 @@ export function buildExecutionPanelSummary(
         const stageProgress = resolveRunningStageProgress(execution);
         const autoReviewDisplay = describeExecutionAutoReview(execution.autoReview);
         const autoReviewProgressText = autoReviewDisplay?.compactText ?? null;
-        activeStageLabel = autoReviewProgressText ?? stageProgress?.stageLabel ?? execution.label;
-        activeStageProgressText = autoReviewProgressText ?? stageProgress?.progressText ?? undefined;
+        if (stageProgress) {
+          activeStageLabel = autoReviewProgressText ?? stageProgress.stageLabel;
+          activeStageProgressText = autoReviewProgressText ?? stageProgress.progressText;
+        } else if (autoReviewProgressText) {
+          activeStageLabel = autoReviewProgressText;
+          activeStageProgressText = autoReviewProgressText;
+        } else {
+          activeStageLabel = execution.label;
+        }
         autoReviewMeta = autoReviewDisplay?.meta;
       }
     } else if (execution.status === "error") {

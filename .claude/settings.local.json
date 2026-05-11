@@ -18,7 +18,19 @@
       "Bash(python3 /tmp/patch_reviser.py)",
       "Bash(python3 /tmp/patch_reviser2.py)",
       "Bash(python3 /tmp/patch_reviser3.py)",
-      "Bash(npx -p typescript tsc --noEmit --pretty)"
+      "Bash(npx -p typescript tsc --noEmit --pretty)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'Total plans: {len\\(d.get\\(\\\\\"plans\\\\\",[]\\)\\)}'\\); chapters=[p['chapterNumber'] for p in d['plans']]; print\\(f'Range: {min\\(chapters\\)}-{max\\(chapters\\)}'\\); print\\(f'Max chapter: {max\\(chapters\\)}'\\)\")",
+      "Read(//g/小说/my-novel/books/我的灵根藏不住了/story/**)",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('/dev/stdin','utf8'\\);const p=JSON.parse\\(d\\);console.log\\('total plans:',p.plans?.length\\);const max=p.plans?.reduce\\(\\(m,x\\)=>Math.max\\(m,x.chapterNumber\\),0\\);console.log\\('max chapter:',max\\)\")",
+      "Bash(node -e \"const d=require\\('fs'\\).readFileSync\\('G:/小说/my-novel/books/我的灵根藏不住了/story/state/chapter-plans.json','utf8'\\);const p=JSON.parse\\(d\\);console.log\\('total plans:',p.plans?.length\\);const max=p.plans?.reduce\\(\\(m,x\\)=>Math.max\\(m,x.chapterNumber\\),0\\);console.log\\('max chapter:',max\\);console.log\\('statuses:',[...new Set\\(p.plans.map\\(x=>x.status\\)\\)]\\)\")",
+      "Bash(node *)",
+      "Bash(xxd)",
+      "Bash(cd /tmp)",
+      "Bash(npx -p typescript tsc --noEmit -p packages/core/tsconfig.json)",
+      "Bash(packages/core/node_modules/.bin/tsc --noEmit -p packages/core/tsconfig.json)",
+      "Bash(packages/core/node_modules/.bin/tsc --noEmit -p packages/studio/tsconfig.json)",
+      "Bash(packages/studio/node_modules/.bin/tsc --noEmit -p packages/studio/tsconfig.json)",
+      "Bash(npx --no-install tsc --noEmit)"
     ]
   }
 }

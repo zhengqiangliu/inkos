@@ -368,11 +368,19 @@ export async function runChapterReviewCycle(params: {
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
         lengthSpec?: LengthSpec;
+        onRevisedContentDelta?: (text: string) => void;
+        onSpotFixPatchDelta?: (text: string) => void;
+        onThinkingDelta?: (text: string) => void;
+        onThinkingEnd?: () => void;
       },
     ) => Promise<ReviseOutput>;
   };
   readonly onThinkingDelta?: (text: string) => void;
   readonly onThinkingEnd?: () => void;
+  readonly onRevisedContentDelta?: (text: string) => void;
+  readonly onSpotFixPatchDelta?: (text: string) => void;
+  readonly onReviserThinkingDelta?: (text: string) => void;
+  readonly onReviserThinkingEnd?: () => void;
   readonly auditor: {
     auditChapter: (
       bookDir: string,
@@ -609,6 +617,10 @@ export async function runChapterReviewCycle(params: {
       {
         ...params.reducedControlInput,
         lengthSpec: params.lengthSpec,
+        onRevisedContentDelta: params.onRevisedContentDelta,
+        onSpotFixPatchDelta: params.onSpotFixPatchDelta,
+        onThinkingDelta: params.onReviserThinkingDelta,
+        onThinkingEnd: params.onReviserThinkingEnd,
       },
     );
     totalUsage = params.addUsage(totalUsage, reviseOutput.tokenUsage);

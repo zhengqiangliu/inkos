@@ -1211,7 +1211,7 @@ export function ChaptersSection({
             const degradedReason = extractDegradedReason(ch.status, chapterIssues);
             const rewriteReviewReason = extractRewriteReviewReason(ch.reviewNote);
             const persistedAutoReviewReason = extractAutoReviewFinalReason(ch.reviewNote);
-            const showAuditScore = ch.status === "audit-failed" || ch.status === "ready-for-review" || typeof ch.audit?.score === "number";
+            const showAuditScore = ch.status === "audit-failed" || ch.status === "ready-for-review" || ch.status === "approved" || typeof ch.audit?.score === "number";
             const auditScore = resolveChapterAuditScore(ch);
             const autoReviewDisplay = describeChapterAutoReview(autoReviewStateByChapter[ch.number]);
             const autoReviewHint = autoReviewDisplay?.text ?? persistedAutoReviewReason;

@@ -40,13 +40,13 @@ function buildChapterPlanBlock(plan: ChapterPlan, isEnglish: boolean): string {
     items.push(`- Plot & Conflict: ${plan.plotAndConflict}`);
     items.push(`- Ending Hook: ${plan.endingHook}`);
     if (plan.endingHook) items.push(`- Required ending hook: ${plan.endingHook}`);
-    if (plan.hookAssignment.length > 0) {
+    if ((plan.hookAssignment?.length ?? 0) > 0) {
       items.push("- Hooks to resolve this chapter:");
-      for (const h of plan.hookAssignment) items.push(`  - ${h}`);
+      for (const h of plan.hookAssignment!) items.push(`  - ${h}`);
     }
-    if (plan.requiredRecoverHooks.length > 0) {
+    if ((plan.requiredRecoverHooks?.length ?? 0) > 0) {
       items.push("- Required recovery hooks:");
-      for (const h of plan.requiredRecoverHooks) items.push(`  - ${h}`);
+      for (const h of plan.requiredRecoverHooks!) items.push(`  - ${h}`);
     }
     items.push(`- Max new hooks to plant: ${plan.maxNewHooks}`);
   } else {
@@ -55,13 +55,13 @@ function buildChapterPlanBlock(plan: ChapterPlan, isEnglish: boolean): string {
     items.push(`- 核心冲突：${plan.coreConflict}`);
     items.push(`- 剧情与冲突：${plan.plotAndConflict}`);
     if (plan.endingHook) items.push(`- 结尾钩子（必须实现）：${plan.endingHook}`);
-    if (plan.hookAssignment.length > 0) {
+    if ((plan.hookAssignment?.length ?? 0) > 0) {
       items.push("- 本章需回收的伏笔：");
-      for (const h of plan.hookAssignment) items.push(`  - ${h}`);
+      for (const h of plan.hookAssignment!) items.push(`  - ${h}`);
     }
-    if (plan.requiredRecoverHooks.length > 0) {
+    if ((plan.requiredRecoverHooks?.length ?? 0) > 0) {
       items.push("- 强制回收伏笔：");
-      for (const h of plan.requiredRecoverHooks) items.push(`  - ${h}`);
+      for (const h of plan.requiredRecoverHooks!) items.push(`  - ${h}`);
     }
     items.push(`- 本章最多新增伏笔数：${plan.maxNewHooks}`);
   }
@@ -89,8 +89,8 @@ export function buildWriterSystemPrompt(
   const resolvedLengthSpec = lengthSpec ?? buildLengthSpec(book.chapterWordCount, isEnglish ? "en" : "zh");
 
   const outputSection = mode === "creative"
-    ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec)
-    : buildOutputFormat(book, genreProfile, resolvedLengthSpec);
+    ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec, chapterPlan)
+    : buildOutputFormat(book, genreProfile, resolvedLengthSpec, chapterPlan);
   const useOpeningThreeChaptersRules = shouldInjectOpeningThreeChaptersRules(
     chapterNumber,
     bookRules,
@@ -585,16 +585,28 @@ function buildPreWriteChecklist(book: BookConfig, gp: GenreProfile): string {
 // Creative-only output format (no settlement blocks)
 // ---------------------------------------------------------------------------
 
-function buildCreativeOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec): string {
+function buildChapterPlanRow(plan: ChapterPlan, isEnglish: boolean): string {
+  if (isEnglish) {
+    const parts = [`Highlight: ${plan.highlight}`, `Conflict: ${plan.coreConflict}`];
+    if (plan.endingHook) parts.push(`Ending hook: ${plan.endingHook}`);
+    return `| Chapter Design | ${parts.join(" / ")} | Align with chapter design |\n`;
+  }
+  const parts = [`看点：${plan.highlight}`, `冲突：${plan.coreConflict}`];
+  if (plan.endingHook) parts.push(`结尾钩子：${plan.endingHook}`);
+  return `| 分章设计 | ${parts.join(" / ")} | 与分章设计对齐 |\n`;
+}
+
+function buildCreativeOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec, chapterPlan?: ChapterPlan): string {
   const resourceRow = gp.numericalSystem
     ? "| 当前资源总量 | X | 与账本一致 |\n| 本章预计增量 | +X（来源） | 无增量写+0 |"
     : "";
+  const chapterDesignRow = chapterPlan ? buildChapterPlanRow(chapterPlan, false) : "";
 
   const preWriteTable = `=== PRE_WRITE_CHECK ===
 （必须输出Markdown表格）
 | 检查项 | 本章记录 | 备注 |
 |--------|----------|------|
-| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
+${chapterDesignRow}| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
 | 上下文范围 | 第X章至第Y章 / 状态卡 / 设定文件 | |
 | 当前锚点 | 地点 / 对手 / 收益目标 | 锚点必须具体 |
 ${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） | 与伏笔池一致 |
@@ -620,16 +632,17 @@ ${preWriteTable}
 // Output format
 // ---------------------------------------------------------------------------
 
-function buildOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec): string {
+function buildOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec, chapterPlan?: ChapterPlan): string {
   const resourceRow = gp.numericalSystem
     ? "| 当前资源总量 | X | 与账本一致 |\n| 本章预计增量 | +X（来源） | 无增量写+0 |"
     : "";
+  const chapterDesignRow = chapterPlan ? buildChapterPlanRow(chapterPlan, false) : "";
 
   const preWriteTable = `=== PRE_WRITE_CHECK ===
 （必须输出Markdown表格）
 | 检查项 | 本章记录 | 备注 |
 |--------|----------|------|
-| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
+${chapterDesignRow}| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
 | 上下文范围 | 第X章至第Y章 / 状态卡 / 设定文件 | |
 | 当前锚点 | 地点 / 对手 / 收益目标 | 锚点必须具体 |
 ${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） | 与伏笔池一致 |

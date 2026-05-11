@@ -4094,7 +4094,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(payload).toMatchObject({
       response: expect.stringContaining("正文文件：0012_夜里的探访者.md"),
     });
-    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 12, "spot-fix");
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 12, "spot-fix", undefined);
     expect(runAgentSessionMock).not.toHaveBeenCalled();
   });
 
@@ -4770,7 +4770,7 @@ describe("createStudioServer daemon lifecycle", () => {
       runId: expect.any(String),
     });
     expect(payload.response).toContain("待复核");
-    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite", undefined);
     expect(rollbackToChapterMock).not.toHaveBeenCalled();
     expect(writeNextChapterMock).not.toHaveBeenCalled();
     expect(runAgentSessionMock).not.toHaveBeenCalled();
@@ -4839,7 +4839,7 @@ describe("createStudioServer daemon lifecycle", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 1, "rewrite");
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 1, "rewrite", undefined);
     expect(runAgentSessionMock).not.toHaveBeenCalled();
 
     const events = await collectSSEEvents(
@@ -6116,7 +6116,7 @@ describe("createStudioServer daemon lifecycle", () => {
       mode: "rewrite",
     });
     expect((chapterDelta?.data as any)?.text).toContain("非流式重写正文回放片段");
-    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite");
+    expect(reviseDraftMock).toHaveBeenCalledWith("demo-book", 3, "rewrite", undefined);
   });
 
   it("emits chapter:delta patch preview during deterministic spot-fix revise execution", async () => {

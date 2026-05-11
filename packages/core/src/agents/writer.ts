@@ -35,6 +35,7 @@ import type { RuntimeStateSnapshot } from "../state/state-reducer.js";
 import { parsePendingHooksMarkdown } from "../utils/memory-retrieval.js";
 import { analyzeHookHealth } from "../utils/hook-health.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
+import { extractChapterTail } from "../utils/chapter-tail.js";
 import type { ChapterPlan } from "../models/chapter-plan.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -53,6 +54,7 @@ export interface WriteChapterInput {
   readonly temperatureOverride?: number;
   readonly allowReapply?: boolean;
   readonly onTextDelta?: (text: string) => void;
+  readonly onThinkingDelta?: (text: string) => void;
   readonly chapterPlan?: ChapterPlan;
 }
 
@@ -200,6 +202,11 @@ export class WriterAgent extends BaseAgent {
     // Load more chapters for dialogue fingerprint extraction (voice consistency over longer span)
     const fingerprintChapters = await this.loadRecentChapters(bookDir, chapterNumber, 5);
 
+    // Extract previous chapter tail for衔接 guidance (only the last ~800 chars worth of paragraphs)
+    const previousChapterTail = chapterNumber > 1
+      ? extractChapterTail(recentChapters)
+      : undefined;
+
     // Load genre profile + book rules
     const { profile: genreProfile, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
@@ -301,6 +308,7 @@ export class WriterAgent extends BaseAgent {
             parentCanon: hasParentCanon ? parentCanon : undefined,
             language: book.language ?? genreProfile.language,
             dialogueQuoteGuideline,
+            previousChapterTail,
           });
         })();
 
@@ -441,6 +449,7 @@ export class WriterAgent extends BaseAgent {
       originalSubplots: subplotBoard,
       originalEmotionalArcs: emotionalArcs,
       originalCharacterMatrix: characterMatrix,
+      onThinkingDelta: input.onThinkingDelta,
     });
     const settlement = settleResult.settlement;
     const settleUsage = settleResult.usage;
@@ -654,6 +663,7 @@ export class WriterAgent extends BaseAgent {
     readonly originalSubplots: string;
     readonly originalEmotionalArcs: string;
     readonly originalCharacterMatrix: string;
+    readonly onThinkingDelta?: (text: string) => void;
   }): Promise<{
     settlement: ReturnType<typeof parseSettlementOutput> & {
       runtimeStateDelta?: RuntimeStateDelta;
@@ -677,7 +687,10 @@ export class WriterAgent extends BaseAgent {
         { role: "system", content: observerSystem },
         { role: "user", content: observerUser },
       ],
-      { temperature: 0.5 },
+      {
+        temperature: 0.5,
+        onTextDelta: params.onThinkingDelta,
+      },
     );
     const observations = observerResponse.content;
 
@@ -726,7 +739,7 @@ export class WriterAgent extends BaseAgent {
         { role: "system", content: settlerSystem },
         { role: "user", content: settlerUser },
       ],
-      { maxTokens: settlerMaxTokens, temperature: 0.3 },
+      { maxTokens: settlerMaxTokens, temperature: 0.3, onTextDelta: params.onThinkingDelta },
     );
 
     let mergedSettlement: ReturnType<typeof parseSettlementOutput> & {
@@ -842,6 +855,7 @@ export class WriterAgent extends BaseAgent {
     readonly parentCanon?: string;
     readonly language?: "zh" | "en";
     readonly dialogueQuoteGuideline?: string;
+    readonly previousChapterTail?: string;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
@@ -898,6 +912,12 @@ ${params.parentCanon}\n`
         : `\n## 伏笔债务硬约束（必须遵守）\n${hookDebtConstraint}\n`)
       : "";
 
+    const previousChapterTailBlock = params.previousChapterTail
+      ? (params.language === "en"
+        ? `\n## Seamless Transition Guide\nThis chapter must start in seamless continuation from where the previous chapter left off — no time, space, or emotional leaps.\n\nEnd of previous chapter:\n${params.previousChapterTail}\n\nRules:\n1. The first paragraph should naturally connect to the previous chapter's ending plot/tone.\n2. If the previous chapter ended with dialogue, action, or a scene, start from the same scene or the immediate next moment.\n3. Do not re-introduce existing characters or settings at the chapter opening.\n`
+        : `\n## 衔接指引\n本章开头必须无缝衔接上一章结尾的内容，不能出现时间、空间、情绪上的跳跃。\n\n上一章结尾内容：\n${params.previousChapterTail}\n\n写作要求：\n1. 本章第一段应与上一章末尾的情节/情绪自然对接\n2. 如果上一章结尾有对话、动作或场景，本章应从同一场景或紧邻的下一时刻开始\n3. 避免在章节开头重新介绍已存在的角色或设定\n`)
+      : "";
+
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
 ${contextBlock}
@@ -910,6 +930,7 @@ ${hookDebtConstraintBlock}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## Recent Chapters
 ${params.recentChapters || "(This is the first chapter, no previous text)"}
+${previousChapterTailBlock}
 
 ## Worldbuilding
 ${params.storyBible}
@@ -940,6 +961,7 @@ ${hookDebtConstraintBlock}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}
+${previousChapterTailBlock}
 
 ## 世界观设定
 ${params.storyBible}

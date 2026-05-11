@@ -5,6 +5,8 @@ import { serve } from "@hono/node-server";
 import {
   StateManager,
   PipelineRunner,
+  ChapterDesignAgent,
+  BaseAgent,
   createLLMClient,
   createLogger,
   createInteractionToolsFromDeps,
@@ -35,6 +37,7 @@ import {
   chatCompletion,
   buildExportArtifact,
   GLOBAL_ENV_PATH,
+  type AgentContext,
   type ResolvedModel,
   type PipelineConfig,
   type ProjectConfig,
@@ -10787,36 +10790,387 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   });
 
+  // --- Helpers ---
+
+  async function readOutlineMaxChapters(bookDir: string): Promise<number | null> {
+    try {
+      const outline = await readFile(join(bookDir, "story", "volume_outline.md"), "utf-8");
+      const match = outline.match(/共\s*(\d+)\s*章/);
+      if (match) return parseInt(match[1]!, 10);
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function createDesignAgent(): Promise<ChapterDesignAgent> {
+    const config = await loadCurrentProjectConfig();
+    const client = createLLMClient(config.llm);
+    const logger = createLogger({ tag: "chapter-design", sinks: [consoleSink, sseSink] });
+    const ctx: AgentContext = {
+      client,
+      model: config.llm.model,
+      projectRoot: root,
+      logger,
+    };
+    return new ChapterDesignAgent(ctx);
+  }
+
+  function loadPlansJson(raw: string): { plans: any[]; maxChapter: number } {
+    const data = JSON.parse(raw);
+    const plans = Array.isArray(data.plans) ? data.plans : [];
+    const maxChapter = plans.reduce((max: number, p: any) => Math.max(max, p.chapterNumber ?? 0), 0);
+    return { plans, maxChapter };
+  }
+
+  async function trimPlansBeyondOutline(bookDir: string, plansPath: string): Promise<void> {
+    const outlineMax = await readOutlineMaxChapters(bookDir);
+    if (!outlineMax) return;
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const { plans } = loadPlansJson(raw);
+      const excess = plans.filter((p: any) => p.chapterNumber > outlineMax);
+      if (excess.length === 0) return;
+      const trimmed = plans.filter((p: any) => p.chapterNumber <= outlineMax);
+      await writeFile(plansPath, JSON.stringify({ plans: trimmed, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+    } catch { /* file not found or unreadable — nothing to trim */ }
+  }
+
   // --- Chapter Plans ---
 
   app.get("/api/v1/books/:id/chapter-plans", async (c) => {
     const id = c.req.param("id");
     const bookDir = state.bookDir(id);
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    await trimPlansBeyondOutline(bookDir, plansPath);
     try {
       const raw = await readFile(plansPath, "utf-8");
-      const data = JSON.parse(raw);
-      const plans = Array.isArray(data.plans) ? data.plans : [];
+      const { plans } = loadPlansJson(raw);
       return c.json({ count: plans.length, plans });
     } catch {
       return c.json({ count: 0, plans: [] });
     }
   });
 
-  app.post("/api/v1/books/:id/chapter-plans/generate-batch", async (c) => {
-    return c.json({ error: "Not implemented: use agent workflow instead" }, 501);
+  app.post("/api/v1/books/:id/chapter-plans/precheck-generate", async (c) => {
+    const id = c.req.param("id");
+    const { startChapter, count } = await c.req.json<{ startChapter: number; count: number }>();
+    if (!startChapter || !count || startChapter < 1 || count < 1) {
+      return c.json({ error: "startChapter and count are required" }, 400);
+    }
+    const bookDir = state.bookDir(id);
+    const endChapter = startChapter + count - 1;
+
+    // Validate against outline max chapters
+    const outlineMax = await readOutlineMaxChapters(bookDir);
+    let targetChapters = 200;
+    try {
+      const book = await state.loadBookConfig(id);
+      targetChapters = outlineMax ?? book.targetChapters ?? 200;
+    } catch { /* ignore */ }
+    const effectiveEndChapter = Math.min(endChapter, targetChapters);
+    const effectiveCount = effectiveEndChapter - startChapter + 1;
+
+    // Trim excess plans beyond outline and load
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    await trimPlansBeyondOutline(bookDir, plansPath);
+    let existingPlans: any[] = [];
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      existingPlans = loadPlansJson(raw).plans;
+    } catch { /* ignore */ }
+    const existingPlanMap = new Map(existingPlans.map((p: any) => [p.chapterNumber, p]));
+
+    // List existing chapter content files
+    const chaptersDir = join(bookDir, "chapters");
+    let chapterFiles: string[] = [];
+    try { chapterFiles = await readdir(chaptersDir); } catch { /* ignore */ }
+    const existingChapterNumbers = new Set(
+      chapterFiles
+        .map((f) => parseChapterFileNumber(f))
+        .filter((n): n is number => n !== null),
+    );
+
+    // Build per-chapter status
+    const chapters = [];
+    let hasExistingPlan = false;
+    for (let ch = startChapter; ch <= effectiveEndChapter; ch++) {
+      const plan = existingPlanMap.get(ch);
+      const hasPlan = !!plan;
+      if (hasPlan) hasExistingPlan = true;
+      chapters.push({
+        chapterNumber: ch,
+        hasPlan,
+        hasContent: existingChapterNumbers.has(ch),
+        status: plan?.status ?? null,
+      });
+    }
+
+    return c.json({
+      startChapter,
+      endChapter: effectiveEndChapter,
+      count: effectiveCount,
+      chapters,
+      hasConflict: false,
+      hasExistingPlan,
+    });
   });
 
-  app.post("/api/v1/books/:id/chapter-plans/precheck-generate", async (c) => {
-    return c.json({ error: "Not implemented" }, 501);
+  app.post("/api/v1/books/:id/chapter-plans/generate-batch", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json<{ startChapter?: number; count: number; force?: boolean }>();
+    const bookDir = state.bookDir(id);
+    const chapterCount = body.count || 20;
+
+    // Load book config and validate against outline
+    let book;
+    try {
+      book = await state.loadBookConfig(id);
+    } catch (e) {
+      return c.json({ error: `Book not found: ${e}` }, 404);
+    }
+    const outlineMax = await readOutlineMaxChapters(bookDir);
+    const targetChapters = outlineMax ?? book.targetChapters ?? 200;
+
+    // Trim excess plans beyond outline and load
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    await trimPlansBeyondOutline(bookDir, plansPath);
+    let existingPlans: any[] = [];
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      existingPlans = loadPlansJson(raw).plans;
+    } catch { /* ignore */ }
+
+    // Determine start chapter (first unplanned if not specified)
+    let startChapter = body.startChapter;
+    if (!startChapter || startChapter < 1) {
+      const plannedNumbers = new Set(existingPlans.map((p: any) => p.chapterNumber));
+      startChapter = 1;
+      while (plannedNumbers.has(startChapter)) startChapter++;
+    }
+
+    // Validate range against target
+    const endChapter = startChapter + chapterCount - 1;
+    if (endChapter > targetChapters) {
+      return c.json({ error: `生成范围超出卷纲规划章数 (${targetChapters}章): ${startChapter}-${endChapter}` }, 400);
+    }
+
+    // If not forced, check for existing plans in range
+    if (!body.force) {
+      const rangePlans = existingPlans.filter((p: any) => p.chapterNumber >= startChapter && p.chapterNumber <= endChapter);
+      if (rangePlans.length > 0) {
+        return c.json({
+          ok: false,
+          partial: false,
+          failedChapters: rangePlans.map((p: any) => ({
+            chapterNumber: p.chapterNumber,
+            reasonCode: "ALREADY_PLANNED",
+            reason: "已有分章设计，如需覆盖请使用强制生成",
+          })),
+        });
+      }
+    }
+
+    // Create agent and generate
+    try {
+      const agent = await createDesignAgent();
+      const plans = await agent.designBatch({
+        book,
+        bookDir,
+        startChapter,
+        count: endChapter - startChapter + 1,
+        existingPlans: existingPlans.filter((p: any) => p.chapterNumber < startChapter),
+        language: book.language,
+      });
+
+      // Merge with existing plans and save
+      const merged = [...existingPlans];
+      for (const plan of plans) {
+        const idx = merged.findIndex((p: any) => p.chapterNumber === plan.chapterNumber);
+        if (idx >= 0) merged[idx] = plan;
+        else merged.push(plan);
+      }
+      merged.sort((a: any, b: any) => a.chapterNumber - b.chapterNumber);
+      await writeFile(plansPath, JSON.stringify({ plans: merged, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+
+      return c.json({ ok: true, successChapters: plans.map((p) => p.chapterNumber) });
+    } catch (e) {
+      return c.json({ error: `生成失败: ${e}` }, 500);
+    }
   });
 
   app.post("/api/v1/books/:id/chapter-plans/fill-missing", async (c) => {
-    return c.json({ error: "Not implemented: use agent workflow instead" }, 501);
+    const id = c.req.param("id");
+    const { startChapter, endChapter } = await c.req.json<{ startChapter: number; endChapter: number }>();
+    const bookDir = state.bookDir(id);
+
+    // Load book config
+    let book;
+    try {
+      book = await state.loadBookConfig(id);
+    } catch (e) {
+      return c.json({ error: `Book not found: ${e}` }, 404);
+    }
+
+    // Trim excess plans beyond outline and load
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    await trimPlansBeyondOutline(bookDir, plansPath);
+    let existingPlans: any[] = [];
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      existingPlans = loadPlansJson(raw).plans;
+    } catch { /* ignore */ }
+
+    // Find missing chapter numbers
+    const plannedNumbers = new Set(existingPlans.map((p: any) => p.chapterNumber));
+    const missing: number[] = [];
+    for (let ch = startChapter; ch <= endChapter; ch++) {
+      if (!plannedNumbers.has(ch)) missing.push(ch);
+    }
+    if (missing.length === 0) {
+      return c.json({ ok: true, successChapters: [] });
+    }
+
+    // Group missing numbers into consecutive ranges (max 20 per batch)
+    const BATCH_SIZE = 20;
+    const ranges: Array<{ start: number; count: number }> = [];
+    let i = 0;
+    while (i < missing.length) {
+      const rangeStart = missing[i]!;
+      let rangeEnd = rangeStart;
+      let j = i;
+      while (j < missing.length && missing[j]! - rangeEnd <= 1 && (j - i) < BATCH_SIZE) {
+        rangeEnd = missing[j]!;
+        j++;
+      }
+      ranges.push({ start: rangeStart, count: rangeEnd - rangeStart + 1 });
+      i = j;
+    }
+
+    // Generate each range
+    const agent = await createDesignAgent();
+    const allPlans: any[] = [];
+    const failedChapters: Array<{ chapterNumber: number; reason: string }> = [];
+
+    for (const range of ranges) {
+      try {
+        const plans = await agent.designBatch({
+          book,
+          bookDir,
+          startChapter: range.start,
+          count: range.count,
+          existingPlans: existingPlans.filter((p: any) => p.chapterNumber < range.start),
+          language: book.language,
+        });
+        allPlans.push(...plans);
+      } catch (e) {
+        for (let ch = range.start; ch < range.start + range.count; ch++) {
+          failedChapters.push({ chapterNumber: ch, reason: String(e) });
+        }
+      }
+    }
+
+    // Merge and save
+    const merged = [...existingPlans];
+    for (const plan of allPlans) {
+      const idx = merged.findIndex((p: any) => p.chapterNumber === plan.chapterNumber);
+      if (idx >= 0) merged[idx] = plan;
+      else merged.push(plan);
+    }
+    merged.sort((a: any, b: any) => a.chapterNumber - b.chapterNumber);
+    await writeFile(plansPath, JSON.stringify({ plans: merged, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+
+    return c.json({
+      ok: failedChapters.length === 0,
+      partial: failedChapters.length > 0 && allPlans.length > 0,
+      successChapters: allPlans.map((p) => p.chapterNumber),
+      failedChapters: failedChapters.length > 0 ? failedChapters : undefined,
+    });
   });
 
   app.post("/api/v1/books/:id/chapter-plans/backfill-from-chapter", async (c) => {
-    return c.json({ error: "Not implemented: use agent workflow instead" }, 501);
+    const id = c.req.param("id");
+    const { startChapter, endChapter } = await c.req.json<{ startChapter: number; endChapter: number }>();
+    const bookDir = state.bookDir(id);
+
+    // Load book config
+    let book;
+    try {
+      book = await state.loadBookConfig(id);
+    } catch (e) {
+      return c.json({ error: `Book not found: ${e}` }, 404);
+    }
+
+    // Trim excess plans beyond outline and load
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    await trimPlansBeyondOutline(bookDir, plansPath);
+    let existingPlans: any[] = [];
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      existingPlans = loadPlansJson(raw).plans;
+    } catch { /* ignore */ }
+
+    // List chapter files that lack plans
+    const chaptersDir = join(bookDir, "chapters");
+    let chapterFiles: string[] = [];
+    try { chapterFiles = await readdir(chaptersDir); } catch { /* ignore */ }
+
+    const plannedNumbers = new Set(existingPlans.map((p: any) => p.chapterNumber));
+    const toBackfill = chapterFiles
+      .map((f) => parseChapterFileNumber(f))
+      .filter((n): n is number => n !== null && n >= startChapter && n <= endChapter && !plannedNumbers.has(n))
+      .sort((a, b) => a - b);
+
+    if (toBackfill.length === 0) {
+      return c.json({ ok: true, successChapters: [] });
+    }
+
+    // Backfill each chapter one at a time (needs to read content)
+    const agent = await createDesignAgent();
+    const allPlans: any[] = [];
+    const failedChapters: Array<{ chapterNumber: number; reasonCode?: string; reason: string }> = [];
+
+    for (const ch of toBackfill) {
+      try {
+        // Find the chapter file
+        const file = chapterFiles.find((f) => parseChapterFileNumber(f) === ch);
+        if (!file) {
+          failedChapters.push({ chapterNumber: ch, reasonCode: "CHAPTER_CONTENT_MISSING", reason: "章节文件未找到" });
+          continue;
+        }
+        const content = await readFile(join(chaptersDir, file), "utf-8");
+        const title = deriveChapterTitle({ chapterNumber: ch, fileName: file, markdown: content });
+
+        const plan = await agent.analyzeAndDesignChapter({
+          book,
+          bookDir,
+          chapterNumber: ch,
+          title,
+          content,
+          language: book.language,
+        });
+        allPlans.push(plan);
+      } catch (e) {
+        failedChapters.push({ chapterNumber: ch, reasonCode: "CHAPTER_PLAN_AGENT_FAILED", reason: String(e) });
+      }
+    }
+
+    // Merge and save
+    const merged = [...existingPlans];
+    for (const plan of allPlans) {
+      const idx = merged.findIndex((p: any) => p.chapterNumber === plan.chapterNumber);
+      if (idx >= 0) merged[idx] = plan;
+      else merged.push(plan);
+    }
+    merged.sort((a: any, b: any) => a.chapterNumber - b.chapterNumber);
+    await writeFile(plansPath, JSON.stringify({ plans: merged, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+
+    return c.json({
+      ok: failedChapters.length === 0,
+      partial: failedChapters.length > 0 && allPlans.length > 0,
+      successChapters: allPlans.map((p) => p.chapterNumber),
+      failedChapters: failedChapters.length > 0 ? failedChapters : undefined,
+    });
   });
 
   app.put("/api/v1/books/:id/chapter-plans/:num", async (c) => {
