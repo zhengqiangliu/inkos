@@ -4,7 +4,7 @@ import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
 import { chatSelectors, useChatStore } from "../../store/chat";
 import { fetchJson } from "../../hooks/use-api";
-import { PanelRightClose, PanelRightOpen, ArrowLeft, Loader2, Pencil, Save, X } from "lucide-react";
+import { PanelRightClose, PanelRightOpen, ArrowLeft, Loader2, Pencil, Save, X, Maximize2 } from "lucide-react";
 import { Streamdown } from "streamdown";
 import { cjk } from "@streamdown/cjk";
 import { ProgressSection } from "../sidebar/ProgressSection";
@@ -22,6 +22,11 @@ import {
 } from "../../utils/book-rules-policy";
 import { estimateAuditScoreFromIssueTexts, scoreBadgeClass } from "../../utils/audit-score";
 import { countChapterLengthByLanguage } from "../../utils/chapter-length";
+import { useTextSelection } from "../../hooks/use-text-selection";
+import { useHighlightApi } from "../../hooks/use-highlight-api";
+import { ChapterSelectionToolbar } from "../sidebar/ChapterSelectionToolbar";
+import { ChapterRevisionSection } from "../sidebar/ChapterRevisionSection";
+import { ChapterFullscreenModal } from "../sidebar/ChapterFullscreenModal";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { ChapterPlansSection } from "../sidebar/ChapterPlansSection";
 import {
@@ -162,6 +167,10 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
   const [openingApplyInGovernedMode, setOpeningApplyInGovernedMode] = useState(true);
   const [openingStrict, setOpeningStrict] = useState(true);
   const [openingMaxCharacters, setOpeningMaxCharacters] = useState(5);
+  const contentContainerRef = useRef<HTMLDivElement | null>(null);
+  const { selectedText, isSelecting, selectionRect, persistedRange, clearSelection } = useTextSelection(contentContainerRef);
+  useHighlightApi(persistedRange);
+  const [fullscreen, setFullscreen] = useState(false);
 
   const isChapter = artifactChapter !== null;
   const isBookRules = !isChapter && artifactFile === "book_rules.md";
@@ -234,6 +243,19 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
     setOpeningStrict(opening.strict);
     setOpeningMaxCharacters(opening.maxCharacters);
   }, [isBookRules, content]);
+
+  const handleRevisionComplete = useCallback((newContent: string | null) => {
+    if (newContent !== null) {
+      setContent(newContent);
+      setEditContent(newContent);
+      setContentWordCount(countChapterLengthByLanguage(newContent));
+    }
+  }, []);
+
+  const handleSendToRevision = useCallback(() => {
+    const el = document.querySelector("[data-revision-section]");
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, []);
 
   const handleEdit = useCallback(() => {
     setEditContent(content ?? "");
@@ -436,6 +458,15 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
             <Pencil size={12} />
           </button>
         )}
+        {!loading && content !== null && (
+          <button
+            onClick={() => setFullscreen(true)}
+            className="w-6 h-6 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+            title="全屏预览"
+          >
+            <Maximize2 size={12} />
+          </button>
+        )}
         {editing && (
           <div className="flex items-center gap-1">
             <button
@@ -574,11 +605,38 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
             className="w-full h-full min-h-[300px] bg-transparent text-sm leading-7 px-4 py-3 resize-none outline-none border-0 font-mono"
           />
         ) : (
-          <div className="px-4 py-3 text-sm leading-7">
+          <div ref={contentContainerRef} className="px-4 py-3 text-sm leading-7">
+            {isChapter && isSelecting && selectedText && (
+              <ChapterSelectionToolbar
+                selectedText={selectedText}
+                onSendToRevision={handleSendToRevision}
+                onDismiss={clearSelection}
+              />
+            )}
             <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
           </div>
         )}
       </div>
+      {isChapter && content !== null && !loading && (
+        <div data-revision-section>
+          <ChapterRevisionSection
+            bookId={bookId}
+            chapterNumber={artifactChapter!}
+            selectedText={selectedText}
+            onRevisionComplete={handleRevisionComplete}
+          />
+        </div>
+      )}
+      {fullscreen && content !== null && (
+        <ChapterFullscreenModal
+          title={label}
+          content={content}
+          editContent={editContent}
+          editing={editing}
+          loading={loading}
+          onClose={() => setFullscreen(false)}
+        />
+      )}
     </div>
   );
 }

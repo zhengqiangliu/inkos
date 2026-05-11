@@ -2496,6 +2496,13 @@ function parseDeterministicReviseMode(text: string): "spot-fix" | "polish" | "re
   return "spot-fix";
 }
 
+function extractBriefFromReviseInstruction(instruction: string): string {
+  const match = instruction.match(
+    /^(?:(?:审计|审核)\s*并\s*)?(?:修订|修正|润色|精修|改写|修复)(?:第)?\s*\d+\s*章(?:[。.!！?？,，、；;:：])?\s*([\s\S]*)$/i,
+  );
+  return match?.[1]?.trim() ?? "";
+}
+
 function parseDeterministicAgentAction(instruction: string): DeterministicAgentAction | null {
   const text = normalizeChineseChapterNumerals(instruction.trim());
   if (!text) return null;
@@ -2566,7 +2573,7 @@ function parseDeterministicAgentAction(instruction: string): DeterministicAgentA
       : { kind: "repair-persistence" };
   }
 
-  const zhRevise = text.match(/^(?:(?:审计|审核)\s*并\s*)?(?:修订|修正|润色|精修|改写|修复)(?:第)?\s*(\d+)\s*章(?:[。.!！?？,，、；;:：]?\s*.*)?$/i);
+  const zhRevise = text.match(/^(?:(?:审计|审核)\s*并\s*)?(?:修订|修正|润色|精修|改写|修复)(?:第)?\s*(\d+)\s*章(?:[。.!！?？,，、；;:：]?\s*[\s\S]*)?$/i);
   if (zhRevise?.[1]) {
     const chapterNumber = parseInt(zhRevise[1], 10);
     if (Number.isFinite(chapterNumber) && chapterNumber > 0) {
@@ -6706,6 +6713,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           const stages = PIPELINE_STAGES.rewrite;
           const chapterNumber = deterministicAction.chapterNumber;
           const mode = deterministicAction.mode;
+          const userBrief = extractBriefFromReviseInstruction(instruction);
           const rewriteConsistencyBaseline = mode === "rewrite"
             ? await buildNonDestructiveRewriteBaseline({
               state,
@@ -6783,7 +6791,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               mode,
               autoTriggeredByAudit: false,
             });
-            const reviseResult = await pipeline.reviseDraft(activeBookId, chapterNumber, mode);
+            const reviseResult = await pipeline.reviseDraft(
+              activeBookId,
+              chapterNumber,
+              mode,
+              userBrief ? { userBrief } : undefined,
+            );
             const chapterFileName = await findChapterFileNameByNumber(state, activeBookId, chapterNumber);
             if (rewriteConsistencyBaseline) {
               await enforceNonDestructiveRewriteConsistency({

@@ -354,6 +354,7 @@ export class ContinuityAuditor extends BaseAgent {
         ledger?: string;
         hooks?: string;
       };
+      onThinkingDelta?: (text: string) => void;
     },
   ): Promise<AuditResult> {
     const [diskCurrentState, diskLedger, diskHooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon, fanficCanon, volumeOutline] =
@@ -574,7 +575,10 @@ ${chapterContent}`;
       { role: "system" as const, content: systemPrompt },
       { role: "user" as const, content: userPrompt },
     ];
-    const chatOptions = { temperature: options?.temperature ?? 0.3 };
+    const chatOptions = {
+      temperature: options?.temperature ?? 0.3,
+      ...(options?.onThinkingDelta ? { onTextDelta: options.onThinkingDelta } : {}),
+    };
 
     // Use web search for fact verification when eraResearch is enabled
     const response = gp.eraResearch

@@ -115,25 +115,25 @@ export function ExecutionPanel({
   return (
     <Collapsible
       open={!collapsed}
-      className="rounded-xl border border-slate-700/70 bg-slate-950/80 text-slate-100 shadow-[0_8px_28px_rgba(2,6,23,0.45)] backdrop-blur-sm"
+      className="rounded-xl border border-border/60 bg-card shadow-sm"
     >
       <button
         type="button"
         onClick={() => onCollapsedChange(!collapsed)}
-        className="w-full cursor-pointer rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-slate-900/70"
+        className="w-full cursor-pointer rounded-xl px-3 py-2.5 text-left transition-colors hover:bg-muted/50"
       >
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
-            <span className="rounded border border-cyan-400/40 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-cyan-200">
+            <span className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.16em] text-primary">
               执行阶段面板
             </span>
             {collapsed && (
-              <span className="min-w-0 truncate text-xs text-slate-300">
+              <span className="min-w-0 truncate text-xs text-muted-foreground">
                 {compactStatus}
               </span>
             )}
             {!collapsed && isRunning && (
-              <span className="inline-flex items-center gap-1 text-xs text-cyan-300">
+              <span className="inline-flex items-center gap-1 text-xs text-primary">
                 <Loader2 size={12} className="animate-spin" />
                 {runningStageText}
               </span>
@@ -141,41 +141,41 @@ export function ExecutionPanel({
           </div>
           <div className="ml-auto flex items-center gap-2 shrink-0 whitespace-nowrap">
             {!collapsed && (
-              <span className="hidden items-center gap-1 rounded-md border border-slate-700/80 bg-slate-900/70 px-2 py-0.5 text-xs text-slate-300 sm:inline-flex">
+              <span className="hidden items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground sm:inline-flex">
                 耗时 {formatElapsedMs(summary.elapsedMs)}
               </span>
             )}
             {!collapsed && (
-              <span className="hidden items-center gap-1 rounded-md border border-slate-700/80 bg-slate-900/70 px-2 py-0.5 text-xs text-slate-300 sm:inline-flex">
+              <span className="hidden items-center gap-1 rounded-md border border-border/60 bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground sm:inline-flex">
                 总计 {summary.total}
               </span>
             )}
-            <span className="inline-flex items-center gap-1 rounded-md border border-emerald-700/70 bg-emerald-950/40 px-2 py-0.5 text-xs text-emerald-200">
+            <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-600 dark:text-emerald-400">
               完成 {summary.completed}
             </span>
-            <span className="inline-flex items-center gap-1 rounded-md border border-rose-700/70 bg-rose-950/40 px-2 py-0.5 text-xs text-rose-200">
+            <span className="inline-flex items-center gap-1 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-xs text-destructive">
               失败 {summary.failed}
             </span>
           </div>
           <ChevronDown
             size={14}
-            className={`shrink-0 text-slate-400 transition-transform ${collapsed ? "" : "rotate-180"}`}
+            className={`shrink-0 text-muted-foreground transition-transform ${collapsed ? "" : "rotate-180"}`}
           />
         </div>
       </button>
       <CollapsibleContent className="px-2 pb-2">
         {(summary.activeStageLabel || summary.latestFailure) && (
-          <div className="mb-2 rounded-lg border border-slate-700/70 bg-slate-900/70 px-3 py-2 text-xs">
+          <div className="mb-2 rounded-lg border border-border/50 bg-muted/40 px-3 py-2 text-xs">
             {summary.activeStageLabel && (
-              <div className="text-slate-300">
+              <div className="text-foreground/80">
                 当前步骤：
-                <span className="text-slate-100">
+                <span className="text-foreground font-medium">
                   {summary.activeStageProgressText ?? summary.activeStageLabel}
                 </span>
               </div>
             )}
             {summary.latestFailure && (
-              <div className="mt-1 text-rose-300">
+              <div className="mt-1 text-destructive">
                 最近失败：{summary.latestFailure}
               </div>
             )}
@@ -184,7 +184,7 @@ export function ExecutionPanel({
                 {summary.autoReviewMeta.map((item) => (
                   <span
                     key={item}
-                    className="inline-flex items-center rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[11px] text-sky-200"
+                    className="inline-flex items-center rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[11px] text-primary"
                   >
                     {item}
                   </span>
@@ -199,8 +199,8 @@ export function ExecutionPanel({
             onClick={() => setPipelineExpandMode("expanded")}
             className={`rounded border px-2 py-1 transition-colors ${
               pipelineExpandMode === "expanded"
-                ? "border-cyan-500/60 bg-cyan-500/15 text-cyan-200"
-                : "border-slate-700/70 bg-slate-900/50 text-slate-300 hover:bg-slate-900/80"
+                ? "border-primary/50 bg-primary/10 text-primary"
+                : "border-border/50 bg-muted/30 text-muted-foreground hover:bg-muted/50"
             }`}
           >
             全部展开
@@ -210,8 +210,8 @@ export function ExecutionPanel({
             onClick={() => setPipelineExpandMode("collapsed")}
             className={`rounded border px-2 py-1 transition-colors ${
               pipelineExpandMode === "collapsed"
-                ? "border-cyan-500/60 bg-cyan-500/15 text-cyan-200"
-                : "border-slate-700/70 bg-slate-900/50 text-slate-300 hover:bg-slate-900/80"
+                ? "border-primary/50 bg-primary/10 text-primary"
+                : "border-border/50 bg-muted/30 text-muted-foreground hover:bg-muted/50"
             }`}
           >
             全部折叠
@@ -221,14 +221,14 @@ export function ExecutionPanel({
             onClick={() => setPipelineExpandMode("auto")}
             className={`rounded border px-2 py-1 transition-colors ${
               pipelineExpandMode === "auto"
-                ? "border-cyan-500/60 bg-cyan-500/15 text-cyan-200"
-                : "border-slate-700/70 bg-slate-900/50 text-slate-300 hover:bg-slate-900/80"
+                ? "border-primary/50 bg-primary/10 text-primary"
+                : "border-border/50 bg-muted/30 text-muted-foreground hover:bg-muted/50"
             }`}
           >
             自动
           </button>
         </div>
-        <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-1 py-1">
+        <div className="rounded-lg border border-border/40 bg-muted/20 px-1 py-1">
           <ToolExecutionSteps executions={[...executions]} pipelineExpandMode={pipelineExpandMode} />
         </div>
       </CollapsibleContent>

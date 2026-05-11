@@ -288,6 +288,7 @@ export interface ReviseAuditSummary {
 
 export interface ReviseDraftOptions {
   readonly overrideIssues?: ReadonlyArray<AuditIssue>;
+  readonly userBrief?: string;
   readonly reviseContext?: {
     readonly failureGate?: "critical" | "score" | "none";
     readonly score?: number;
@@ -1562,6 +1563,7 @@ export class PipelineRunner {
         book.genre,
         reviseAuditControlInputWithPreflight
           ? {
+              userBrief: options?.userBrief,
               chapterIntent: reviseAuditControlInputWithPreflight.chapterIntent,
               contextPackage: reviseAuditControlInputWithPreflight.contextPackage,
               ruleStack: reviseAuditControlInputWithPreflight.ruleStack,
@@ -1589,6 +1591,7 @@ export class PipelineRunner {
               },
             }
           : {
+              userBrief: options?.userBrief,
               lengthSpec,
               reviseContext: options?.reviseContext,
               onRevisedContentDelta: (text) => {

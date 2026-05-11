@@ -12,7 +12,12 @@
       "Bash(pnpm build *)",
       "Bash(awk \"{print \\\\$2}\")",
       "Bash(python -c *)",
-      "Bash(pnpm --filter @actalk/inkos-studio build)"
+      "Bash(pnpm --filter @actalk/inkos-studio build)",
+      "Bash(pnpm *)",
+      "Bash(cat)",
+      "Bash(python3 /tmp/patch_reviser.py)",
+      "Bash(python3 /tmp/patch_reviser2.py)",
+      "Bash(python3 /tmp/patch_reviser3.py)"
     ]
   }
 }

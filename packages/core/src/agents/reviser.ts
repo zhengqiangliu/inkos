@@ -115,6 +115,7 @@ export class ReviserAgent extends BaseAgent {
     mode: ReviseMode = DEFAULT_REVISE_MODE,
     genre?: string,
     options?: {
+      userBrief?: string;
       chapterIntent?: string;
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
@@ -375,11 +376,18 @@ ${outputFormat}${structuralIssueRequiredBlock ? `\n=== STRUCTURAL_TRUTH_ACTIONS 
       ? `\n## 文风指南\n${styleGuide}`
       : "";
 
+    const userBriefBlock = options?.userBrief
+      ? `
+## 用户修订要求
+${options.userBrief}
+`
+      : "";
+
     const userPrompt = `请修正第${chapterNumber}章。
 
 ## 审稿问题
 ${issueList}
-
+${userBriefBlock}
 ## 当前状态卡
 ${currentState}
 ${ledgerBlock}

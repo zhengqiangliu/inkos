@@ -321,3 +321,9 @@ h3 { font-size: 1.25rem; }
 [data-streamdown="table-wrapper"] > .flex.items-center.justify-end {
   display: none;
 }
+
+/* ── CSS Custom Highlight API: Chapter text selection ── */
+::highlight(chapter-selection) {
+  background-color: oklch(0.45 0.12 25 / 0.25);
+  cursor: default;
+}

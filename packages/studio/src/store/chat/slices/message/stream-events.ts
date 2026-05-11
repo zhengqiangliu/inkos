@@ -625,21 +625,6 @@ export function attachSessionStreamListeners({
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
           const parts = [...(stream.parts ?? [])];
 
-          if (data.tool === "sub_agent") {
-            const last = parts[parts.length - 1];
-            if (last?.type === "text" && last.content) {
-              parts.pop();
-              const prev = parts[parts.length - 1];
-              if (prev?.type === "thinking") {
-                parts[parts.length - 1] = {
-                  ...prev,
-                  content: prev.content + (prev.content ? "\n\n" : "") + last.content,
-                };
-              } else {
-                parts.push({ type: "thinking", content: last.content, streaming: false });
-              }
-            }
-          }
 
           const agent = data.tool === "sub_agent" ? (data.args?.agent as string | undefined) : undefined;
           const stages: PipelineStage[] | undefined = Array.isArray(data.stages) && data.stages.length > 0

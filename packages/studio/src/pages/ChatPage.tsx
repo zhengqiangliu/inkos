@@ -17,6 +17,7 @@ import {
   ReasoningContent,
 } from "../components/ai-elements/reasoning";
 import { ChatMessage } from "../components/chat/ChatMessage";
+import { ToolExecutionSteps } from "../components/chat/ToolExecutionSteps";
 import { QuickActions } from "../components/chat/QuickActions";
 import {
   Loader2,
@@ -300,6 +301,9 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                               <ReasoningContent>{msg.thinking}</ReasoningContent>
                             </Reasoning>
                           </div>
+                        )}
+                        {msg.toolExecutions && msg.toolExecutions.length > 0 && (
+                          <ToolExecutionSteps executions={msg.toolExecutions} />
                         )}
                         {preview.shouldShowPreview && (
                           <div className="space-y-1">
