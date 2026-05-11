@@ -35,11 +35,11 @@ function buildChapterPlanBlock(plan: ChapterPlan, isEnglish: boolean): string {
   const items: string[] = [];
   if (isEnglish) {
     items.push("## Chapter Design Constraints");
+    items.push(`- Chapter Name: ${plan.chapterName}`);
     items.push(`- Highlight: ${plan.highlight}`);
     items.push(`- Core Conflict: ${plan.coreConflict}`);
     items.push(`- Plot & Conflict: ${plan.plotAndConflict}`);
-    items.push(`- Ending Hook: ${plan.endingHook}`);
-    if (plan.endingHook) items.push(`- Required ending hook: ${plan.endingHook}`);
+    if (plan.endingHook) items.push(`- Ending Hook: ${plan.endingHook}`);
     if ((plan.hookAssignment?.length ?? 0) > 0) {
       items.push("- Hooks to resolve this chapter:");
       for (const h of plan.hookAssignment!) items.push(`  - ${h}`);
@@ -51,6 +51,7 @@ function buildChapterPlanBlock(plan: ChapterPlan, isEnglish: boolean): string {
     items.push(`- Max new hooks to plant: ${plan.maxNewHooks}`);
   } else {
     items.push("## 分章设计约束");
+    items.push(`- 章节名称：${plan.chapterName}`);
     items.push(`- 核心看点：${plan.highlight}`);
     items.push(`- 核心冲突：${plan.coreConflict}`);
     items.push(`- 剧情与冲突：${plan.plotAndConflict}`);
@@ -587,11 +588,11 @@ function buildPreWriteChecklist(book: BookConfig, gp: GenreProfile): string {
 
 function buildChapterPlanRow(plan: ChapterPlan, isEnglish: boolean): string {
   if (isEnglish) {
-    const parts = [`Highlight: ${plan.highlight}`, `Conflict: ${plan.coreConflict}`];
+    const parts = [`Chapter: ${plan.chapterName}`, `Highlight: ${plan.highlight}`, `Conflict: ${plan.coreConflict}`];
     if (plan.endingHook) parts.push(`Ending hook: ${plan.endingHook}`);
     return `| Chapter Design | ${parts.join(" / ")} | Align with chapter design |\n`;
   }
-  const parts = [`看点：${plan.highlight}`, `冲突：${plan.coreConflict}`];
+  const parts = [`章节：${plan.chapterName}`, `看点：${plan.highlight}`, `冲突：${plan.coreConflict}`];
   if (plan.endingHook) parts.push(`结尾钩子：${plan.endingHook}`);
   return `| 分章设计 | ${parts.join(" / ")} | 与分章设计对齐 |\n`;
 }

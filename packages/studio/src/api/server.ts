@@ -44,7 +44,7 @@ import {
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
-import { access, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
@@ -11197,6 +11197,56 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         plans.push(updated);
       }
       await writeFile(plansPath, JSON.stringify({ plans }, null, 2), "utf-8");
+
+      // Sync chapter title if chapterName changed and a chapter body exists
+      const newTitle = typeof body.chapterName === "string" ? body.chapterName.trim() : "";
+      if (newTitle) {
+        try {
+          const chaptersDir = join(bookDir, "chapters");
+          const paddedNum = String(num).padStart(4, "0");
+          const files = await readdir(chaptersDir);
+          const match = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
+          if (match) {
+            const chapterIndex = await state.loadChapterIndex(id).catch(() => [] as any[]);
+            const chapterMeta = chapterIndex.find((ch: any) => ch.number === num);
+            const oldTitle = chapterMeta?.title ?? "";
+            if (oldTitle && oldTitle !== newTitle) {
+              // Read and update chapter file heading
+              const filePath = join(chaptersDir, match);
+              const content = await readFile(filePath, "utf-8");
+
+              // Replace the markdown heading (Chinese or English format)
+              const newContent = content.startsWith(`# 第${num}章 ${oldTitle}`)
+                ? content.replace(`# 第${num}章 ${oldTitle}`, `# 第${num}章 ${newTitle}`)
+                : content.startsWith(`# Chapter ${num}: ${oldTitle}`)
+                  ? content.replace(`# Chapter ${num}: ${oldTitle}`, `# Chapter ${num}: ${newTitle}`)
+                  : content;
+
+              if (newContent !== content) {
+                await writeFile(filePath, newContent, "utf-8");
+              }
+
+              // Rename file if title changed (filename includes sanitized title)
+              const sanitized = newTitle.replace(/[/\\?%*:|"<>]/g, "").replace(/\s+/g, "_").slice(0, 50);
+              const newFilename = `${paddedNum}_${sanitized}.md`;
+              if (match !== newFilename) {
+                await rename(filePath, join(chaptersDir, newFilename)).catch(() => {});
+              }
+
+              // Update chapter index
+              const nowIso = new Date().toISOString();
+              const updatedIndex = chapterIndex.map((ch: any) => {
+                if (ch.number !== num) return ch;
+                return { ...ch, title: newTitle, updatedAt: nowIso };
+              });
+              await state.saveChapterIndex(id, updatedIndex).catch(() => {});
+            }
+          }
+        } catch {
+          // Chapter sync is best-effort — don't fail the plan save
+        }
+      }
+
       return c.json({ ok: true, plan: updated });
     } catch (e) {
       return c.json({ error: String(e) }, 500);

@@ -421,7 +421,7 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
         : (artifactChapterMeta?.wordCount ?? 0);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
       <div className="flex items-center gap-2 px-3 py-2.5 border-b border-border/20 shrink-0">
         <button
           onClick={closeArtifact}
@@ -607,15 +607,6 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
       </div>
       {isChapter && content !== null && !loading && (
         <>
-          {isSelecting && selectedText && (
-            <ChapterSelectionToolbar
-              bookId={bookId}
-              chapterNumber={artifactChapter!}
-              selectedText={selectedText}
-              selectionRect={selectionRect}
-              onDismiss={clearSelection}
-            />
-          )}
           <div data-revision-section>
           <ChapterRevisionSection
             bookId={bookId}
@@ -634,6 +625,15 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
           editing={editing}
           loading={loading}
           onClose={() => setFullscreen(false)}
+        />
+      )}
+      {isSelecting && selectedText && (
+        <ChapterSelectionToolbar
+          bookId={bookId}
+          chapterNumber={artifactChapter!}
+          selectedText={selectedText}
+          selectionRect={selectionRect}
+          onDismiss={clearSelection}
         />
       )}
     </div>

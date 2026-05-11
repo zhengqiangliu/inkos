@@ -1009,6 +1009,20 @@ export function ChaptersSection({
 
   const handleOpenChapterEditor = (ch: ChapterMeta) => {
     openChapterArtifact(ch.number, {
+      edit: false,
+      meta: {
+        number: ch.number,
+        title: ch.title,
+        status: ch.status,
+        wordCount: ch.wordCount ?? 0,
+        auditIssues: Array.isArray(ch.auditIssues) ? ch.auditIssues : [],
+        ...(ch.audit ? { audit: ch.audit } : {}),
+      },
+    });
+  };
+
+  const handleEditChapter = (ch: ChapterMeta) => {
+    openChapterArtifact(ch.number, {
       edit: true,
       meta: {
         number: ch.number,
@@ -1295,7 +1309,7 @@ export function ChaptersSection({
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleOpenChapterEditor(ch)}
+                        onClick={() => handleEditChapter(ch)}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
                         title={t("common.edit")}
                       >
