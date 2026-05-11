@@ -18,6 +18,8 @@ interface ChapterPlan {
   needsReview?: boolean;
   lockedFields?: ReadonlyArray<string>;
   driftFlags?: ReadonlyArray<{ code: string; message: string }>;
+  maxNewHooks?: number;
+  maxRecoveryPerChapter?: number;
   anchorRefs?: {
     outlineAnchorId?: string;
     worldRefs?: ReadonlyArray<string>;
@@ -517,6 +519,16 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
                           <label className="text-[10px] text-muted-foreground font-medium">结尾钩子</label>
                           <p className="text-xs text-foreground mt-0.5">{plan.endingHook || "—"}</p>
                         </div>
+                        <div className="flex gap-4 pt-1">
+                          <div>
+                            <label className="text-[10px] text-muted-foreground font-medium">新增伏笔上限</label>
+                            <p className="text-xs text-foreground mt-0.5">{plan.maxNewHooks ?? 3}</p>
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-muted-foreground font-medium">每章最多回收</label>
+                            <p className="text-xs text-foreground mt-0.5">{plan.maxRecoveryPerChapter ?? 3}</p>
+                          </div>
+                        </div>
                       </div>
 
                       {/* Action buttons */}
@@ -800,6 +812,8 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
     plotAndConflict: plan?.plotAndConflict ?? "",
     emotionalTone: plan?.emotionalTone ?? "",
     endingHook: plan?.endingHook ?? "",
+    maxNewHooks: plan?.maxNewHooks ?? 3,
+    maxRecoveryPerChapter: plan?.maxRecoveryPerChapter ?? 3,
   });
   const [aiPrompt, setAiPrompt] = useState("");
   const [saving, setSaving] = useState(false);
@@ -827,6 +841,8 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
           plotAndConflict: parsed.plotAndConflict ?? prev.plotAndConflict,
           emotionalTone: parsed.emotionalTone ?? prev.emotionalTone,
           endingHook: parsed.endingHook ?? prev.endingHook,
+          maxNewHooks: parsed.maxNewHooks ?? prev.maxNewHooks,
+          maxRecoveryPerChapter: parsed.maxRecoveryPerChapter ?? prev.maxRecoveryPerChapter,
         }));
       } catch {
         // If not JSON, show as highlight
@@ -924,6 +940,32 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
               className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               placeholder="本章结尾留下的悬念或转折"
             />
+          </div>
+
+          {/* Hook limits */}
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="text-[11px] font-medium text-muted-foreground">新增伏笔上限</label>
+              <input
+                type="number"
+                min={0}
+                max={10}
+                value={form.maxNewHooks}
+                onChange={(e) => setForm((p) => ({ ...p, maxNewHooks: Math.max(0, parseInt(e.target.value) || 0) }))}
+                className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-[11px] font-medium text-muted-foreground">每章最多回收伏笔</label>
+              <input
+                type="number"
+                min={0}
+                max={10}
+                value={form.maxRecoveryPerChapter}
+                onChange={(e) => setForm((p) => ({ ...p, maxRecoveryPerChapter: Math.max(0, parseInt(e.target.value) || 0) }))}
+                className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
+              />
+            </div>
           </div>
 
           {/* AI Optimize Section */}

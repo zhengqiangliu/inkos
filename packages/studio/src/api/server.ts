@@ -10949,15 +10949,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       while (plannedNumbers.has(startChapter)) startChapter++;
     }
 
-    // Validate range against target
+    // Validate range against outline and clamp if needed
     const endChapter = startChapter + chapterCount - 1;
-    if (endChapter > targetChapters) {
-      return c.json({ error: `生成范围超出卷纲规划章数 (${targetChapters}章): ${startChapter}-${endChapter}` }, 400);
+    if (startChapter > targetChapters) {
+      return c.json({ error: `起始章节 ${startChapter} 超出卷纲规划章数 (${targetChapters}章)` }, 400);
+    }
+    const clampedEnd = Math.min(endChapter, targetChapters);
+    const clampedCount = clampedEnd - startChapter + 1;
+    if (clampedEnd < endChapter) {
+      // 超出卷纲范围的分章设计已自动清除，生成范围已自动缩小
     }
 
     // If not forced, check for existing plans in range
     if (!body.force) {
-      const rangePlans = existingPlans.filter((p: any) => p.chapterNumber >= startChapter && p.chapterNumber <= endChapter);
+      const rangePlans = existingPlans.filter((p: any) => p.chapterNumber >= startChapter && p.chapterNumber <= clampedEnd);
       if (rangePlans.length > 0) {
         return c.json({
           ok: false,
@@ -10978,7 +10983,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         book,
         bookDir,
         startChapter,
-        count: endChapter - startChapter + 1,
+        count: clampedCount,
         existingPlans: existingPlans.filter((p: any) => p.chapterNumber < startChapter),
         language: book.language,
       });

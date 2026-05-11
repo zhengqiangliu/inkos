@@ -360,6 +360,7 @@ ${outputFormat}${structuralIssueRequiredBlock ? `\n=== STRUCTURAL_TRUTH_ACTIONS 
       hooks: parsePendingHooksMarkdown(hooksWorkingSet),
       chapterNumber,
       language: resolvedLanguage,
+      maxRecoveryPerChapter: options?.chapterPlan?.maxRecoveryPerChapter,
     });
     const hookDebtHardConstraintBlock = hookDebtHardConstraint
       ? (resolvedLanguage === "en"

@@ -14,18 +14,17 @@ export function ChapterSelectionToolbar({
   bookId,
   chapterNumber,
   selectedText,
-  selectionRect,
+  selectionRect: _selectionRect,
   onDismiss,
 }: ChapterSelectionToolbarProps) {
   const [brief, setBrief] = useState("");
   const [sending, setSending] = useState(false);
-  const popupRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const createDraftSession = useChatStore((s) => s.createDraftSession);
 
-  // Auto-focus textarea when popup opens
+  // Auto-focus textarea
   useEffect(() => {
     const timer = setTimeout(() => textareaRef.current?.focus(), 100);
     return () => clearTimeout(timer);
@@ -46,7 +45,7 @@ export function ChapterSelectionToolbar({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
   }, [brief]);
 
   const handleModify = useCallback(async () => {
@@ -67,39 +66,26 @@ export function ChapterSelectionToolbar({
   }, [activeSessionId, bookId, chapterNumber, selectedText, brief, sending, sendMessage, createDraftSession, onDismiss]);
 
   const canModify = brief.trim().length > 0 && !sending;
-
-  // Compute popup position
-  const popupStyle: React.CSSProperties = {};
-  if (selectionRect) {
-    // Position below the selection, or above if not enough room
-    const spaceBelow = window.innerHeight - selectionRect.bottom;
-    const popupHeight = 260;
-    if (spaceBelow >= popupHeight) {
-      popupStyle.top = `${selectionRect.bottom + 6}px`;
-    } else {
-      popupStyle.bottom = `${window.innerHeight - selectionRect.top + 6}px`;
-    }
-    // Center horizontally relative to selection, clamped to viewport edges
-    const popupWidth = 380;
-    let left = selectionRect.left + (selectionRect.width - popupWidth) / 2;
-    left = Math.max(12, Math.min(left, window.innerWidth - popupWidth - 12));
-    popupStyle.left = `${left}px`;
-  }
+  const charCount = selectedText.length;
+  const truncatedPreview = selectedText.length > 200
+    ? `${selectedText.slice(0, 200)}...`
+    : selectedText;
 
   return (
-    <div
-      ref={popupRef}
-      className="fixed z-50 w-[380px] rounded-xl border border-border/60 bg-card shadow-xl"
-      style={popupStyle}
-    >
-      {/* Header */}
-      <div className="flex items-start justify-between gap-2 border-b border-border/30 px-3 py-2">
+    <div className="border-t border-border/30 bg-card px-4 py-3 space-y-3">
+      {/* Header: selected text preview + word count */}
+      <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">
-            AI 修改 · 选中内容
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              AI 修改
+            </span>
+            <span className="text-[10px] text-muted-foreground/60">
+              选中 {charCount} 字
+            </span>
           </div>
-          <p className="text-xs text-foreground/80 line-clamp-2 leading-5 break-words">
-            {selectedText}
+          <p className="text-xs text-foreground/80 leading-5 break-words line-clamp-2">
+            {truncatedPreview}
           </p>
         </div>
         <button
@@ -111,21 +97,19 @@ export function ChapterSelectionToolbar({
         </button>
       </div>
 
-      {/* Input */}
-      <div className="px-3 py-2">
-        <textarea
-          ref={textareaRef}
-          value={brief}
-          onChange={(e) => setBrief(e.target.value)}
-          placeholder="输入修改要求..."
-          disabled={sending}
-          rows={2}
-          className="w-full rounded-lg border border-border/40 bg-background px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/40 resize-none disabled:opacity-50"
-        />
-      </div>
+      {/* Modification input */}
+      <textarea
+        ref={textareaRef}
+        value={brief}
+        onChange={(e) => setBrief(e.target.value)}
+        placeholder="输入修改要求..."
+        disabled={sending}
+        rows={2}
+        className="w-full rounded-lg border border-border/40 bg-background px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/40 resize-none disabled:opacity-50"
+      />
 
-      {/* Action */}
-      <div className="flex items-center justify-between border-t border-border/30 px-3 py-2">
+      {/* Action buttons */}
+      <div className="flex items-center justify-between">
         <button
           type="button"
           onClick={onDismiss}

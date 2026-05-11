@@ -42,28 +42,36 @@ export function renderHookSnapshot(
 ): string {
   if (hooks.length === 0) return "- none";
 
+  const hasExpectedChapter = hooks.some((h) => h.expectedChapter != null && h.expectedChapter > 0);
+
   const headers = language === "en"
     ? [
-      "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | payoff_timing | notes |",
-      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+      `| hook_id | start_chapter | type | status | last_advanced | expected_payoff | payoff_timing | notes${hasExpectedChapter ? " | expected_chapter" : ""} |`,
+      `| --- | --- | --- | --- | --- | --- | --- | ---${hasExpectedChapter ? " | ---" : ""} |`,
     ]
     : [
-      "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 |",
-      "| --- | --- | --- | --- | --- | --- | --- | --- |",
+      `| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注${hasExpectedChapter ? " | 预期回收章节" : ""} |`,
+      `| --- | --- | --- | --- | --- | --- | --- | ---${hasExpectedChapter ? " | ---" : ""} |`,
     ];
 
   return [
     ...headers,
-    ...hooks.map((hook) => [
-      hook.hookId,
-      hook.startChapter,
-      hook.type,
-      hook.status,
-      hook.lastAdvancedChapter,
-      hook.expectedPayoff,
-      localizeHookPayoffTiming(resolveHookPayoffTiming(hook), language),
-      hook.notes,
-    ].map((cell) => escapeTableCell(String(cell))).join(" | ")).map((row) => `| ${row} |`),
+    ...hooks.map((hook) => {
+      const cells = [
+        hook.hookId,
+        hook.startChapter,
+        hook.type,
+        hook.status,
+        hook.lastAdvancedChapter,
+        hook.expectedPayoff,
+        localizeHookPayoffTiming(resolveHookPayoffTiming(hook), language),
+        hook.notes,
+      ];
+      if (hasExpectedChapter) {
+        cells.push(hook.expectedChapter != null ? String(hook.expectedChapter) : "-");
+      }
+      return cells.map((cell) => escapeTableCell(String(cell))).join(" | ");
+    }).map((row) => `| ${row} |`),
   ].join("\n");
 }
 
@@ -207,6 +215,13 @@ function parseStrictChapterInteger(value: string | undefined): number {
   return /^\d+$/.test(stripped) ? parseInt(stripped, 10) : 0;
 }
 
+function parseOptionalChapterInteger(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const stripped = normalizeHookId(value);
+  if (!stripped || stripped === "-") return undefined;
+  return /^\d+$/.test(stripped) ? parseInt(stripped, 10) : undefined;
+}
+
 export function normalizeHookId(value: string | undefined): string {
   let normalized = (value ?? "").trim();
   let previous = "";
@@ -229,6 +244,9 @@ function parsePendingHookRow(row: ReadonlyArray<string | undefined>): StoredHook
   const legacyShape = row.length < 8;
   const payoffTiming = legacyShape ? undefined : normalizeHookPayoffTiming(row[6]);
   const notes = legacyShape ? (row[6] ?? "") : (row[7] ?? "");
+  const expectedChapter = row.length >= 9
+    ? parseOptionalChapterInteger(row[8])
+    : undefined;
 
   return {
     hookId: normalizeHookId(row[0]),
@@ -239,6 +257,7 @@ function parsePendingHookRow(row: ReadonlyArray<string | undefined>): StoredHook
     expectedPayoff: row[5] ?? "",
     payoffTiming,
     notes,
+    ...(expectedChapter != null ? { expectedChapter } : {}),
   };
 }
 

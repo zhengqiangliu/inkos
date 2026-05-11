@@ -64,6 +64,8 @@ export interface StoredHook {
   readonly paysOffInArc?: string;
   /** Half-life for stale detection (chapters). */
   readonly halfLifeChapters?: number;
+  /** Expected chapter for this hook to be resolved. */
+  readonly expectedChapter?: number;
   /** Whether this hook has been promoted from seed to active ledger entry. */
   readonly promoted?: boolean;
 }

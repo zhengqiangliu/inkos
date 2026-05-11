@@ -128,34 +128,18 @@ function applyScoreGateToAuditResult(params: {
   const score = estimateAuditScore(countIssueSeverities(params.auditResult.issues));
   if (score >= MIN_AUDIT_PASS_SCORE) return params.auditResult;
 
-  const isEnglish = params.lengthSpec.countingMode === "en_words";
-  const category = isEnglish ? "Score Gate" : "评分门禁";
-  const hasScoreGateIssue = params.auditResult.issues.some((issue) => issue.category === category);
-  const description = isEnglish
-    ? `Audit score is below the pass threshold (${score}/${MIN_AUDIT_PASS_SCORE}).`
-    : `审计评分低于通过阈值（${score}/${MIN_AUDIT_PASS_SCORE}）。`;
-  const suggestion = isEnglish
-    ? "Address warning-level issues and improve chapter quality before re-audit."
-    : "请优先修复警告项并提升章节质量后再审计。";
-  const issues = hasScoreGateIssue
-    ? params.auditResult.issues
-    : [...params.auditResult.issues, {
-        severity: "warning",
-        category,
-        description,
-        suggestion,
-      } satisfies AuditIssue];
-  const summary = hasScoreGateIssue
-    ? params.auditResult.summary
-    : [params.auditResult.summary?.trim(), description]
-      .filter((entry): entry is string => Boolean(entry && entry.length > 0))
-      .join("\n");
+  // Remove any existing score gate issues — they add a warning that recursively
+  // penalizes the score without being fixable by the reviser, creating a
+  // convergence deadlock. Score gate only blocks `passed` but does not
+  // contribute a fixable issue.
+  const filteredIssues = params.auditResult.issues.filter(
+    (issue) => issue.category !== "评分门禁" && issue.category !== "Score Gate",
+  );
 
   return {
     ...params.auditResult,
     passed: false,
-    issues,
-    summary,
+    issues: filteredIssues,
   };
 }
 
@@ -265,7 +249,7 @@ function resolveAdaptiveMaxReviseRounds(
   if (severity.critical >= 2) {
     resolved = Math.max(resolved, 5);
   }
-  return Math.max(0, Math.min(5, resolved));
+  return Math.max(0, Math.min(3, resolved));
 }
 
 function resolveAdaptiveReviseMode(
@@ -450,7 +434,7 @@ export async function runChapterReviewCycle(params: {
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
   const configuredMaxReviseRounds = Number.isFinite(Number(params.maxReviseRounds))
-    ? Math.max(0, Math.min(5, Math.trunc(Number(params.maxReviseRounds))))
+    ? Math.max(0, Math.min(3, Math.trunc(Number(params.maxReviseRounds))))
     : DEFAULT_AUTO_REVISE_ROUNDS;
   const configuredReviseMode = params.reviseMode ?? AUTO_REVIEW_DEFAULT_MODE;
   let maxReviseRounds = configuredMaxReviseRounds;
@@ -527,10 +511,8 @@ export async function runChapterReviewCycle(params: {
     params.chapterNumber,
     params.book.genre,
     params.reducedControlInput
-      ? { ...params.reducedControlInput, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd }
-      : params.onThinkingDelta || params.onThinkingEnd
-        ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd }
-        : undefined,
+      ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd }
+      : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}) },
   );
   totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
   const aiTellsResult = params.analyzeAITells(finalContent);
@@ -581,7 +563,11 @@ export async function runChapterReviewCycle(params: {
       unresolvedPrioritizedIssues,
       reviseRound,
     );
-    const reviseMode = resolveAdaptiveReviseMode(configuredReviseMode, issuesForRound, reviseRound);
+    let reviseMode = resolveAdaptiveReviseMode(configuredReviseMode, issuesForRound, reviseRound);
+    // On the final round, escalate to rewrite for a stronger convergence attempt
+    if (reviseMode === "spot-fix" && reviseRound >= maxReviseRounds) {
+      reviseMode = "rewrite";
+    }
     if (hasStructuralAuditSignals(issuesForRound)) {
       try {
         await params.onStructuralPreRevise?.({
@@ -643,7 +629,7 @@ export async function runChapterReviewCycle(params: {
     const preMarkers = params.analyzeAITells(finalContent);
     const postMarkers = params.analyzeAITells(normalizedRevision.content);
     const contentChanged = hasMeaningfulContentDelta(finalContent, normalizedRevision.content);
-    if (postMarkers.issues.length <= preMarkers.issues.length && contentChanged) {
+    if (postMarkers.issues.length <= preMarkers.issues.length + 1 && contentChanged) {
       finalContent = normalizedRevision.content;
       finalWordCount = normalizedRevision.wordCount;
       revised = true;

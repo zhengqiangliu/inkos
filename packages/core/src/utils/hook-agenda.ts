@@ -6,6 +6,8 @@ import { HOOK_HEALTH_DEFAULTS } from "./hook-policy.js";
 
 export const DEFAULT_HOOK_LOOKAHEAD_CHAPTERS = 3;
 
+export const DEFAULT_MAX_RECOVERY_PER_CHAPTER = 3;
+
 /**
  * Build the hook agenda using simple stalest-first sorting.
  * No lifecycle pressure formulas — just pick the hooks that have been
@@ -107,9 +109,27 @@ export function buildHookDebtHardConstraintBlock(params: {
   readonly hooks: ReadonlyArray<StoredHook>;
   readonly chapterNumber: number;
   readonly language?: "zh" | "en";
+  readonly maxRecoveryPerChapter?: number;
 }): string | undefined {
   const language = params.language ?? "zh";
+  const maxRecovery = params.maxRecoveryPerChapter ?? DEFAULT_MAX_RECOVERY_PER_CHAPTER;
   const staleThreshold = params.chapterNumber - 10;
+  const activeHooks = params.hooks
+    .filter((hook) => hook.status !== "resolved" && hook.status !== "deferred");
+
+  // Overdue hooks: expectedChapter < currentChapter and not resolved
+  const overdueHooks = activeHooks
+    .filter((hook) => hook.expectedChapter != null && hook.expectedChapter > 0 && hook.expectedChapter < params.chapterNumber)
+    .sort((a, b) => (a.expectedChapter ?? 0) - (b.expectedChapter ?? 0));
+
+  // Due this chapter: expectedChapter === currentChapter
+  const dueThisChapterHooks = activeHooks
+    .filter((hook) => hook.expectedChapter === params.chapterNumber);
+
+  // Approaching: expectedChapter within next 3 chapters
+  const approachingHooks = activeHooks
+    .filter((hook) => hook.expectedChapter != null && hook.expectedChapter > params.chapterNumber && hook.expectedChapter <= params.chapterNumber + 3)
+    .sort((a, b) => (a.expectedChapter ?? 0) - (b.expectedChapter ?? 0));
 
   const staleHooks = params.hooks
     .filter((hook) => {
@@ -118,6 +138,7 @@ export function buildHookDebtHardConstraintBlock(params: {
       return lastTouch > 0 && lastTouch <= staleThreshold;
     })
     .sort((a, b) => a.lastAdvancedChapter - b.lastAdvancedChapter)
+    .filter((h) => !overdueHooks.includes(h) && !dueThisChapterHooks.includes(h) && !approachingHooks.includes(h))
     .slice(0, 3);
 
   const resolvableHooks = params.hooks
@@ -127,6 +148,7 @@ export function buildHookDebtHardConstraintBlock(params: {
         && hook.lastAdvancedChapter >= params.chapterNumber - 2;
     })
     .sort((a, b) => a.startChapter - b.startChapter)
+    .filter((h) => !overdueHooks.includes(h) && !dueThisChapterHooks.includes(h) && !approachingHooks.includes(h))
     .slice(0, 2);
 
   const dormantHooks = params.hooks
@@ -136,14 +158,39 @@ export function buildHookDebtHardConstraintBlock(params: {
       return lastTouch > 0 && lastTouch <= params.chapterNumber - 5;
     })
     .sort((a, b) => a.lastAdvancedChapter - b.lastAdvancedChapter)
+    .filter((h) => !overdueHooks.includes(h) && !dueThisChapterHooks.includes(h) && !approachingHooks.includes(h))
     .slice(0, 3);
 
-  const allHooks = [...staleHooks, ...resolvableHooks, ...dormantHooks];
+  const allHooks = [...overdueHooks, ...dueThisChapterHooks, ...approachingHooks, ...staleHooks, ...resolvableHooks, ...dormantHooks];
   if (allHooks.length === 0) return undefined;
 
   const lines: string[] = [];
 
   if (language === "en") {
+    if (overdueHooks.length > 0) {
+      lines.push(
+        "### Overdue Hooks - Must Resolve",
+        `These hooks have passed their expected resolution chapter and MUST be resolved:`,
+        ...overdueHooks.map((h) => `- ${h.hookId} (overdue by ${params.chapterNumber - (h.expectedChapter ?? 0)} chapters, expected ch.${h.expectedChapter})`),
+        "",
+      );
+    }
+    if (dueThisChapterHooks.length > 0) {
+      lines.push(
+        "### Hooks Due This Chapter",
+        `These hooks are scheduled for resolution in this chapter:`,
+        ...dueThisChapterHooks.map((h) => `- ${h.hookId} (expected ch.${h.expectedChapter})`),
+        "",
+      );
+    }
+    if (approachingHooks.length > 0) {
+      lines.push(
+        "### Upcoming Hook Deadlines",
+        "These hooks are due within the next 3 chapters. Consider advancing them:",
+        ...approachingHooks.map((h) => `- ${h.hookId} (expected ch.${h.expectedChapter})`),
+        "",
+      );
+    }
     if (staleHooks.length > 0) {
       lines.push(
         "### Hook Debt - Must Advance",
@@ -168,7 +215,35 @@ export function buildHookDebtHardConstraintBlock(params: {
         "",
       );
     }
+    lines.push(
+      "",
+      `Recovery limit: max ${maxRecovery} hooks can be resolved in this chapter.`,
+    );
   } else {
+    if (overdueHooks.length > 0) {
+      lines.push(
+        "### 逾期伏笔——强制回收",
+        `以下伏笔已超过预期回收章节，本章必须回收：`,
+        ...overdueHooks.map((h) => `- ${h.hookId}（逾期 ${params.chapterNumber - (h.expectedChapter ?? 0)} 章，原预期第${h.expectedChapter}章回收）`),
+        "",
+      );
+    }
+    if (dueThisChapterHooks.length > 0) {
+      lines.push(
+        "### 本章到期伏笔",
+        `以下伏笔按计划应在本章回收：`,
+        ...dueThisChapterHooks.map((h) => `- ${h.hookId}（预期第${h.expectedChapter}章回收）`),
+        "",
+      );
+    }
+    if (approachingHooks.length > 0) {
+      lines.push(
+        "### 即将到期伏笔",
+        `以下伏笔在未来 3 章内到期，争取推进：`,
+        ...approachingHooks.map((h) => `- ${h.hookId}（预期第${h.expectedChapter}章回收）`),
+        "",
+      );
+    }
     if (staleHooks.length > 0) {
       lines.push(
         "### 伏笔债务——必须推进",
@@ -193,6 +268,10 @@ export function buildHookDebtHardConstraintBlock(params: {
         "",
       );
     }
+    lines.push(
+      "",
+      `回收限制：本章最多回收 ${maxRecovery} 个伏笔（不含续写自然发展的伏笔）。`,
+    );
   }
 
   return lines.join("\n");

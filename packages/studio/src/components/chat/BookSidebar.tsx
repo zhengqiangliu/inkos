@@ -601,21 +601,22 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
           />
         ) : (
           <div ref={contentContainerRef} className="px-4 py-3 text-sm leading-7">
-            {isChapter && isSelecting && selectedText && (
-              <ChapterSelectionToolbar
-                bookId={bookId}
-                chapterNumber={artifactChapter!}
-                selectedText={selectedText}
-                selectionRect={selectionRect}
-                onDismiss={clearSelection}
-              />
-            )}
             <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
           </div>
         )}
       </div>
       {isChapter && content !== null && !loading && (
-        <div data-revision-section>
+        <>
+          {isSelecting && selectedText && (
+            <ChapterSelectionToolbar
+              bookId={bookId}
+              chapterNumber={artifactChapter!}
+              selectedText={selectedText}
+              selectionRect={selectionRect}
+              onDismiss={clearSelection}
+            />
+          )}
+          <div data-revision-section>
           <ChapterRevisionSection
             bookId={bookId}
             chapterNumber={artifactChapter!}
@@ -623,6 +624,7 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
             onRevisionComplete={handleRevisionComplete}
           />
         </div>
+        </>
       )}
       {fullscreen && content !== null && (
         <ChapterFullscreenModal

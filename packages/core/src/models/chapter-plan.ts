@@ -57,6 +57,7 @@ export const ChapterPlanSchema = z.object({
   hookAssignment: z.array(z.string()).default([]),
   requiredRecoverHooks: z.array(z.string()).default([]),
   maxNewHooks: z.number().int().min(0).default(3),
+  maxRecoveryPerChapter: z.number().int().min(0).default(3),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
 });

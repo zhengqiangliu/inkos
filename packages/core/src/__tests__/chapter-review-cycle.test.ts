@@ -91,7 +91,7 @@ describe("runChapterReviewCycle", () => {
       fixedDraft,
       1,
       "xuanhuan",
-      undefined,
+      { temperature: 0 },
     );
     expect(result.finalContent).toBe(fixedDraft);
     expect(result.revised).toBe(true);
@@ -215,7 +215,10 @@ describe("runChapterReviewCycle", () => {
       });
     const analyzeAITells = vi.fn((content: string) => ({
       issues: content === "rewritten draft"
-        ? [{ severity: "warning", category: "ai", description: "more ai", suggestion: "reduce" } satisfies AuditIssue]
+        ? [
+            { severity: "warning", category: "ai", description: "more ai", suggestion: "reduce" } satisfies AuditIssue,
+            { severity: "warning", category: "ai", description: "another ai tell", suggestion: "reduce" } satisfies AuditIssue,
+          ]
         : [],
     }));
 
@@ -248,7 +251,7 @@ describe("runChapterReviewCycle", () => {
     });
 
     expect(reviseChapter).toHaveBeenCalledTimes(1);
-    expect(auditChapter).toHaveBeenNthCalledWith(1, "/tmp/book", "original draft", 1, "xuanhuan", undefined);
+    expect(auditChapter).toHaveBeenNthCalledWith(1, "/tmp/book", "original draft", 1, "xuanhuan", { temperature: 0 });
     expect(auditChapter).toHaveBeenNthCalledWith(2, "/tmp/book", "original draft", 1, "xuanhuan", { temperature: 0 });
     expect(result.finalContent).toBe("original draft");
     expect(result.revised).toBe(false);
@@ -486,7 +489,7 @@ describe("runChapterReviewCycle", () => {
     });
 
     expect(result.auditResult.passed).toBe(false);
-    expect(result.auditResult.issues.some((issue) => issue.category === "评分门禁")).toBe(true);
+    expect(result.auditResult.issues.some((issue) => issue.category === "评分门禁")).toBe(false);
   });
 
   it("classifies structural issues and escalates first revise round to rework", async () => {

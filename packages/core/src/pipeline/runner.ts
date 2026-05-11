@@ -1589,6 +1589,19 @@ export class PipelineRunner {
         en: `${mode === "rewrite" ? "rewriting" : "revising"} chapter ${targetChapter}`,
       });
 
+      // Load chapter plan for maxRecoveryPerChapter
+      let reviseChapterPlan: ChapterPlan | undefined;
+      try {
+        const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+        const raw = await readFile(plansPath, "utf-8");
+        const data = JSON.parse(raw);
+        const plans: ChapterPlan[] = Array.isArray(data.plans) ? data.plans : [];
+        const matched = plans.find((p) => p.chapterNumber === targetChapter);
+        if (matched) {
+          reviseChapterPlan = ChapterPlanSchema.parse(matched);
+        }
+      } catch { /* no chapter-plans.json — ignore */ }
+
       // Load previous chapter tail for衔接 protection (only for rewrite/rework modes)
       const previousChapterForRevise = (mode === "rewrite" || mode === "rework") && targetChapter > 1
         ? await this.readChapterContent(bookDir, targetChapter - 1).catch(() => undefined)
@@ -1612,6 +1625,7 @@ export class PipelineRunner {
               lengthSpec,
               reviseContext: options?.reviseContext,
               previousChapterContent: previousChapterForRevise,
+              chapterPlan: reviseChapterPlan,
               onThinkingDelta: (text) => {
                 if (!text) return;
                 this.config.onReviserThinkingDelta?.({ bookId, chapterNumber: targetChapter, mode, text });
@@ -1645,6 +1659,7 @@ export class PipelineRunner {
               lengthSpec,
               reviseContext: options?.reviseContext,
               previousChapterContent: previousChapterForRevise,
+              chapterPlan: reviseChapterPlan,
               onThinkingDelta: (text) => {
                 if (!text) return;
                 this.config.onReviserThinkingDelta?.({ bookId, chapterNumber: targetChapter, mode, text });
@@ -4272,6 +4287,12 @@ ${matrix}`,
     if (next.passed || next.issues.length > 0 || previous.issues.length === 0) {
       return next;
     }
+
+    // Only restore structural-relevant issues when re-audit returns empty but failed.
+    // Textual-only issues should not be restored — they were likely resolved and
+    // re-introducing them would cause the reviser to waste rounds on fixed problems.
+    const previousHadCritical = previous.issues.some((issue) => issue.severity === "critical");
+    if (!previousHadCritical) return next;
 
     return {
       ...next,

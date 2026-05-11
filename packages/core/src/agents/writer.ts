@@ -309,6 +309,7 @@ export class WriterAgent extends BaseAgent {
             language: book.language ?? genreProfile.language,
             dialogueQuoteGuideline,
             previousChapterTail,
+            maxRecoveryPerChapter: input.chapterPlan?.maxRecoveryPerChapter,
           });
         })();
 
@@ -856,6 +857,7 @@ export class WriterAgent extends BaseAgent {
     readonly language?: "zh" | "en";
     readonly dialogueQuoteGuideline?: string;
     readonly previousChapterTail?: string;
+    readonly maxRecoveryPerChapter?: number;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
@@ -905,6 +907,7 @@ ${params.parentCanon}\n`
       hooks: parsedHooks,
       chapterNumber: params.chapterNumber,
       language: params.language ?? "zh",
+      maxRecoveryPerChapter: params.maxRecoveryPerChapter,
     });
     const hookDebtConstraintBlock = hookDebtConstraint
       ? (params.language === "en"

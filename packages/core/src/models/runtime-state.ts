@@ -35,6 +35,7 @@ export const HookRecordSchema = z.object({
   payoffTiming: HookPayoffTimingSchema.optional(),
   notes: z.string().default(""),
   dependsOn: z.array(z.string()).optional(),
+  expectedChapter: z.number().int().min(0).optional(),
 });
 
 export type HookRecord = z.infer<typeof HookRecordSchema>;
