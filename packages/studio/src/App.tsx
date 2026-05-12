@@ -17,6 +17,7 @@ import { ImportManager } from "./pages/ImportManager";
 import { RadarView } from "./pages/RadarView";
 import { DoctorView } from "./pages/DoctorView";
 import { LanguageSelector } from "./pages/LanguageSelector";
+import { BookCreate } from "./pages/BookCreate";
 import { BookSidebar, BookSidebarToggle } from "./components/chat/BookSidebar";
 import { useSSE } from "./hooks/use-sse";
 import { useSessionEvents } from "./hooks/use-session-events";
@@ -174,13 +175,17 @@ export function App() {
           )}
           {(route.page === "book" || route.page === "book-create") && (
             <div className="absolute inset-0 flex min-w-0">
-              <ChatPage
-                activeBookId={route.page === "book" ? route.bookId : undefined}
-                nav={nav}
-                theme={theme}
-                t={t}
-                sse={sse}
-              />
+              {route.page === "book" ? (
+                <ChatPage
+                  activeBookId={route.bookId}
+                  nav={nav}
+                  theme={theme}
+                  t={t}
+                  sse={sse}
+                />
+              ) : (
+                <BookCreate nav={nav} theme={theme} t={t} />
+              )}
               {route.page === "book" && (
                 <>
                   <BookSidebar bookId={route.bookId} theme={theme} t={t} sse={sse} />

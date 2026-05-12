@@ -3,7 +3,7 @@ import { Loader2, Send, X } from "lucide-react";
 import { useChatStore } from "../../store/chat";
 import {
   buildChapterRevisionInstruction,
-  getChapterRevisionModeMeta,
+  getChapterRevisionDisplayMeta,
 } from "./chapter-revision-utils";
 
 interface ChapterSelectionToolbarProps {
@@ -11,6 +11,7 @@ interface ChapterSelectionToolbarProps {
   readonly chapterNumber: number;
   readonly selectedText: string;
   readonly selectionRect: DOMRect | null;
+  readonly selectionModeActive: boolean;
   readonly onDismiss: () => void;
 }
 
@@ -19,6 +20,7 @@ export function ChapterSelectionToolbar({
   chapterNumber,
   selectedText,
   selectionRect: _selectionRect,
+  selectionModeActive,
   onDismiss,
 }: ChapterSelectionToolbarProps) {
   const [brief, setBrief] = useState("");
@@ -29,8 +31,9 @@ export function ChapterSelectionToolbar({
   const sendMessage = useChatStore((s) => s.sendMessage);
   const createDraftSession = useChatStore((s) => s.createDraftSession);
 
-  const modeMeta = getChapterRevisionModeMeta(selectedText);
-  const hasSelection = modeMeta.mode === "selected";
+  const hasSelection = selectedText.trim().length > 0;
+  const modeMeta = getChapterRevisionDisplayMeta(selectedText, selectionModeActive);
+  const waitingForSelection = selectionModeActive && !hasSelection;
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === "Escape") onDismiss();
@@ -49,7 +52,7 @@ export function ChapterSelectionToolbar({
   }, [brief]);
 
   const handleModify = useCallback(async () => {
-    if (!brief.trim() || sending) return;
+    if (!brief.trim() || sending || waitingForSelection) return;
     setSending(true);
     try {
       let sessionId = activeSessionId;
@@ -67,34 +70,34 @@ export function ChapterSelectionToolbar({
     } finally {
       setSending(false);
     }
-  }, [activeSessionId, bookId, chapterNumber, brief, createDraftSession, modeMeta.mode, selectedText, sendMessage, sending]);
+  }, [activeSessionId, bookId, chapterNumber, brief, createDraftSession, modeMeta.mode, selectedText, sendMessage, sending, waitingForSelection]);
 
-  const canModify = brief.trim().length > 0 && !sending;
+  const canModify = brief.trim().length > 0 && !sending && !waitingForSelection;
   const charCount = selectedText.length;
   const truncatedPreview = selectedText.length > 120 ? `${selectedText.slice(0, 120)}...` : selectedText;
 
   return (
     <div
       ref={popupRef}
-      className="absolute top-12 right-2 z-20 w-[240px] overflow-hidden rounded-xl border border-border/50 bg-card/95 shadow-2xl ring-1 ring-black/5"
+      className={`absolute top-12 right-2 z-20 w-[240px] overflow-hidden rounded-xl border shadow-2xl ring-1 ring-black/5 ${modeMeta.panelClassName}`}
     >
       <div className="flex items-center justify-between gap-2 border-b border-border/25 bg-background/65 px-3 py-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide ${modeMeta.chipClassName}`}>
             {modeMeta.label}
           </span>
-          {hasSelection && (
+          {(hasSelection || waitingForSelection) && (
             <span className="text-[10px] text-muted-foreground/60 tabular-nums">
-              {charCount} 字
+              {hasSelection ? `${charCount} 字` : "待选区"}
             </span>
           )}
         </div>
-        {hasSelection && (
+        {(hasSelection || waitingForSelection) && (
           <button
             type="button"
             onClick={onDismiss}
             className="shrink-0 rounded-md p-0.5 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
-            title="取消选中"
+            title={waitingForSelection ? "退出选择模式" : "取消选中"}
           >
             <X size={12} />
           </button>
@@ -106,8 +109,8 @@ export function ChapterSelectionToolbar({
       <div className="px-3 pt-2 pb-1">
         <div className={`rounded-lg border px-2.5 py-2 ${hasSelection ? "border-primary/25 bg-primary/10" : "border-border/25 bg-background/65"}`}>
           <div className="mb-1 flex items-center justify-between gap-2">
-            <span className={`text-[10px] uppercase tracking-wider ${hasSelection ? "text-primary/80" : "text-muted-foreground/70"}`}>
-              {hasSelection ? "选中内容" : "全文说明"}
+            <span className={`text-[10px] uppercase tracking-wider ${hasSelection || waitingForSelection ? "text-primary/80" : "text-muted-foreground/70"}`}>
+              {waitingForSelection ? "等待正文选中" : hasSelection ? "选中内容" : "全文说明"}
             </span>
             {hasSelection && (
               <span className="text-[10px] text-muted-foreground/60 tabular-nums">
@@ -115,8 +118,12 @@ export function ChapterSelectionToolbar({
               </span>
             )}
           </div>
-          <p className={`text-[11px] leading-5 ${hasSelection ? "text-foreground/95" : "text-muted-foreground/80"}`}>
-            {hasSelection ? truncatedPreview : "未选中文本时，面板将自动按全文修改。"}
+          <p className={`text-[11px] leading-5 ${hasSelection || waitingForSelection ? "text-foreground/95" : "text-muted-foreground/80"}`}>
+            {waitingForSelection
+              ? "请在正文中拖选需要修改的片段，选区会在这里同步显示。"
+              : hasSelection
+                ? truncatedPreview
+                : "未选中文本时，面板将自动按全文修改。"}
           </p>
         </div>
       </div>
@@ -126,7 +133,11 @@ export function ChapterSelectionToolbar({
           ref={textareaRef}
           value={brief}
           onChange={(e) => setBrief(e.target.value)}
-          placeholder={hasSelection ? "输入选中文本的修改要求..." : "输入全文修改要求..."}
+          placeholder={waitingForSelection
+            ? "先选中正文，再输入修改要求..."
+            : hasSelection
+              ? "输入选中文本的修改要求..."
+              : "输入全文修改要求..."}
           disabled={sending}
           rows={2}
           className="w-full rounded-lg border border-border/40 bg-background/85 px-2.5 py-1.5 text-[11px] outline-none transition-colors focus:border-primary/40 resize-none disabled:opacity-50 leading-5"
@@ -134,13 +145,13 @@ export function ChapterSelectionToolbar({
       </div>
 
       <div className="flex items-center justify-between px-3 pb-2.5">
-        {hasSelection && (
+        {(hasSelection || waitingForSelection) && (
           <button
             type="button"
             onClick={onDismiss}
             className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
           >
-            取消选中
+            {waitingForSelection ? "退出选择模式" : "取消选中"}
           </button>
         )}
         <button
@@ -154,7 +165,7 @@ export function ChapterSelectionToolbar({
           ) : (
             <Send size={11} />
           )}
-          {sending ? "处理中..." : hasSelection ? "AI 修改" : "全文修改"}
+          {sending ? "处理中..." : waitingForSelection ? "等待选区" : hasSelection ? "AI 修改" : "全文修改"}
         </button>
       </div>
     </div>

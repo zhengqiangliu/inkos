@@ -1985,6 +1985,7 @@ interface CollectedToolExec {
 
 type PersistedToolExecution = NonNullable<Parameters<typeof upsertBookSessionMessage>[1]["toolExecutions"]>[number];
 type PersistedToolExecutionAutoReview = NonNullable<PersistedToolExecution["autoReview"]>;
+type PersistedToolExecutionBatch = NonNullable<PersistedToolExecution["batch"]>;
 
 function serializeCollectedToolExecutionAutoReview(
   autoReview: UnifiedReviewLoopAutoReviewPayload,
@@ -2018,9 +2019,38 @@ function serializeCollectedToolExecutionAutoReview(
   };
 }
 
+function serializeCollectedToolExecutionBatch(execution: CollectedToolExec): PersistedToolExecutionBatch | undefined {
+  if (!execution.batch) return undefined;
+  const status = execution.status === "completed"
+    ? "completed"
+    : execution.status === "error"
+      ? "failed"
+      : "running";
+  const elapsedMs = Number.isFinite(execution.batch.elapsedMs)
+    ? Math.max(0, execution.batch.elapsedMs)
+    : Math.max(0, (execution.completedAt ?? Date.now()) - execution.batch.startedAt);
+
+  return {
+    batchId: execution.batch.batchId,
+    status,
+    total: execution.batch.total,
+    completed: execution.batch.completed,
+    elapsedMs,
+    ...(typeof execution.batch.currentChapter === "number" ? { currentChapter: execution.batch.currentChapter } : {}),
+    ...(typeof execution.batch.currentWords === "number" ? { currentWords: execution.batch.currentWords } : {}),
+    ...(typeof execution.batch.failedChapterNumber === "number" ? { failedChapterNumber: execution.batch.failedChapterNumber } : {}),
+    ...(typeof execution.batch.error === "string" && execution.batch.error.trim().length > 0
+      ? { error: execution.batch.error.trim() }
+      : (status === "failed" && typeof execution.error === "string" && execution.error.trim().length > 0
+        ? { error: execution.error.trim() }
+        : {})),
+  };
+}
+
 function serializeCollectedToolExecution(
   execution: CollectedToolExec,
 ): PersistedToolExecution {
+  const batch = serializeCollectedToolExecutionBatch(execution);
   return {
     id: execution.id,
     tool: execution.tool,
@@ -2035,7 +2065,7 @@ function serializeCollectedToolExecution(
     ...(execution.previewText ? { previewText: execution.previewText } : {}),
     ...(typeof execution.previewChapterNumber === "number" ? { previewChapterNumber: execution.previewChapterNumber } : {}),
     ...(execution.previewKind === "patch" ? { previewKind: "patch" } : {}),
-    ...(execution.batch ? { batch: execution.batch } : {}),
+    ...(batch ? { batch } : {}),
     ...(execution.autoReview ? { autoReview: serializeCollectedToolExecutionAutoReview(execution.autoReview) } : {}),
     startedAt: execution.startedAt,
     ...(typeof execution.completedAt === "number" ? { completedAt: execution.completedAt } : {}),
@@ -2063,6 +2093,31 @@ function findRunningCheckpointToolPart(
     }
   }
   return undefined;
+}
+
+function findCheckpointToolPartById(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+  toolCallId: string,
+): (CheckpointMessagePart & { type: "tool" }) | undefined {
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const part = parts[i];
+    if (part?.type === "tool" && part.execution.id === toolCallId) {
+      return part;
+    }
+  }
+  return undefined;
+}
+
+function ensureCheckpointThinkingStart(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+): CheckpointMessagePart[] {
+  const next = [...parts];
+  const last = next[next.length - 1];
+  if (last?.type === "thinking" && last.streaming) {
+    return next;
+  }
+  next.push({ type: "thinking", content: "", streaming: true });
+  return next;
 }
 
 function appendCheckpointTextPart(
@@ -2097,6 +2152,122 @@ function appendCheckpointThinkingDelta(
     return next;
   }
   next.push({ type: "thinking", content: text, streaming });
+  return next;
+}
+
+function finalizeCheckpointThinkingParts(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+): CheckpointMessagePart[] {
+  let changed = false;
+  const next = parts.map((part) => {
+    if (part.type !== "thinking" || part.streaming !== true) return part;
+    changed = true;
+    return { ...part, streaming: false };
+  });
+  if (changed) return next;
+  const latestThinkingIndex = [...next].reverse().findIndex((part) => part.type === "thinking");
+  if (latestThinkingIndex < 0) return next;
+  const actualIndex = next.length - 1 - latestThinkingIndex;
+  if (actualIndex < 0 || actualIndex >= next.length) return next;
+  const thinking = next[actualIndex];
+  if (thinking?.type !== "thinking" || thinking.streaming !== true) return next;
+  next[actualIndex] = { ...thinking, streaming: false };
+  return next;
+}
+
+function appendCheckpointToolExecution(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+  execution: CollectedToolExec,
+): CheckpointMessagePart[] {
+  const next = [...parts];
+  const index = next.findIndex((part) => part.type === "tool" && part.execution.id === execution.id);
+  if (index >= 0) {
+    const existing = next[index];
+    if (existing?.type === "tool") {
+      next[index] = {
+        type: "tool",
+        execution: {
+          ...existing.execution,
+          ...execution,
+          ...(existing.execution.logs?.length && !execution.logs ? { logs: existing.execution.logs } : {}),
+          ...(existing.execution.batch && !execution.batch ? { batch: existing.execution.batch } : {}),
+          ...(existing.execution.result && !execution.result ? { result: existing.execution.result } : {}),
+          ...(existing.execution.error && !execution.error ? { error: existing.execution.error } : {}),
+        },
+      };
+    }
+    return next;
+  }
+  next.push({ type: "tool", execution });
+  return next;
+}
+
+function appendCheckpointToolLogs(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+  toolCallId: string,
+  logs: ReadonlyArray<string>,
+): CheckpointMessagePart[] {
+  if (logs.length === 0) return [...parts];
+  const next = [...parts];
+  const index = next.findIndex((part) => part.type === "tool" && part.execution.id === toolCallId);
+  if (index < 0) return next;
+  const existing = next[index];
+  if (existing?.type !== "tool") return next;
+  next[index] = {
+    type: "tool",
+    execution: {
+      ...existing.execution,
+      logs: [...(existing.execution.logs ?? []), ...logs],
+    },
+  };
+  return next;
+}
+
+function setCheckpointToolBatch(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+  toolCallId: string,
+  batch: NonNullable<CollectedToolExec["batch"]>,
+): CheckpointMessagePart[] {
+  const next = [...parts];
+  const index = next.findIndex((part) => part.type === "tool" && part.execution.id === toolCallId);
+  if (index < 0) return next;
+  const existing = next[index];
+  if (existing?.type !== "tool") return next;
+  next[index] = {
+    type: "tool",
+    execution: {
+      ...existing.execution,
+      batch: {
+        ...(existing.execution.batch ?? {}),
+        ...batch,
+        startedAt: existing.execution.batch?.startedAt ?? batch.startedAt,
+      },
+    },
+  };
+  return next;
+}
+
+function setCheckpointToolResult(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+  toolCallId: string,
+  result: string,
+  isError: boolean,
+): CheckpointMessagePart[] {
+  const next = [...parts];
+  const index = next.findIndex((part) => part.type === "tool" && part.execution.id === toolCallId);
+  if (index < 0) return next;
+  const existing = next[index];
+  if (existing?.type !== "tool") return next;
+  next[index] = {
+    type: "tool",
+    execution: {
+      ...existing.execution,
+      status: isError ? "error" : "completed",
+      completedAt: Date.now(),
+      stages: existing.execution.stages?.map((stage) => ({ ...stage, status: "completed" as const })),
+      ...(isError ? { error: result } : { result }),
+    },
+  };
   return next;
 }
 
@@ -2136,17 +2307,385 @@ function deriveCheckpointFlat(parts: ReadonlyArray<CheckpointMessagePart>): {
 function buildCheckpointAssistantMessage(args: {
   timestamp: number;
   parts: ReadonlyArray<CheckpointMessagePart>;
-}): Parameters<typeof upsertBookSessionMessage>[1] {
+  terminal?: boolean;
+  content?: string;
+  thinking?: string;
+}): Parameters<typeof upsertBookSessionMessage>[1] | null {
   const flat = deriveCheckpointFlat(args.parts);
+  const hasThinkingPart = args.parts.some((part) => part.type === "thinking");
+  const content = args.content ?? flat.content;
+  const thinking = args.thinking ?? flat.thinking;
+  const thinkingStreaming = args.terminal ? false : flat.thinkingStreaming;
+  const hasBody = content.length > 0
+    || Boolean(thinking)
+    || Boolean(thinkingStreaming)
+    || hasThinkingPart
+    || (flat.toolExecutions?.length ?? 0) > 0;
+  if (!hasBody) return null;
   return {
     role: "assistant",
-    content: flat.content,
+    content,
     timestamp: args.timestamp,
-    ...(flat.thinking ? { thinking: flat.thinking } : {}),
-    ...(flat.thinkingStreaming ? { thinkingStreaming: true } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(args.terminal
+      ? { thinkingStreaming: false }
+      : thinkingStreaming
+        ? { thinkingStreaming: true }
+        : {}),
     ...(flat.toolExecutions && flat.toolExecutions.length > 0
       ? { toolExecutions: serializeCollectedToolExecutions(flat.toolExecutions) }
       : {}),
+  };
+}
+
+interface RunCheckpointWriter {
+  handleEvent(event: string, data: unknown): void;
+  flush(options?: { terminal?: boolean; content?: string; thinking?: string }): Promise<void>;
+  dispose(): void;
+}
+
+function createRunCheckpointWriter(args: {
+  projectRoot: string;
+  sessionId: string;
+  runId: string;
+  assistantTimestamp: number;
+  getSession: () => Awaited<ReturnType<typeof loadBookSession>> | null;
+  setSession: (session: Awaited<ReturnType<typeof loadBookSession>>) => void;
+}): RunCheckpointWriter {
+  let parts: CheckpointMessagePart[] = [];
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  let flushing = false;
+  let dirty = false;
+  let pendingFlushOptions: { terminal?: boolean; content?: string; thinking?: string } | null = null;
+
+  const mergePendingFlushOptions = (options?: { terminal?: boolean; content?: string; thinking?: string }): void => {
+    if (!options) return;
+    pendingFlushOptions = {
+      ...(pendingFlushOptions ?? {}),
+      ...options,
+      terminal: Boolean(pendingFlushOptions?.terminal || options.terminal),
+    };
+  };
+
+  const buildSessionSnapshot = (): Awaited<ReturnType<typeof loadBookSession>> | null => {
+    const message = buildCheckpointAssistantMessage({
+      timestamp: args.assistantTimestamp,
+      parts,
+      ...(pendingFlushOptions?.terminal ? { terminal: true } : {}),
+      ...(typeof pendingFlushOptions?.content === "string" ? { content: pendingFlushOptions.content } : {}),
+      ...(typeof pendingFlushOptions?.thinking === "string" ? { thinking: pendingFlushOptions.thinking } : {}),
+    });
+    if (!message) return null;
+    const session = args.getSession();
+    if (!session) return null;
+    return upsertBookSessionMessage(session, message);
+  };
+
+  const flush = async (options?: { terminal?: boolean; content?: string; thinking?: string }): Promise<void> => {
+    mergePendingFlushOptions(options);
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+    }
+    dirty = true;
+    if (flushing) return;
+    flushing = true;
+    try {
+      while (dirty) {
+        dirty = false;
+        const snapshot = buildSessionSnapshot();
+        pendingFlushOptions = null;
+        if (!snapshot) continue;
+        args.setSession(snapshot);
+        await persistBookSession(args.projectRoot, snapshot);
+      }
+    } finally {
+      flushing = false;
+    }
+  };
+
+  const scheduleFlush = (options?: { terminal?: boolean; content?: string; thinking?: string }): void => {
+    mergePendingFlushOptions(options);
+    dirty = true;
+    if (flushTimer || flushing) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = undefined;
+      void flush();
+    }, 75);
+  };
+
+  const updateToolExecution = (toolCallId: string, updater: (execution: CollectedToolExec) => CollectedToolExec): void => {
+    const next: CheckpointMessagePart[] = [];
+    let updated = false;
+    for (const part of parts) {
+      if (part.type === "tool" && part.execution.id === toolCallId) {
+        next.push({ type: "tool", execution: updater(part.execution) });
+        updated = true;
+      } else {
+        next.push(part);
+      }
+    }
+    if (updated) {
+      parts = next;
+    }
+  };
+
+  const ensureToolExecution = (payload: {
+    toolCallId: string;
+    tool: string;
+    agent?: string;
+    args?: Record<string, unknown>;
+    stages?: ReadonlyArray<string>;
+  }): CollectedToolExec => {
+    const existing = findCheckpointToolPartById(parts, payload.toolCallId);
+    if (existing?.type === "tool") return existing.execution;
+    const execution: CollectedToolExec = {
+      id: payload.toolCallId,
+      tool: payload.tool,
+      ...(payload.agent ? { agent: payload.agent } : {}),
+      label: resolveToolLabel(payload.tool, payload.agent),
+      status: "running",
+      ...(payload.args ? { args: payload.args } : {}),
+      ...(payload.stages?.length
+        ? { stages: payload.stages.map((label) => ({ label, status: "pending" as const })) }
+        : {}),
+      startedAt: Date.now(),
+    };
+    parts = appendCheckpointToolExecution(parts, execution);
+    return execution;
+  };
+
+  const handleThinkingStart = (): void => {
+    parts = ensureCheckpointThinkingStart(parts);
+    scheduleFlush();
+  };
+
+  const handleThinkingDelta = (text: string): void => {
+    if (!text) return;
+    parts = appendCheckpointThinkingDelta(parts, text, true);
+    scheduleFlush();
+  };
+
+  const handleThinkingEnd = (): void => {
+    parts = finalizeCheckpointThinkingParts(parts);
+    scheduleFlush();
+  };
+
+  const handleDraftDelta = (text: string): void => {
+    if (!text) return;
+    parts = appendCheckpointTextPart(parts, text);
+    scheduleFlush();
+  };
+
+  const handleToolStart = (data: {
+    id?: unknown;
+    tool?: unknown;
+    args?: unknown;
+    stages?: unknown;
+  }): void => {
+    const toolCallId = typeof data.id === "string" ? data.id : "";
+    if (!toolCallId) return;
+    const tool = typeof data.tool === "string" ? data.tool : "sub_agent";
+    const agent = typeof (data.args as { agent?: unknown } | undefined)?.agent === "string"
+      ? String((data.args as { agent?: unknown }).agent)
+      : undefined;
+    const argsRecord = data.args && typeof data.args === "object" && !Array.isArray(data.args)
+      ? data.args as Record<string, unknown>
+      : undefined;
+    const stages = Array.isArray(data.stages) ? data.stages.filter((stage): stage is string => typeof stage === "string") : undefined;
+    const execution = ensureToolExecution({
+      toolCallId,
+      tool,
+      agent,
+      args: argsRecord,
+      stages,
+    });
+    updateToolExecution(toolCallId, (existing) => ({
+      ...existing,
+      ...execution,
+      ...(existing.logs?.length ? { logs: existing.logs } : {}),
+      ...(existing.batch ? { batch: existing.batch } : {}),
+      ...(existing.result ? { result: existing.result } : {}),
+      ...(existing.error ? { error: existing.error } : {}),
+    }));
+    scheduleFlush();
+  };
+
+  const handleToolUpdate = (data: {
+    id?: unknown;
+    tool?: unknown;
+    args?: unknown;
+    partialResult?: unknown;
+  }): void => {
+    const partialText = extractToolUpdateText(data.partialResult);
+    if (!partialText) return;
+    const requestedToolId = typeof data.id === "string" ? data.id : undefined;
+    let targetToolId = requestedToolId ?? findRunningCheckpointToolPart(parts)?.execution.id;
+    if (requestedToolId && !findCheckpointToolPartById(parts, requestedToolId)) {
+      const execution = ensureToolExecution({
+        toolCallId: requestedToolId,
+        tool: typeof data.tool === "string" ? data.tool : "sub_agent",
+        agent: typeof (data.args as { agent?: unknown } | undefined)?.agent === "string"
+          ? String((data.args as { agent?: unknown }).agent)
+          : undefined,
+        args: data.args && typeof data.args === "object" && !Array.isArray(data.args)
+          ? data.args as Record<string, unknown>
+          : undefined,
+      });
+      targetToolId = execution.id;
+    }
+    if (!targetToolId) {
+      const execution = ensureToolExecution({
+        toolCallId: `telemetry-${args.runId}`,
+        tool: typeof data.tool === "string" ? data.tool : "sub_agent",
+        agent: typeof (data.args as { agent?: unknown } | undefined)?.agent === "string"
+          ? String((data.args as { agent?: unknown }).agent)
+          : undefined,
+      });
+      targetToolId = execution.id;
+    }
+    if (!targetToolId) return;
+    parts = appendCheckpointToolLogs(parts, targetToolId, [partialText]);
+    scheduleFlush();
+  };
+
+  const handleToolEnd = (data: {
+    id?: unknown;
+    tool?: unknown;
+    args?: unknown;
+    result?: unknown;
+    isError?: unknown;
+  }): void => {
+    const toolCallId = typeof data.id === "string" ? data.id : "";
+    if (!toolCallId) return;
+    const resultText = data.isError ? extractToolError(data.result) : summarizeResult(data.result);
+    const isError = Boolean(data.isError);
+    if (!findCheckpointToolPartById(parts, toolCallId)) {
+      ensureToolExecution({
+        toolCallId,
+        tool: typeof data.tool === "string" ? data.tool : "sub_agent",
+        agent: typeof (data.args as { agent?: unknown } | undefined)?.agent === "string"
+          ? String((data.args as { agent?: unknown }).agent)
+          : undefined,
+        args: data.args && typeof data.args === "object" && !Array.isArray(data.args)
+          ? data.args as Record<string, unknown>
+          : undefined,
+      });
+    }
+    parts = setCheckpointToolResult(parts, toolCallId, resultText, isError);
+    scheduleFlush();
+  };
+
+  const handleBatchProgress = (data: {
+    id?: unknown;
+    batchId?: unknown;
+    status?: unknown;
+    total?: unknown;
+    completed?: unknown;
+    elapsedMs?: unknown;
+    currentChapter?: unknown;
+    currentWords?: unknown;
+    failedChapterNumber?: unknown;
+    error?: unknown;
+  }): void => {
+    const toolCallId = typeof data.id === "string" ? data.id : findRunningCheckpointToolPart(parts)?.execution.id;
+    if (!toolCallId) return;
+    if (!findCheckpointToolPartById(parts, toolCallId)) {
+      ensureToolExecution({
+        toolCallId,
+        tool: "sub_agent",
+        agent: "writer",
+      });
+    }
+    const batch: BatchProgressState = {
+      batchId: typeof data.batchId === "string" && data.batchId.trim() ? data.batchId : `${args.runId}:${toolCallId}`,
+      status: data.status === "completed"
+        ? "completed"
+        : data.status === "failed"
+          ? "failed"
+          : "running",
+      total: Number.isFinite(Number(data.total)) ? Math.max(0, Math.trunc(Number(data.total))) : 0,
+      completed: Number.isFinite(Number(data.completed)) ? Math.max(0, Math.trunc(Number(data.completed))) : 0,
+      elapsedMs: Number.isFinite(Number(data.elapsedMs)) ? Math.max(0, Math.trunc(Number(data.elapsedMs))) : 0,
+      startedAt: Date.now(),
+      ...(typeof data.currentChapter === "number" && Number.isFinite(data.currentChapter)
+        ? { currentChapter: Math.max(1, Math.trunc(data.currentChapter)) }
+        : {}),
+      ...(typeof data.currentWords === "number" && Number.isFinite(data.currentWords)
+        ? { currentWords: Math.max(0, Math.trunc(data.currentWords)) }
+        : {}),
+      ...(typeof data.failedChapterNumber === "number" && Number.isFinite(data.failedChapterNumber)
+        ? { failedChapterNumber: Math.max(1, Math.trunc(data.failedChapterNumber)) }
+        : {}),
+      ...(typeof data.error === "string" && data.error.trim()
+        ? { error: data.error.trim() }
+        : {}),
+    };
+    parts = setCheckpointToolBatch(parts, toolCallId, batch);
+    scheduleFlush();
+  };
+
+  const handleEvent = (event: string, data: unknown): void => {
+    if (!data || typeof data !== "object") return;
+    const payload = data as { sessionId?: unknown; runId?: unknown };
+    if (payload.sessionId !== args.sessionId) return;
+    if (payload.runId !== args.runId) return;
+
+    switch (event) {
+      case "thinking:start":
+        handleThinkingStart();
+        break;
+      case "thinking:delta":
+        handleThinkingDelta(typeof (data as { text?: unknown }).text === "string" ? String((data as { text?: unknown }).text) : "");
+        break;
+      case "thinking:end":
+        handleThinkingEnd();
+        break;
+      case "draft:delta":
+        handleDraftDelta(typeof (data as { text?: unknown }).text === "string" ? String((data as { text?: unknown }).text) : "");
+        break;
+      case "chapter:delta":
+        handleDraftDelta(typeof (data as { text?: unknown }).text === "string" ? String((data as { text?: unknown }).text) : "");
+        break;
+      case "tool:start":
+        handleToolStart(data as { id?: unknown; tool?: unknown; args?: unknown; stages?: unknown });
+        break;
+      case "tool:update":
+        handleToolUpdate(data as { id?: unknown; tool?: unknown; args?: unknown; partialResult?: unknown });
+        break;
+      case "tool:end":
+        handleToolEnd(data as { id?: unknown; tool?: unknown; args?: unknown; result?: unknown; isError?: unknown });
+        break;
+      case "batch:progress":
+        handleBatchProgress(data as {
+          id?: unknown;
+          batchId?: unknown;
+          status?: unknown;
+          total?: unknown;
+          completed?: unknown;
+          elapsedMs?: unknown;
+          currentChapter?: unknown;
+          currentWords?: unknown;
+          failedChapterNumber?: unknown;
+          error?: unknown;
+        });
+        break;
+      default:
+        break;
+    }
+  };
+
+  const dispose = (): void => {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = undefined;
+    }
+  };
+
+  return {
+    handleEvent,
+    flush,
+    dispose,
   };
 }
 
@@ -2243,6 +2782,7 @@ interface BatchProgressState {
   total: number;
   completed: number;
   elapsedMs: number;
+  startedAt: number;
   currentChapter?: number;
   currentWords?: number;
   failedChapterNumber?: number;
@@ -5945,7 +6485,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     registerInFlightAgentRun(sessionId, runId, abortController);
     let persistedBookSession: Awaited<ReturnType<typeof loadBookSession>> = null;
     let assistantCheckpointTimestamp = Date.now() + 1;
+    let checkpointWriter: RunCheckpointWriter | null = null;
+    let checkpointSubscriber: EventHandler | null = null;
     const persistAssistantErrorResponse = async (message: string): Promise<void> => {
+      if (checkpointWriter) {
+        await checkpointWriter.flush({ terminal: true });
+      }
       if (!persistedBookSession) return;
       persistedBookSession = appendBookSessionMessage(persistedBookSession, {
         role: "assistant",
@@ -6066,6 +6611,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
       }
       await persistBookSession(root, bookSession);
+      checkpointWriter = createRunCheckpointWriter({
+        projectRoot: root,
+        sessionId: bookSession.sessionId,
+        runId,
+        assistantTimestamp: assistantCheckpointTimestamp,
+        getSession: () => persistedBookSession,
+        setSession: (session) => {
+          if (!session) return;
+          bookSession = session;
+          persistedBookSession = session;
+        },
+      });
+      checkpointSubscriber = (event, data) => {
+        checkpointWriter?.handleEvent(event, data);
+      };
+      subscribers.add(checkpointSubscriber);
 
       // Resolve model — multi-service resolution
       let resolvedModel: ResolvedModel["model"] | undefined;
@@ -6190,7 +6751,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       // Run pi-agent session
       const collectedToolExecs: CollectedToolExec[] = [];
       const batchProgressByToolCallId = new Map<string, BatchProgressState>();
-      const batchStartedAt = new Map<string, number>();
       let sawDraftDelta = false;
       let sawWriterToolStart = false;
       let sawWriterToolSuccess = false;
@@ -6259,8 +6819,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           total,
           completed: 0,
           elapsedMs: 0,
+          startedAt: Date.now(),
         };
-        batchStartedAt.set(toolCallId, Date.now());
         batchProgressByToolCallId.set(toolCallId, state);
         broadcast("batch:progress", {
           sessionId: streamSessionId,
@@ -6296,7 +6856,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           status,
           total: state.total,
           completed: state.completed,
-          elapsedMs: elapsedSince(batchStartedAt.get(toolCallId) ?? Date.now()),
+          elapsedMs: elapsedSince(state.startedAt),
           ...(typeof options?.currentChapter === "number" ? { currentChapter: options.currentChapter } : {}),
           ...(typeof options?.currentWords === "number" ? { currentWords: options.currentWords } : {}),
           ...(typeof options?.failedChapterNumber === "number" ? { failedChapterNumber: options.failedChapterNumber } : {}),
@@ -9614,16 +10174,21 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       if (responseText) {
         const lastAssistant = result.messages?.filter((m: any) => m.role === "assistant").pop();
         const thinking = lastAssistant?.thinking;
-        bookSession = appendBookSessionMessage(bookSession, {
-          role: "assistant",
-          content: responseText,
-          ...(thinking ? { thinking } : {}),
-          ...(collectedToolExecs.length > 0
-            ? { toolExecutions: serializeCollectedToolExecutions(collectedToolExecs) }
-            : {}),
-          timestamp: Date.now() + 1,
-        });
-        persistedBookSession = bookSession;
+        if (checkpointWriter) {
+          await checkpointWriter.flush({ terminal: true, content: responseText, ...(thinking ? { thinking } : {}) });
+        } else {
+          bookSession = appendBookSessionMessage(bookSession, {
+            role: "assistant",
+            content: responseText,
+            ...(thinking ? { thinking } : {}),
+            ...(collectedToolExecs.length > 0
+              ? { toolExecutions: serializeCollectedToolExecutions(collectedToolExecs) }
+              : {}),
+            timestamp: assistantCheckpointTimestamp,
+          });
+          persistedBookSession = bookSession;
+          await persistBookSession(root, bookSession);
+        }
       }
       if (!responseText) {
         if (explicitAuditChapter !== null) {
@@ -9654,20 +10219,32 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             { maxTokens: 256 },
           );
           if (fallback.content?.trim()) {
+            const fallbackContent = fallback.content.trim();
+            const lastAssistant = result.messages?.filter((m: any) => m.role === "assistant").pop();
+            const thinking = lastAssistant?.thinking;
             emitSyntheticDraftDeltas({
               sessionId: streamSessionId,
               runId,
-              text: fallback.content,
+              text: fallbackContent,
             });
-            bookSession = appendBookSessionMessage(bookSession, {
-              role: "assistant",
-              content: fallback.content,
-              timestamp: Date.now() + 1,
-            });
-            persistedBookSession = bookSession;
-            await persistBookSession(root, bookSession);
+            if (checkpointWriter) {
+              await checkpointWriter.flush({
+                terminal: true,
+                content: fallbackContent,
+                ...(thinking ? { thinking } : {}),
+              });
+            } else {
+              bookSession = appendBookSessionMessage(bookSession, {
+                role: "assistant",
+                content: fallbackContent,
+                ...(thinking ? { thinking } : {}),
+                timestamp: assistantCheckpointTimestamp,
+              });
+              persistedBookSession = bookSession;
+              await persistBookSession(root, bookSession);
+            }
             return c.json({
-              response: fallback.content,
+              response: fallbackContent,
               runId,
               session: { sessionId: bookSession.sessionId },
             });
@@ -9710,8 +10287,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           runId,
         }, 502);
       }
-      await persistBookSession(root, bookSession);
-
       broadcast("agent:complete", {
         instruction,
         activeBookId,
@@ -9860,6 +10435,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         500,
       );
     } finally {
+      if (checkpointSubscriber) {
+        subscribers.delete(checkpointSubscriber);
+        checkpointSubscriber = null;
+      }
+      checkpointWriter?.dispose();
+      checkpointWriter = null;
       clearInFlightAgentRun(sessionId, runId);
     }
   });

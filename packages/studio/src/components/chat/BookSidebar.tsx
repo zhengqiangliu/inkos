@@ -168,6 +168,7 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
   const [openingApplyInGovernedMode, setOpeningApplyInGovernedMode] = useState(true);
   const [openingStrict, setOpeningStrict] = useState(true);
   const [openingMaxCharacters, setOpeningMaxCharacters] = useState(5);
+  const [selectionModeActive, setSelectionModeActive] = useState(false);
   const contentContainerRef = useRef<HTMLDivElement | null>(null);
   const { selectedText, isSelecting, selectionRect, persistedRange, clearSelection } = useTextSelection(contentContainerRef);
   useHighlightApi(persistedRange);
@@ -183,6 +184,8 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
     setEditing(false);
     setEditContent("");
     setContentWordCount(null);
+    setSelectionModeActive(false);
+    clearSelection();
     setLoading(true);
     if (isChapter) {
       fetchJson<{ content: string; wordCount?: number }>(`/books/${bookId}/chapters/${artifactChapter}`)
@@ -210,7 +213,7 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
         .catch(() => setContent(null))
         .finally(() => setLoading(false));
     }
-  }, [bookId, artifactFile, artifactChapter, artifactEditMode, isChapter, bookDataVersion]);
+  }, [bookId, artifactFile, artifactChapter, artifactEditMode, clearSelection, isChapter, bookDataVersion]);
 
   useEffect(() => {
     if (!isChapter || !artifactEditMode || content === null) return;
@@ -254,9 +257,22 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
   }, []);
 
   const handleEdit = useCallback(() => {
+    setSelectionModeActive(false);
+    clearSelection();
     setEditContent(content ?? "");
     setEditing(true);
-  }, [content]);
+  }, [clearSelection, content]);
+
+  const handleToggleSelectionMode = useCallback(() => {
+    setEditing(false);
+    setSelectionModeActive((prev) => !prev);
+    clearSelection();
+  }, [clearSelection]);
+
+  const handleDismissSelectionMode = useCallback(() => {
+    setSelectionModeActive(false);
+    clearSelection();
+  }, [clearSelection]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -638,6 +654,8 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
             bookId={bookId}
             chapterNumber={artifactChapter!}
             selectedText={selectedText}
+            selectionModeActive={selectionModeActive}
+            onToggleSelectionMode={handleToggleSelectionMode}
             onRevisionComplete={handleRevisionComplete}
           />
         </div>
@@ -652,13 +670,14 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
           onClose={() => setFullscreen(false)}
         />
       )}
-      {isSelecting && selectedText && (
+      {isChapter && (selectionModeActive || (isSelecting && selectedText)) && (
         <ChapterSelectionToolbar
           bookId={bookId}
           chapterNumber={artifactChapter!}
           selectedText={selectedText}
           selectionRect={selectionRect}
-          onDismiss={clearSelection}
+          selectionModeActive={selectionModeActive}
+          onDismiss={handleDismissSelectionMode}
         />
       )}
     </div>

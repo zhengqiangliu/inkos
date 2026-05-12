@@ -29,12 +29,17 @@ export interface InteractionRuntimeTools {
     readonly chapterWordCount?: number;
     readonly targetChapters?: number;
     readonly blurb?: string;
+    readonly storyBackground?: string;
     readonly worldPremise?: string;
     readonly settingNotes?: string;
+    readonly novelOutline?: string;
+    readonly volumeOutline?: string;
     readonly protagonist?: string;
     readonly supportingCast?: string;
+    readonly characterMatrix?: string;
+    readonly characterArc?: string;
+    readonly relationshipMap?: string;
     readonly conflictCore?: string;
-    readonly volumeOutline?: string;
     readonly constraints?: string;
     readonly authorIntent?: string;
     readonly currentFocus?: string;
@@ -138,8 +143,13 @@ function renderCreationDraft(
         draft.title ? `- Title: ${draft.title}` : undefined,
         draft.genre ? `- Genre: ${draft.genre}` : undefined,
         draft.platform ? `- Platform: ${draft.platform}` : undefined,
+        draft.storyBackground ? `- Story Background: ${draft.storyBackground}` : undefined,
         draft.worldPremise ? `- World: ${draft.worldPremise}` : undefined,
+        draft.novelOutline ? `- Novel Outline: ${draft.novelOutline}` : undefined,
         draft.protagonist ? `- Protagonist: ${draft.protagonist}` : undefined,
+        draft.characterMatrix ? `- Character Matrix: ${draft.characterMatrix}` : undefined,
+        draft.characterArc ? `- Character Arc: ${draft.characterArc}` : undefined,
+        draft.relationshipMap ? `- Relationship Map: ${draft.relationshipMap}` : undefined,
         draft.conflictCore ? `- Core Conflict: ${draft.conflictCore}` : undefined,
         draft.volumeOutline ? `- Volume Direction: ${draft.volumeOutline}` : undefined,
         draft.blurb ? `- Blurb: ${draft.blurb}` : undefined,
@@ -150,8 +160,13 @@ function renderCreationDraft(
         draft.title ? `- 书名：${draft.title}` : undefined,
         draft.genre ? `- 题材：${draft.genre}` : undefined,
         draft.platform ? `- 平台：${draft.platform}` : undefined,
+        draft.storyBackground ? `- 故事背景：${draft.storyBackground}` : undefined,
         draft.worldPremise ? `- 世界观：${draft.worldPremise}` : undefined,
+        draft.novelOutline ? `- 小说大纲：${draft.novelOutline}` : undefined,
         draft.protagonist ? `- 主角：${draft.protagonist}` : undefined,
+        draft.characterMatrix ? `- 角色矩阵：${draft.characterMatrix}` : undefined,
+        draft.characterArc ? `- 人物弧光：${draft.characterArc}` : undefined,
+        draft.relationshipMap ? `- 人物关系：${draft.relationshipMap}` : undefined,
         draft.conflictCore ? `- 核心冲突：${draft.conflictCore}` : undefined,
         draft.volumeOutline ? `- 卷纲方向：${draft.volumeOutline}` : undefined,
         draft.blurb ? `- 简介：${draft.blurb}` : undefined,
@@ -448,10 +463,15 @@ async function handleDraftLifecycleRequest(params: {
         chapterWordCount: request.chapterWordCount ?? effectiveDraft?.chapterWordCount,
         targetChapters: request.targetChapters ?? effectiveDraft?.targetChapters,
         blurb: request.blurb ?? effectiveDraft?.blurb,
+        storyBackground: request.storyBackground ?? effectiveDraft?.storyBackground,
         worldPremise: request.worldPremise ?? effectiveDraft?.worldPremise,
         settingNotes: request.settingNotes ?? effectiveDraft?.settingNotes,
+        novelOutline: request.novelOutline ?? effectiveDraft?.novelOutline,
         protagonist: request.protagonist ?? effectiveDraft?.protagonist,
         supportingCast: request.supportingCast ?? effectiveDraft?.supportingCast,
+        characterMatrix: request.characterMatrix ?? effectiveDraft?.characterMatrix,
+        characterArc: request.characterArc ?? effectiveDraft?.characterArc,
+        relationshipMap: request.relationshipMap ?? effectiveDraft?.relationshipMap,
         conflictCore: request.conflictCore ?? effectiveDraft?.conflictCore,
         volumeOutline: request.volumeOutline ?? effectiveDraft?.volumeOutline,
         constraints: request.constraints ?? effectiveDraft?.constraints,

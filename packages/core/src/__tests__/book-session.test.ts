@@ -4,6 +4,7 @@ import {
   GlobalSessionSchema,
   createBookSession,
   appendBookSessionMessage,
+  upsertBookSessionMessage,
 } from "../interaction/session.js";
 
 describe("BookSession", () => {
@@ -103,6 +104,36 @@ describe("BookSession", () => {
       session = appendBookSessionMessage(session, { role: "assistant" as const, content: "first", timestamp: 100 });
       expect(session.messages[0].content).toBe("first");
       expect(session.messages[1].content).toBe("second");
+    });
+  });
+
+  describe("upsertBookSessionMessage", () => {
+    it("replaces the existing assistant checkpoint at the same timestamp", () => {
+      let session = createBookSession("book");
+      session = appendBookSessionMessage(session, { role: "user" as const, content: "hello", timestamp: 100 });
+      session = upsertBookSessionMessage(session, {
+        role: "assistant" as const,
+        content: "",
+        thinking: "thinking...",
+        thinkingStreaming: true,
+        timestamp: 101,
+      });
+      session = upsertBookSessionMessage(session, {
+        role: "assistant" as const,
+        content: "final answer",
+        thinking: "thinking...",
+        thinkingStreaming: false,
+        timestamp: 101,
+      });
+
+      expect(session.messages).toHaveLength(2);
+      expect(session.messages[1]).toMatchObject({
+        role: "assistant",
+        content: "final answer",
+        thinking: "thinking...",
+        thinkingStreaming: false,
+        timestamp: 101,
+      });
     });
   });
 });

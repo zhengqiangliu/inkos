@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import type { BookCreationDraft } from "@actalk/inkos-core";
+import { useEffect, useState } from "react";
+import type { BookCreationDraft, BookCreationWizardStep, BookCreationWizardState } from "@actalk/inkos-core";
 import { fetchJson, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
@@ -8,30 +8,14 @@ import { useColors } from "../hooks/use-colors";
 interface Nav {
   toDashboard: () => void;
   toBook: (id: string) => void;
-}
-
-interface GenreInfo {
-  readonly id: string;
-  readonly name: string;
-  readonly source: "project" | "builtin";
-  readonly language: "zh" | "en";
-}
-
-interface PlatformOption {
-  readonly value: string;
-  readonly label: string;
-}
-
-export interface DraftSummaryRow {
-  readonly key: string;
-  readonly label: string;
-  readonly value: string;
+  toServices: () => void;
 }
 
 interface InteractionSessionResponse {
   readonly session?: {
     readonly activeBookId?: string;
     readonly creationDraft?: BookCreationDraft;
+    readonly creationWizard?: BookCreationWizardState;
   };
   readonly activeBookId?: string;
 }
@@ -42,80 +26,24 @@ interface AgentResponse {
   readonly session?: {
     readonly activeBookId?: string;
     readonly creationDraft?: BookCreationDraft;
+    readonly creationWizard?: BookCreationWizardState;
   };
 }
 
-interface PlatformCopy {
-  readonly idleTitle: string;
-  readonly idleBody: string;
-  readonly promptLabel: string;
-  readonly promptPlaceholder: string;
-  readonly promptPlaceholderFollowup: string;
-  readonly submit: string;
-  readonly submitting: string;
-  readonly create: string;
-  readonly creating: string;
-  readonly discard: string;
-  readonly draftHeading: string;
-  readonly missingHeading: string;
-  readonly missingHint: string;
-  readonly syncedHint: string;
-  readonly helperTitle: string;
-  readonly helperBody: string;
+const WIZARD_STEPS: ReadonlyArray<{ id: BookCreationWizardStep; title: string; subtitle: string }> = [
+  { id: "intro", title: "简介 / 故事背景", subtitle: "先把卖点和故事起点定住" },
+  { id: "world", title: "世界观", subtitle: "定义规则、势力和边界" },
+  { id: "outline", title: "小说大纲", subtitle: "主线、成长路、章节卡点" },
+  { id: "volume", title: "卷纲规划", subtitle: "卷级推进与每卷收束" },
+  { id: "characters", title: "主角 / 配角", subtitle: "角色功能与驱动力" },
+  { id: "arc", title: "人物弧光", subtitle: "核心弧光与成长转折" },
+  { id: "relation", title: "人物关系", subtitle: "关系动力与剧情引擎" },
+  { id: "review", title: "最终确认", subtitle: "一致性检查后再落库" },
+];
+
+function readStepIndex(step?: BookCreationWizardStep): number {
+  return WIZARD_STEPS.findIndex((item) => item.id === step);
 }
-
-const PLATFORMS_ZH: ReadonlyArray<PlatformOption> = [
-  { value: "tomato", label: "番茄小说" },
-  { value: "qidian", label: "起点中文网" },
-  { value: "feilu", label: "飞卢" },
-  { value: "other", label: "其他" },
-];
-
-const PLATFORMS_EN: ReadonlyArray<PlatformOption> = [
-  { value: "royal-road", label: "Royal Road" },
-  { value: "kindle-unlimited", label: "Kindle Unlimited" },
-  { value: "scribble-hub", label: "Scribble Hub" },
-  { value: "other", label: "Other" },
-];
-
-const PAGE_COPY: Record<"zh" | "en", PlatformCopy> = {
-  zh: {
-    idleTitle: "从一句模糊想法开始",
-    idleBody: "直接描述题材、世界观、主角、核心冲突，或告诉我你想先改哪一块。共享草案会在 TUI 和 Studio Chat 之间同步。",
-    promptLabel: "继续打磨这本书",
-    promptPlaceholder: "例如：我想写个港风商战悬疑，主角先做灰产再洗白。",
-    promptPlaceholderFollowup: "例如：世界观改成近未来港口城；女主不要太早出场；卷一先查账再砸场。",
-    submit: "更新草案",
-    submitting: "处理中…",
-    create: "按当前草案建书",
-    creating: "创建中…",
-    discard: "丢弃草案",
-    draftHeading: "当前 foundation 草案",
-    missingHeading: "还缺这些关键信息",
-    missingHint: "这些字段未必都要一次填满，但缺得太多时不要急着建书。",
-    syncedHint: "这份草案和 TUI / Studio Chat 共享。",
-    helperTitle: "建议这样推进",
-    helperBody: "先定世界观和主角，再定核心冲突、简介和卷一方向。想看当前草案时，可以在 TUI 里用 /draft。",
-  },
-  en: {
-    idleTitle: "Start from a rough idea",
-    idleBody: "Describe the genre, world, protagonist, and core conflict. The shared draft stays in sync across TUI and Studio Chat.",
-    promptLabel: "Refine this book",
-    promptPlaceholder: "Example: I want a harbor-noir business thriller about a fixer trying to go legit.",
-    promptPlaceholderFollowup: "Example: move the world to a near-future port city; delay the heroine; make volume one about chasing ledgers first.",
-    submit: "Update draft",
-    submitting: "Working…",
-    create: "Create book from draft",
-    creating: "Creating…",
-    discard: "Discard draft",
-    draftHeading: "Current foundation draft",
-    missingHeading: "Still missing",
-    missingHint: "You do not need every field immediately, but do not create the book while the foundation is still vague.",
-    syncedHint: "This draft is shared with TUI and Studio Chat.",
-    helperTitle: "Recommended flow",
-    helperBody: "Lock the world and protagonist first, then settle the conflict, blurb, and volume-one direction. In TUI, use /draft to inspect the same draft.",
-  },
-};
 
 export function pickValidValue(current: string, available: ReadonlyArray<string>): string {
   if (current && available.includes(current)) {
@@ -128,25 +56,31 @@ export function defaultChapterWordsForLanguage(language: "zh" | "en"): string {
   return language === "en" ? "2000" : "3000";
 }
 
-export function platformOptionsForLanguage(language: "zh" | "en"): ReadonlyArray<PlatformOption> {
-  return language === "en" ? PLATFORMS_EN : PLATFORMS_ZH;
+export function platformOptionsForLanguage(language: "zh" | "en"): ReadonlyArray<{ value: string; label: string }> {
+  return language === "en"
+    ? [
+        { value: "royal-road", label: "Royal Road" },
+        { value: "kindle-unlimited", label: "Kindle Unlimited" },
+        { value: "scribble-hub", label: "Scribble Hub" },
+        { value: "other", label: "Other" },
+      ]
+    : [
+        { value: "tomato", label: "番茄小说" },
+        { value: "qidian", label: "起点中文网" },
+        { value: "feilu", label: "飞卢" },
+        { value: "other", label: "其他" },
+      ];
 }
 
 export function resolveDraftInstruction(input: string, hasDraft: boolean): string {
   const trimmed = input.trim();
-  if (!trimmed) {
-    return "";
-  }
+  if (!trimmed) return "";
   return hasDraft ? trimmed : `/new ${trimmed}`;
 }
 
 export function canCreateFromDraft(draft?: BookCreationDraft): boolean {
-  if (!draft) {
-    return false;
-  }
-  if (draft.readyToCreate) {
-    return true;
-  }
+  if (!draft) return false;
+  if (draft.readyToCreate) return true;
   return Boolean(
     draft.title?.trim()
       && draft.genre?.trim()
@@ -158,12 +92,17 @@ export function canCreateFromDraft(draft?: BookCreationDraft): boolean {
 export function buildCreationDraftSummary(
   draft: BookCreationDraft,
   language: "zh" | "en",
-): ReadonlyArray<DraftSummaryRow> {
+): ReadonlyArray<{ key: string; label: string; value: string }> {
   const rows = language === "en"
     ? [
         draft.title ? { key: "title", label: "Title", value: draft.title } : undefined,
+        draft.storyBackground ? { key: "storyBackground", label: "Story Background", value: draft.storyBackground } : undefined,
         draft.worldPremise ? { key: "worldPremise", label: "World", value: draft.worldPremise } : undefined,
+        draft.novelOutline ? { key: "novelOutline", label: "Novel Outline", value: draft.novelOutline } : undefined,
         draft.protagonist ? { key: "protagonist", label: "Protagonist", value: draft.protagonist } : undefined,
+        draft.characterMatrix ? { key: "characterMatrix", label: "Character Matrix", value: draft.characterMatrix } : undefined,
+        draft.characterArc ? { key: "characterArc", label: "Character Arc", value: draft.characterArc } : undefined,
+        draft.relationshipMap ? { key: "relationshipMap", label: "Relationship Map", value: draft.relationshipMap } : undefined,
         draft.conflictCore ? { key: "conflictCore", label: "Core Conflict", value: draft.conflictCore } : undefined,
         draft.volumeOutline ? { key: "volumeOutline", label: "Volume Direction", value: draft.volumeOutline } : undefined,
         draft.blurb ? { key: "blurb", label: "Blurb", value: draft.blurb } : undefined,
@@ -171,15 +110,19 @@ export function buildCreationDraftSummary(
       ]
     : [
         draft.title ? { key: "title", label: "书名", value: draft.title } : undefined,
+        draft.storyBackground ? { key: "storyBackground", label: "故事背景", value: draft.storyBackground } : undefined,
         draft.worldPremise ? { key: "worldPremise", label: "世界观", value: draft.worldPremise } : undefined,
+        draft.novelOutline ? { key: "novelOutline", label: "小说大纲", value: draft.novelOutline } : undefined,
         draft.protagonist ? { key: "protagonist", label: "主角", value: draft.protagonist } : undefined,
+        draft.characterMatrix ? { key: "characterMatrix", label: "角色矩阵", value: draft.characterMatrix } : undefined,
+        draft.characterArc ? { key: "characterArc", label: "人物弧光", value: draft.characterArc } : undefined,
+        draft.relationshipMap ? { key: "relationshipMap", label: "人物关系", value: draft.relationshipMap } : undefined,
         draft.conflictCore ? { key: "conflictCore", label: "核心冲突", value: draft.conflictCore } : undefined,
         draft.volumeOutline ? { key: "volumeOutline", label: "卷纲方向", value: draft.volumeOutline } : undefined,
         draft.blurb ? { key: "blurb", label: "简介", value: draft.blurb } : undefined,
         draft.nextQuestion ? { key: "nextQuestion", label: "下一步", value: draft.nextQuestion } : undefined,
       ];
-
-  return rows.filter((row): row is DraftSummaryRow => Boolean(row));
+  return rows.filter((row): row is { key: string; label: string; value: string } => Boolean(row));
 }
 
 interface WaitForBookReadyOptions {
@@ -190,21 +133,15 @@ interface WaitForBookReadyOptions {
   readonly waitImpl?: (ms: number) => Promise<void>;
 }
 
-const DEFAULT_BOOK_READY_MAX_ATTEMPTS = 120;
-const DEFAULT_BOOK_READY_DELAY_MS = 250;
-const CREATION_DRAFT_SYNC_INTERVAL_MS = 2500;
-
 export async function waitForBookReady(
   bookId: string,
   options: WaitForBookReadyOptions = {},
 ): Promise<void> {
   const fetchBook = options.fetchBook ?? ((id: string) => fetchJson(`/books/${id}`));
   const fetchStatus = options.fetchStatus ?? ((id: string) => fetchJson<{ status: string; error?: string }>(`/books/${id}/create-status`));
-  const maxAttempts = options.maxAttempts ?? DEFAULT_BOOK_READY_MAX_ATTEMPTS;
-  const delayMs = options.delayMs ?? DEFAULT_BOOK_READY_DELAY_MS;
-  const waitImpl = options.waitImpl ?? ((ms: number) => new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  }));
+  const maxAttempts = options.maxAttempts ?? 120;
+  const delayMs = options.delayMs ?? 250;
+  const waitImpl = options.waitImpl ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
   let lastError: unknown;
   let lastKnownStatus: string | undefined;
@@ -227,9 +164,7 @@ export async function waitForBookReady(
         }
       }
       if (attempt === maxAttempts - 1) {
-        if (lastKnownStatus === "creating") {
-          break;
-        }
+        if (lastKnownStatus === "creating") break;
         throw error;
       }
       await waitImpl(delayMs);
@@ -247,9 +182,9 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   const c = useColors(theme);
   const { data: project } = useApi<{ language: string }>("/project");
   const projectLang = (project?.language ?? "zh") as "zh" | "en";
-  const copy = PAGE_COPY[projectLang];
 
   const [draft, setDraft] = useState<BookCreationDraft | undefined>();
+  const [wizard, setWizard] = useState<BookCreationWizardState | undefined>();
   const [input, setInput] = useState("");
   const [loadingDraft, setLoadingDraft] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -257,16 +192,10 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
-  const summaryRows = useMemo(
-    () => (draft ? buildCreationDraftSummary(draft, projectLang) : []),
-    [draft, projectLang],
-  );
-
-  const refreshDraft = async (): Promise<BookCreationDraft | undefined> => {
+  const refreshDraft = async (): Promise<void> => {
     const data = await fetchJson<InteractionSessionResponse>("/interaction/session");
-    const nextDraft = data.session?.creationDraft;
-    setDraft(nextDraft);
-    return nextDraft;
+    setDraft(data.session?.creationDraft);
+    setWizard(data.session?.creationWizard);
   };
 
   useEffect(() => {
@@ -288,19 +217,11 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
     };
   }, []);
 
-  useEffect(() => {
-    if (submitting || creating) {
-      return;
-    }
-
-    const timer = setInterval(() => {
-      void refreshDraft().catch(() => undefined);
-    }, CREATION_DRAFT_SYNC_INTERVAL_MS);
-
-    return () => {
-      clearInterval(timer);
-    };
-  }, [submitting, creating]);
+  const currentStep = wizard?.currentStep ?? "intro";
+  const currentIndex = Math.max(0, readStepIndex(currentStep));
+  const currentStepMeta = WIZARD_STEPS[currentIndex] ?? WIZARD_STEPS[0]!;
+  const nextStepMeta = WIZARD_STEPS[currentIndex + 1];
+  const canCreate = currentStep === "review" && Boolean(draft?.readyToCreate || (draft?.title && draft?.genre && draft?.targetChapters && draft?.chapterWordCount));
 
   const runAgentInstruction = async (instruction: string): Promise<AgentResponse> => {
     return fetchJson<AgentResponse>("/agent", {
@@ -310,19 +231,18 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
     });
   };
 
-  const handleDraftSubmit = async () => {
-    const instruction = resolveDraftInstruction(input, Boolean(draft));
-    if (!instruction) {
-      return;
-    }
-
+  const handleAdvance = async () => {
+    if (!nextStepMeta) return;
     setSubmitting(true);
     setError(null);
     try {
+      const instruction = input.trim() || `确认当前${currentStepMeta.title}，自动生成下一步 ${nextStepMeta.title}。`;
       const data = await runAgentInstruction(instruction);
       setInput("");
       setStatus(data.response ?? null);
-      setDraft(data.session?.creationDraft);
+      setDraft(data.session?.creationDraft ?? draft);
+      setWizard(data.session?.creationWizard ?? wizard);
+      await refreshDraft();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -331,10 +251,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   };
 
   const handleCreate = async () => {
-    if (!canCreateFromDraft(draft)) {
-      return;
-    }
-
+    if (!canCreate) return;
     setCreating(true);
     setError(null);
     try {
@@ -345,7 +262,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
       }
       setStatus(data.response ?? null);
       setDraft(undefined);
-      await waitForBookReady(bookId);
+      setWizard(undefined);
       nav.toBook(bookId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -361,6 +278,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
       const data = await runAgentInstruction("/discard");
       setStatus(data.response ?? null);
       setDraft(undefined);
+      setWizard(undefined);
       setInput("");
       await refreshDraft().catch(() => undefined);
     } catch (cause) {
@@ -371,130 +289,133 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <button onClick={nav.toDashboard} className={c.link}>{t("bread.books")}</button>
-        <span className="text-border">/</span>
-        <span>{t("bread.newBook")}</span>
-      </div>
+    <div className="flex flex-1 min-w-0 overflow-hidden">
+      <main className="flex-1 min-w-0 overflow-y-auto px-6 py-6 lg:px-8">
+        <div className="mx-auto max-w-5xl space-y-6">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <button onClick={nav.toDashboard} className={c.link}>{t("bread.books")}</button>
+            <span className="text-border">/</span>
+            <span>{t("bread.newBook")}</span>
+          </div>
 
-      <div className="space-y-3">
-        <h1 className="font-serif text-3xl">{t("create.title")}</h1>
-        <p className="text-sm text-muted-foreground leading-7">{copy.idleBody}</p>
-      </div>
+          <div className="space-y-2">
+            <h1 className="font-serif text-3xl">{t("create.title")}</h1>
+            <p className="text-sm leading-7 text-muted-foreground">
+              按步骤创建基础资料。左侧向导负责成稿，右侧聊天负责补充和修改。
+            </p>
+          </div>
 
-      {error && (
-        <div className={`border ${c.error} rounded-md px-4 py-3`}>
-          {error}
-        </div>
-      )}
+          {error && <div className={`rounded-md border ${c.error} px-4 py-3`}>{error}</div>}
+          {status && <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">{status}</div>}
 
-      {status && (
-        <div className="border border-primary/20 bg-primary/5 rounded-md px-4 py-3 text-sm text-primary">
-          {status}
-        </div>
-      )}
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
+            <section className="space-y-4">
+              <div className="rounded-2xl border border-border/60 bg-card/70 p-5 space-y-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">向导进度</div>
+                    <div className="text-sm text-muted-foreground">当前：{currentStepMeta.title}</div>
+                  </div>
+                  <div className="text-xs text-muted-foreground">{currentIndex + 1} / {WIZARD_STEPS.length}</div>
+                </div>
 
-      <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-        <section className="space-y-4">
-          <div className="rounded-2xl border border-border/60 bg-card/70 p-5 space-y-4">
-            <div className="space-y-1">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground font-bold">
-                {copy.draftHeading}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {copy.syncedHint}
-              </div>
-            </div>
-
-            {loadingDraft ? (
-              <div className="text-sm text-muted-foreground">{projectLang === "zh" ? "读取共享草案中…" : "Loading shared draft…"}</div>
-            ) : draft ? (
-              <div className="space-y-4">
-                {summaryRows.length > 0 ? (
-                  <div className="space-y-3">
-                    {summaryRows.map((row) => (
-                      <div key={row.key} className="rounded-xl border border-border/50 bg-background/70 px-4 py-3">
-                        <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground font-semibold">{row.label}</div>
-                        <div className="mt-1 text-sm leading-7 whitespace-pre-wrap">{row.value}</div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {WIZARD_STEPS.map((step, index) => {
+                    const active = step.id === currentStep;
+                    const done = Boolean(wizard?.completedSteps.includes(step.id));
+                    return (
+                      <div key={step.id} className={`rounded-xl border px-4 py-3 ${active ? "border-primary bg-primary/5" : done ? "border-emerald-500/30 bg-emerald-500/5" : "border-border/50 bg-background/60"}`}>
+                        <div className="text-xs font-semibold">{step.title}</div>
+                        <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{step.subtitle}</div>
+                        <div className="mt-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground/70">{index + 1}</div>
                       </div>
-                    ))}
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-border/60 bg-card/70 p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">{currentStepMeta.title}</div>
+                    <div className="text-xs text-muted-foreground">{currentStepMeta.subtitle}</div>
                   </div>
-                ) : null}
+                  {loadingDraft ? <div className="text-xs text-muted-foreground">读取中…</div> : null}
+                </div>
 
-                {draft.missingFields.length > 0 ? (
-                  <div className="space-y-2">
-                    <div className="text-xs font-medium text-foreground">{copy.missingHeading}</div>
-                    <div className="flex flex-wrap gap-2">
-                      {draft.missingFields.map((field) => (
-                        <span
-                          key={field}
-                          className="rounded-full border border-border/70 bg-secondary/50 px-3 py-1 text-xs text-muted-foreground"
-                        >
-                          {field}
-                        </span>
-                      ))}
-                    </div>
-                    <p className="text-xs text-muted-foreground">{copy.missingHint}</p>
+                <textarea
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  rows={10}
+                  className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 focus:outline-none`}
+                  placeholder="输入当前页的补充要求，或直接确认进入下一步。"
+                />
+
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    onClick={handleAdvance}
+                    disabled={submitting || creating || !nextStepMeta}
+                    className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}
+                  >
+                    {nextStepMeta ? (submitting ? "处理中…" : `确认并进入 ${nextStepMeta.title}`) : "已到最后一步"}
+                  </button>
+                  <button
+                    onClick={handleCreate}
+                    disabled={!canCreate || submitting || creating}
+                    className="rounded-md border border-border bg-secondary px-4 py-3 text-sm font-medium text-secondary-foreground disabled:opacity-50"
+                  >
+                    {creating ? "创建中…" : "最终创建书籍"}
+                  </button>
+                  <button
+                    onClick={handleDiscard}
+                    disabled={submitting || creating}
+                    className="rounded-md border border-border px-4 py-3 text-sm font-medium text-muted-foreground disabled:opacity-50"
+                  >
+                    丢弃草案
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <aside className="w-full max-w-[420px] xl:sticky xl:top-6 self-start">
+              <div className="rounded-2xl border border-border/60 bg-card/70 p-4 space-y-4">
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">右侧聊天</div>
+                  <div className="text-xs text-muted-foreground">固定宽度聊天面板，用于补充、追问和修改当前页内容。</div>
+                </div>
+                <div className="rounded-xl border border-border/40 bg-background/70 p-4 space-y-3">
+                  <div className="rounded-lg border border-dashed border-border/60 px-3 py-4 text-sm text-muted-foreground leading-7">
+                    这里后续接入会话式补充输入、当前页 AI 修改与历史记录。
                   </div>
-                ) : null}
+                  <textarea
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    rows={8}
+                    className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 focus:outline-none`}
+                    placeholder="例如：把人物关系页改成双男主互相利用再互相背叛。"
+                  />
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      onClick={handleAdvance}
+                      disabled={submitting || creating || !nextStepMeta}
+                      className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}
+                    >
+                      {nextStepMeta ? (submitting ? "处理中…" : `确认并进入 ${nextStepMeta.title}`) : "已到最后一步"}
+                    </button>
+                    <button
+                      onClick={handleCreate}
+                      disabled={!canCreate || submitting || creating}
+                      className="rounded-md border border-border bg-secondary px-4 py-3 text-sm font-medium text-secondary-foreground disabled:opacity-50"
+                    >
+                      {creating ? "创建中…" : "最终创建书籍"}
+                    </button>
+                  </div>
+                </div>
               </div>
-            ) : (
-              <div className="rounded-xl border border-dashed border-border/70 bg-background/50 px-5 py-6">
-                <div className="font-medium">{copy.idleTitle}</div>
-                <p className="mt-2 text-sm text-muted-foreground leading-7">
-                  {copy.helperBody}
-                </p>
-              </div>
-            )}
+            </aside>
           </div>
-        </section>
-
-        <section className="space-y-4">
-          <div className="rounded-2xl border border-border/60 bg-card/70 p-5 space-y-4">
-            <div className="space-y-1">
-              <div className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground font-bold">
-                {copy.promptLabel}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {copy.helperTitle}
-              </div>
-            </div>
-
-            <textarea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              rows={10}
-              className={`w-full ${c.input} rounded-xl px-4 py-3 focus:outline-none text-sm leading-7 resize-y`}
-              placeholder={draft ? copy.promptPlaceholderFollowup : copy.promptPlaceholder}
-            />
-
-            <div className="flex flex-wrap gap-3">
-              <button
-                onClick={handleDraftSubmit}
-                disabled={submitting || creating || !input.trim()}
-                className={`px-4 py-3 ${c.btnPrimary} rounded-md disabled:opacity-50 font-medium text-sm`}
-              >
-                {submitting ? copy.submitting : copy.submit}
-              </button>
-              <button
-                onClick={handleCreate}
-                disabled={!canCreateFromDraft(draft) || creating || submitting}
-                className={`px-4 py-3 rounded-md border border-border bg-secondary text-secondary-foreground disabled:opacity-50 font-medium text-sm`}
-              >
-                {creating ? copy.creating : copy.create}
-              </button>
-              <button
-                onClick={handleDiscard}
-                disabled={!draft || submitting || creating}
-                className="px-4 py-3 rounded-md border border-border text-muted-foreground hover:text-foreground hover:border-foreground/20 disabled:opacity-50 font-medium text-sm"
-              >
-                {copy.discard}
-              </button>
-            </div>
-          </div>
-        </section>
-      </div>
+        </div>
+      </main>
     </div>
   );
 }

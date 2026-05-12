@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AutomationModeSchema,
   BookCreationDraftSchema,
+  BookCreationWizardStateSchema,
   InteractionIntentTypeSchema,
   ExecutionStatusSchema,
   InteractionSessionSchema,
@@ -11,6 +12,7 @@ import {
   appendInteractionMessage,
   appendInteractionEvent,
   updateCreationDraft,
+  updateCreationWizard,
   clearCreationDraft,
 } from "../index.js";
 
@@ -151,5 +153,25 @@ describe("interaction models", () => {
     const withDraft = updateCreationDraft(session, draft);
     expect(withDraft.creationDraft?.title).toBe("夜港账本");
     expect(clearCreationDraft(withDraft).creationDraft).toBeUndefined();
+  });
+
+  it("stores wizard state inside the shared session", () => {
+    const wizard = BookCreationWizardStateSchema.parse({
+      currentStep: "world",
+      completedSteps: ["intro"],
+      stepNotes: { intro: "先定故事背景" },
+    });
+
+    const session = InteractionSessionSchema.parse({
+      sessionId: "session-6",
+      projectRoot: "/tmp/project",
+      automationMode: "semi",
+      messages: [],
+      events: [],
+    });
+
+    const updated = updateCreationWizard(session, wizard);
+    expect(updated.creationWizard?.currentStep).toBe("world");
+    expect(updated.creationWizard?.completedSteps).toEqual(["intro"]);
   });
 });

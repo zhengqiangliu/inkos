@@ -90,11 +90,15 @@ export {
 } from "./interaction/events.js";
 export {
   BookCreationDraftSchema,
+  BookCreationWizardStepSchema,
+  BookCreationWizardStateSchema,
   DraftRoundSchema,
   PendingDecisionSchema,
   InteractionMessageSchema,
   InteractionSessionSchema,
   type BookCreationDraft,
+  type BookCreationWizardStep,
+  type BookCreationWizardState,
   type DraftRound,
   type PendingDecision,
   type InteractionMessage,
@@ -104,6 +108,7 @@ export {
   clearPendingDecision,
   updateAutomationMode,
   updateCreationDraft,
+  updateCreationWizard,
   appendInteractionMessage,
   appendInteractionEvent,
   BookSessionSchema,

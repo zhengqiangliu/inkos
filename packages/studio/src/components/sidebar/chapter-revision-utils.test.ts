@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildChapterRevisionInstruction,
+  getChapterRevisionDisplayMeta,
   getChapterRevisionModeMeta,
   resolveChapterRevisionMode,
 } from "./chapter-revision-utils";
@@ -33,6 +34,13 @@ describe("chapter revision utils", () => {
     expect(getChapterRevisionModeMeta("选中文本")).toMatchObject({
       mode: "selected",
       label: "正文选中模式",
+    });
+  });
+
+  it("promotes empty selection into selection mode when the AI selection panel is active", () => {
+    expect(getChapterRevisionDisplayMeta("", true)).toMatchObject({
+      mode: "selected",
+      label: "AI 选择模式",
     });
   });
 });

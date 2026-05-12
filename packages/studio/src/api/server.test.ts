@@ -78,6 +78,7 @@ const createAndPersistBookSessionMock = vi.fn();
 const loadBookSessionMock = vi.fn();
 const persistBookSessionMock = vi.fn();
 const appendBookSessionMessageMock = vi.fn();
+const upsertBookSessionMessageMock = vi.fn();
 const renameBookSessionMock = vi.fn();
 const deleteBookSessionMock = vi.fn();
 const migrateBookSessionMock = vi.fn();
@@ -245,6 +246,7 @@ vi.mock("@actalk/inkos-core", () => {
     loadBookSession: loadBookSessionMock,
     persistBookSession: persistBookSessionMock,
     appendBookSessionMessage: appendBookSessionMessageMock,
+    upsertBookSessionMessage: upsertBookSessionMessageMock,
     renameBookSession: renameBookSessionMock,
     deleteBookSession: deleteBookSessionMock,
     migrateBookSession: migrateBookSessionMock,
@@ -495,6 +497,7 @@ describe("createStudioServer daemon lifecycle", () => {
     loadBookSessionMock.mockReset();
     persistBookSessionMock.mockReset();
     appendBookSessionMessageMock.mockReset();
+    upsertBookSessionMessageMock.mockReset();
     renameBookSessionMock.mockReset();
     deleteBookSessionMock.mockReset();
     migrateBookSessionMock.mockReset();
@@ -528,6 +531,19 @@ describe("createStudioServer daemon lifecycle", () => {
       messages: [...(session.messages ?? []), msg].sort((left: any, right: any) => left.timestamp - right.timestamp),
       updatedAt: Date.now(),
     }));
+    upsertBookSessionMessageMock.mockImplementation((session: any, msg: any) => {
+      const index = (session.messages ?? []).findIndex(
+        (entry: any) => entry.role === msg.role && entry.timestamp === msg.timestamp,
+      );
+      const messages = index >= 0
+        ? (session.messages ?? []).map((entry: any, entryIndex: number) => (entryIndex === index ? { ...entry, ...msg } : entry))
+        : [...(session.messages ?? []), msg];
+      return {
+        ...session,
+        messages: messages.sort((left: any, right: any) => left.timestamp - right.timestamp),
+        updatedAt: Date.now(),
+      };
+    });
     renameBookSessionMock.mockResolvedValue(null);
     deleteBookSessionMock.mockResolvedValue(undefined);
     migrateBookSessionMock.mockImplementation(async (_root: string, _sessionId: string, bookId: string) => ({
@@ -3226,6 +3242,23 @@ describe("createStudioServer daemon lifecycle", () => {
         sessionId: "agent-session-1",
       }),
     });
+    expect(upsertBookSessionMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "agent-session-1",
+        messages: expect.arrayContaining([
+          expect.objectContaining({
+            role: "user",
+            content: "continue",
+          }),
+        ]),
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        content: "Completed write_next for demo-book.",
+        thinkingStreaming: false,
+      }),
+    );
+    expect(persistBookSessionMock).toHaveBeenCalledTimes(2);
     expect(runAgentSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         bookId: "demo-book",
@@ -3234,6 +3267,79 @@ describe("createStudioServer daemon lifecycle", () => {
       "continue",
       expect.any(Array),
     );
+  });
+
+  it("persists incremental streaming checkpoints with upserted assistant state", async () => {
+    const runId = "run-streaming-checkpoint-1";
+    runAgentSessionMock.mockImplementationOnce(async (args: any) => {
+      args.onEvent?.({
+        type: "message_update",
+        assistantMessageEvent: { type: "thinking_start" },
+      });
+      args.onEvent?.({
+        type: "message_update",
+        assistantMessageEvent: { type: "thinking_delta", delta: "开始执行 write-next" },
+      });
+      args.onEvent?.({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_delta", delta: "正文流段落。" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      args.onEvent?.({
+        type: "message_update",
+        assistantMessageEvent: { type: "thinking_end" },
+      });
+      return {
+        responseText: "正文流段落。",
+        messages: [
+          { role: "user", content: "请写下一章" },
+          { role: "assistant", content: "正文流段落。", thinking: "开始执行 write-next" },
+        ],
+      };
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "请总结当前进度",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-1",
+        runId,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      response: "正文流段落。",
+      runId,
+    });
+
+    expect(upsertBookSessionMessageMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      upsertBookSessionMessageMock.mock.calls.some(([, message]) => (message as any)?.thinkingStreaming === true),
+    ).toBe(true);
+    expect(
+      upsertBookSessionMessageMock.mock.calls.some(([, message]) => (message as any)?.thinkingStreaming === false),
+    ).toBe(true);
+    expect(persistBookSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      sessionId: "agent-session-1",
+      messages: [
+        expect.objectContaining({
+          role: "user",
+          content: "请总结当前进度",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: "正文流段落。",
+          thinking: "开始执行 write-next",
+          thinkingStreaming: false,
+        }),
+      ],
+    });
   });
 
   it("auto-switches reasoner model for write-intent agent calls and enables quick pipeline defaults", async () => {
@@ -7853,6 +7959,16 @@ describe("createStudioServer daemon lifecycle", () => {
       response: "你好！",
       session: { sessionId: "agent-session-1" },
     });
+    expect(upsertBookSessionMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "agent-session-1",
+      }),
+      expect.objectContaining({
+        role: "assistant",
+        content: "你好！",
+        thinkingStreaming: false,
+      }),
+    );
   });
 
   it("exposes /api/v1/agent/stop and returns stopped=false when no run is active", async () => {

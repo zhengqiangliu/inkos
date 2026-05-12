@@ -80,19 +80,29 @@ function buildBookConfig(input: {
 
 function buildCreationExternalContext(input: {
   readonly blurb?: string;
+  readonly storyBackground?: string;
   readonly worldPremise?: string;
   readonly settingNotes?: string;
+  readonly novelOutline?: string;
   readonly protagonist?: string;
   readonly supportingCast?: string;
+  readonly characterMatrix?: string;
+  readonly characterArc?: string;
+  readonly relationshipMap?: string;
   readonly conflictCore?: string;
   readonly volumeOutline?: string;
   readonly constraints?: string;
 }): string | undefined {
   const sections = [
+    input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
     input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
     input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
+    input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
     input.protagonist ? `## 主角设定\n${input.protagonist}` : undefined,
     input.supportingCast ? `## 关键角色与势力\n${input.supportingCast}` : undefined,
+    input.characterMatrix ? `## 角色矩阵\n${input.characterMatrix}` : undefined,
+    input.characterArc ? `## 人物弧光\n${input.characterArc}` : undefined,
+    input.relationshipMap ? `## 人物关系\n${input.relationshipMap}` : undefined,
     input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
     input.volumeOutline ? `## 卷纲方向\n${input.volumeOutline}` : undefined,
     input.blurb ? `## 简介卖点\n${input.blurb}` : undefined,
@@ -312,6 +322,18 @@ const CREATE_BOOK_TOOL: ToolDefinition = {
       chapterWordCount: { type: "number", description: "每章字数，默认 3000" },
       language: { type: "string", enum: ["zh", "en"], description: "写作语言，默认 zh" },
       brief: { type: "string", description: "创意简述，会传给 Architect 智能体生成完整的世界观、主角、冲突等 foundation 文件。把用户提到的所有创意要素都写进这里。" },
+      storyBackground: { type: "string", description: "简介 / 故事背景" },
+      worldPremise: { type: "string", description: "世界观" },
+      novelOutline: { type: "string", description: "小说大纲" },
+      volumeOutline: { type: "string", description: "卷纲规划" },
+      protagonist: { type: "string", description: "主角 / 配角" },
+      supportingCast: { type: "string", description: "配角" },
+      characterMatrix: { type: "string", description: "人物矩阵 / 人物弧光" },
+      characterArc: { type: "string", description: "核心弧光" },
+      relationshipMap: { type: "string", description: "人物关系" },
+      settingNotes: { type: "string", description: "补充设定" },
+      conflictCore: { type: "string", description: "核心冲突" },
+      constraints: { type: "string", description: "创作约束" },
     },
     required: ["title", "genre", "platform", "brief"],
   },
@@ -323,8 +345,9 @@ const BOOK_DRAFT_SYSTEM_PROMPT = [
   "规则：",
   "1. 从用户描述中推断所有字段，大胆预填合理默认值。",
   "2. brief 字段要详细——它会传给 Architect 智能体生成完整的世界观、主角、冲突等 foundation 文件。把用户提到的所有创意要素都写进 brief。",
-  "3. 如果用户后续要求修改某些字段，重新调用 create_book 工具，只更新被提到的字段，其余保持不变。",
-  "4. 不要只回复文字讨论——必须调用 create_book 工具输出结构化参数。",
+  "3. storyBackground、worldPremise、novelOutline、volumeOutline、characterArc、relationshipMap 都必须按固定内容框架填充，不要自由散写。",
+  "4. 如果用户后续要求修改某些字段，重新调用 create_book 工具，只更新被提到的字段，其余保持不变。",
+  "5. 不要只回复文字讨论——必须调用 create_book 工具输出结构化参数。",
 ].join("\n");
 
 /** Map directive field keys to BookCreationDraft property names. */
@@ -370,17 +393,32 @@ function applyFieldsToDraft(
       case "blurb":
         draft.blurb = value;
         break;
+      case "storyBackground":
+        draft.storyBackground = value;
+        break;
       case "worldPremise":
         draft.worldPremise = value;
         break;
       case "settingNotes":
         draft.settingNotes = value;
         break;
+      case "novelOutline":
+        draft.novelOutline = value;
+        break;
       case "protagonist":
         draft.protagonist = value;
         break;
       case "supportingCast":
         draft.supportingCast = value;
+        break;
+      case "characterMatrix":
+        draft.characterMatrix = value;
+        break;
+      case "characterArc":
+        draft.characterArc = value;
+        break;
+      case "relationshipMap":
+        draft.relationshipMap = value;
         break;
       case "conflictCore":
         draft.conflictCore = value;
@@ -501,6 +539,20 @@ export function createInteractionToolsFromDeps(
         targetChapters: (parsedArgs.targetChapters as number) ?? existingDraft?.targetChapters,
         chapterWordCount: (parsedArgs.chapterWordCount as number) ?? existingDraft?.chapterWordCount,
         blurb: (parsedArgs.brief as string) ?? existingDraft?.blurb,
+        storyBackground: (parsedArgs.storyBackground as string) ?? existingDraft?.storyBackground,
+        worldPremise: (parsedArgs.worldPremise as string) ?? existingDraft?.worldPremise,
+        settingNotes: (parsedArgs.settingNotes as string) ?? existingDraft?.settingNotes,
+        novelOutline: (parsedArgs.novelOutline as string) ?? existingDraft?.novelOutline,
+        protagonist: (parsedArgs.protagonist as string) ?? existingDraft?.protagonist,
+        supportingCast: (parsedArgs.supportingCast as string) ?? existingDraft?.supportingCast,
+        characterMatrix: (parsedArgs.characterMatrix as string) ?? existingDraft?.characterMatrix,
+        characterArc: (parsedArgs.characterArc as string) ?? existingDraft?.characterArc,
+        relationshipMap: (parsedArgs.relationshipMap as string) ?? existingDraft?.relationshipMap,
+        conflictCore: (parsedArgs.conflictCore as string) ?? existingDraft?.conflictCore,
+        volumeOutline: (parsedArgs.volumeOutline as string) ?? existingDraft?.volumeOutline,
+        constraints: (parsedArgs.constraints as string) ?? existingDraft?.constraints,
+        authorIntent: (parsedArgs.authorIntent as string) ?? existingDraft?.authorIntent,
+        currentFocus: (parsedArgs.currentFocus as string) ?? existingDraft?.currentFocus,
         missingFields: [],
         readyToCreate: Boolean(parsedArgs.title && parsedArgs.genre && parsedArgs.platform),
       };

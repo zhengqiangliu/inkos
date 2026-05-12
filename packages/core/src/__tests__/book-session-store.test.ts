@@ -12,7 +12,7 @@ import {
   extractFirstUserMessageTitle,
   SessionAlreadyMigratedError,
 } from "../interaction/book-session-store.js";
-import { createBookSession, appendBookSessionMessage } from "../interaction/session.js";
+import { createBookSession, appendBookSessionMessage, upsertBookSessionMessage } from "../interaction/session.js";
 import { mkdir, writeFile } from "node:fs/promises";
 
 describe("book-session-store", () => {
@@ -48,6 +48,28 @@ describe("book-session-store", () => {
       const loaded = await loadBookSession(tempDir, session.sessionId);
       expect(loaded!.messages).toHaveLength(1);
       expect(loaded!.messages[0].content).toBe("test");
+    });
+
+    it("round-trips a streaming assistant checkpoint with empty content", async () => {
+      const session = upsertBookSessionMessage(createBookSession("book"), {
+        role: "assistant" as const,
+        content: "",
+        thinking: "先思考",
+        thinkingStreaming: true,
+        timestamp: 100,
+      });
+      await persistBookSession(tempDir, session);
+
+      const loaded = await loadBookSession(tempDir, session.sessionId);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.messages).toHaveLength(1);
+      expect(loaded!.messages[0]).toMatchObject({
+        role: "assistant",
+        content: "",
+        thinking: "先思考",
+        thinkingStreaming: true,
+        timestamp: 100,
+      });
     });
 
     it("createBookSession initializes title as null", () => {

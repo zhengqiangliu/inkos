@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface TextSelectionState {
   readonly selectedText: string;
@@ -89,7 +89,7 @@ export function useTextSelection(
     return () => document.removeEventListener("selectionchange", handleSelectionChange);
   }, [containerRef]);
 
-  const clearSelection = () => {
+  const clearSelection = useCallback(() => {
     clearOnNextChange.current = true;
     window.getSelection()?.removeAllRanges();
     isSelectingRef.current = false;
@@ -98,7 +98,7 @@ export function useTextSelection(
     setSelectedText("");
     setSelectionRect(null);
     setIsSelecting(false);
-  };
+  }, []);
 
   return { selectedText, isSelecting, selectionRect, persistedRange, clearSelection };
 }

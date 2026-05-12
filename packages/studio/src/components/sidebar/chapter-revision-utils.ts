@@ -32,6 +32,23 @@ export function getChapterRevisionModeMeta(selectedText: string): ChapterRevisio
   };
 }
 
+export function getChapterRevisionDisplayMeta(
+  selectedText: string,
+  selectionModeActive: boolean,
+): ChapterRevisionModeMeta {
+  const base = getChapterRevisionModeMeta(selectedText);
+  if (selectionModeActive && base.mode === "full") {
+    return {
+      mode: "selected",
+      label: "AI 选择模式",
+      hint: "请在正文中拖选需要修改的片段，右上角会自动弹出修改弹窗。",
+      chipClassName: "border-primary/30 bg-primary/15 text-primary",
+      panelClassName: "border-primary/25 bg-[linear-gradient(180deg,oklch(1_0_0_/_0.96),oklch(0.98_0.01_70_/_0.94))]",
+    };
+  }
+  return base;
+}
+
 export function buildChapterRevisionInstruction(input: {
   readonly chapterNumber: number;
   readonly selectedText: string;

@@ -137,10 +137,15 @@ export const BookCreationDraftSchema = z.object({
   targetChapters: z.number().int().min(1).optional(),
   chapterWordCount: z.number().int().min(1).optional(),
   blurb: z.string().min(1).optional(),
+  storyBackground: z.string().min(1).optional(),
   worldPremise: z.string().min(1).optional(),
   settingNotes: z.string().min(1).optional(),
+  novelOutline: z.string().min(1).optional(),
   protagonist: z.string().min(1).optional(),
   supportingCast: z.string().min(1).optional(),
+  characterMatrix: z.string().min(1).optional(),
+  characterArc: z.string().min(1).optional(),
+  relationshipMap: z.string().min(1).optional(),
   conflictCore: z.string().min(1).optional(),
   volumeOutline: z.string().min(1).optional(),
   constraints: z.string().min(1).optional(),
@@ -152,6 +157,28 @@ export const BookCreationDraftSchema = z.object({
 });
 
 export type BookCreationDraft = z.infer<typeof BookCreationDraftSchema>;
+
+export const BookCreationWizardStepSchema = z.enum([
+  "intro",
+  "world",
+  "outline",
+  "volume",
+  "characters",
+  "arc",
+  "relation",
+  "review",
+]);
+
+export type BookCreationWizardStep = z.infer<typeof BookCreationWizardStepSchema>;
+
+export const BookCreationWizardStateSchema = z.object({
+  currentStep: BookCreationWizardStepSchema.default("intro"),
+  completedSteps: z.array(BookCreationWizardStepSchema).default([]),
+  stepNotes: z.record(z.string(), z.string()).default({}),
+  updatedAt: z.number().int().nonnegative().optional(),
+});
+
+export type BookCreationWizardState = z.infer<typeof BookCreationWizardStateSchema>;
 
 export const DraftRoundSchema = z.object({
   roundId: z.number().int().min(1),
@@ -170,6 +197,7 @@ export const InteractionSessionSchema = z.object({
   activeBookId: z.string().min(1).optional(),
   activeChapterNumber: z.number().int().min(1).optional(),
   creationDraft: BookCreationDraftSchema.optional(),
+  creationWizard: BookCreationWizardStateSchema.optional(),
   draftRounds: z.array(DraftRoundSchema).default([]),
   automationMode: AutomationModeSchema.default("semi"),
   messages: z.array(InteractionMessageSchema).default([]),
@@ -188,6 +216,7 @@ export const BookSessionSchema = z.object({
   title: z.string().nullable().default(null),
   messages: z.array(InteractionMessageSchema).default([]),
   creationDraft: BookCreationDraftSchema.optional(),
+  creationWizard: BookCreationWizardStateSchema.optional(),
   draftRounds: z.array(DraftRoundSchema).default([]),
   events: z.array(InteractionEventSchema).default([]),
   currentExecution: ExecutionStateSchema.optional(),
@@ -281,14 +310,25 @@ export function updateCreationDraft(
   };
 }
 
+export function updateCreationWizard(
+  session: InteractionSession,
+  wizard: BookCreationWizardState,
+): InteractionSession {
+  return {
+    ...session,
+    creationWizard: wizard,
+  };
+}
+
 export function clearCreationDraft(session: InteractionSession): InteractionSession {
   if (!session.creationDraft) {
-    return session;
+    return session.creationWizard ? { ...session, creationWizard: undefined } : session;
   }
 
   return {
     ...session,
     creationDraft: undefined,
+    creationWizard: undefined,
     draftRounds: [],
   };
 }
