@@ -14,6 +14,8 @@ export interface PostWriteViolation {
   readonly severity: "error" | "warning";
   readonly description: string;
   readonly suggestion: string;
+  readonly issueId?: string;
+  readonly dimensionId?: string;
 }
 
 interface ParagraphShape {
@@ -71,6 +73,81 @@ const COLLECTIVE_SHOCK_PATTERNS = [
   /(?:全场|一片)[，,]?(?:寂静|哗然|沸腾|震动)/,
 ];
 
+interface PostWriteRuleMeta {
+  readonly issueId: string;
+  readonly dimensionId: string;
+}
+
+const POST_WRITE_RULE_META_BY_RULE = new Map<string, PostWriteRuleMeta>([
+  ["禁止句式", { issueId: "PW-001", dimensionId: "postwrite.syntax.forbidden_sentence" }],
+  ["forbidden-sentence", { issueId: "PW-001", dimensionId: "postwrite.syntax.forbidden_sentence" }],
+  ["禁止破折号", { issueId: "PW-002", dimensionId: "postwrite.syntax.dash" }],
+  ["dash-prohibition", { issueId: "PW-002", dimensionId: "postwrite.syntax.dash" }],
+  ["转折词密度", { issueId: "PW-003", dimensionId: "postwrite.rhythm.surprise_markers" }],
+  ["surprise-marker-density", { issueId: "PW-003", dimensionId: "postwrite.rhythm.surprise_markers" }],
+  ["高疲劳词", { issueId: "PW-004", dimensionId: "postwrite.lexicon.fatigue_words" }],
+  ["Fatigue word", { issueId: "PW-004", dimensionId: "postwrite.lexicon.fatigue_words" }],
+  ["元叙事", { issueId: "PW-005", dimensionId: "postwrite.narration.meta_narration" }],
+  ["meta-narration", { issueId: "PW-005", dimensionId: "postwrite.narration.meta_narration" }],
+  ["报告术语", { issueId: "PW-006", dimensionId: "postwrite.narration.report_terms" }],
+  ["report-terms", { issueId: "PW-006", dimensionId: "postwrite.narration.report_terms" }],
+  ["章节号指称", { issueId: "PW-007", dimensionId: "postwrite.continuity.chapter_reference" }],
+  ["chapter-number-reference", { issueId: "PW-007", dimensionId: "postwrite.continuity.chapter_reference" }],
+  ["作者说教", { issueId: "PW-008", dimensionId: "postwrite.style.sermon_words" }],
+  ["sermon-words", { issueId: "PW-008", dimensionId: "postwrite.style.sermon_words" }],
+  ["集体反应", { issueId: "PW-009", dimensionId: "postwrite.scene.collective_reaction" }],
+  ["collective-reaction", { issueId: "PW-009", dimensionId: "postwrite.scene.collective_reaction" }],
+  ["连续了字", { issueId: "PW-010", dimensionId: "postwrite.rhythm.consecutive_le" }],
+  ["consecutive-le", { issueId: "PW-010", dimensionId: "postwrite.rhythm.consecutive_le" }],
+  ["段落过长", { issueId: "PW-011", dimensionId: "postwrite.structure.long_paragraph" }],
+  ["Paragraph length", { issueId: "PW-011", dimensionId: "postwrite.structure.long_paragraph" }],
+  ["Paragraph length warning", { issueId: "PW-011", dimensionId: "postwrite.structure.long_paragraph" }],
+  ["段落过碎", { issueId: "PW-012", dimensionId: "postwrite.structure.paragraph_fragmentation" }],
+  ["Paragraph fragmentation", { issueId: "PW-012", dimensionId: "postwrite.structure.paragraph_fragmentation" }],
+  ["连续短段", { issueId: "PW-013", dimensionId: "postwrite.structure.consecutive_short_paragraphs" }],
+  ["Consecutive short paragraphs", { issueId: "PW-013", dimensionId: "postwrite.structure.consecutive_short_paragraphs" }],
+  ["对话引号强约束", { issueId: "PW-014", dimensionId: "postwrite.dialogue.quote_policy" }],
+  ["dialogue-quote-policy", { issueId: "PW-014", dimensionId: "postwrite.dialogue.quote_policy" }],
+  ["对话引号风格混用", { issueId: "PW-015", dimensionId: "postwrite.dialogue.quote_mix" }],
+  ["Dialogue quote mix", { issueId: "PW-015", dimensionId: "postwrite.dialogue.quote_mix" }],
+  ["对话未标引号", { issueId: "PW-016", dimensionId: "postwrite.dialogue.unquoted_cue" }],
+  ["unquoted-dialogue", { issueId: "PW-016", dimensionId: "postwrite.dialogue.unquoted_cue" }],
+  ["本书禁忌", { issueId: "PW-017", dimensionId: "postwrite.book.prohibition" }],
+  ["Book prohibition", { issueId: "PW-017", dimensionId: "postwrite.book.prohibition" }],
+  ["书籍禁忌", { issueId: "PW-017", dimensionId: "postwrite.book.prohibition" }],
+  ["跨章重复", { issueId: "PW-018", dimensionId: "postwrite.repetition.cross_chapter" }],
+  ["Cross-chapter repetition", { issueId: "PW-018", dimensionId: "postwrite.repetition.cross_chapter" }],
+  ["段落密度漂移", { issueId: "PW-019", dimensionId: "postwrite.structure.paragraph_density_drift" }],
+  ["Paragraph density drift", { issueId: "PW-019", dimensionId: "postwrite.structure.paragraph_density_drift" }],
+  ["AI-tell word density", { issueId: "PW-020", dimensionId: "postwrite.lexicon.ai_tell_density" }],
+  ["AI tell word density", { issueId: "PW-020", dimensionId: "postwrite.lexicon.ai_tell_density" }],
+  ["ai-tell-word-density", { issueId: "PW-020", dimensionId: "postwrite.lexicon.ai_tell_density" }],
+  ["Dialogue pressure", { issueId: "PW-021", dimensionId: "postwrite.dialogue.pressure" }],
+  ["dialogue-pressure", { issueId: "PW-021", dimensionId: "postwrite.dialogue.pressure" }],
+  ["duplicate-title", { issueId: "PW-024", dimensionId: "postwrite.title.duplicate" }],
+  ["near-duplicate-title", { issueId: "PW-025", dimensionId: "postwrite.title.near_duplicate" }],
+  ["title-collapse", { issueId: "PW-026", dimensionId: "postwrite.title.collapse" }],
+  ["prewrite-hook-ids", { issueId: "PW-027", dimensionId: "postwrite.prewrite.hook_ids" }],
+  ["prewrite-hook-missing", { issueId: "PW-028", dimensionId: "postwrite.prewrite.hook_recovery" }],
+  ["prewrite-outline-anchor", { issueId: "PW-029", dimensionId: "postwrite.prewrite.outline_anchor" }],
+  ["prewrite-conflict-empty", { issueId: "PW-030", dimensionId: "postwrite.prewrite.chapter_conflict" }],
+]);
+
+function enrichPostWriteViolations(
+  violations: ReadonlyArray<PostWriteViolation>,
+): ReadonlyArray<PostWriteViolation> {
+  if (violations.length === 0) return violations;
+  return violations.map((violation) => {
+    const meta = POST_WRITE_RULE_META_BY_RULE.get(violation.rule);
+    if (!meta) return violation;
+    return {
+      ...violation,
+      issueId: violation.issueId ?? meta.issueId,
+      dimensionId: violation.dimensionId ?? meta.dimensionId,
+    };
+  });
+}
+
 // --- Validator ---
 
 export function validatePostWrite(
@@ -92,7 +169,7 @@ export function validatePostWrite(
   if (/不是[^，。！？\n]{0,30}[，,]?\s*而是/.test(content)) {
     violations.push({
       rule: "禁止句式",
-      severity: "error",
+      severity: "warning",
       description: "出现了「不是……而是……」句式",
       suggestion: "改用直述句",
     });
@@ -102,7 +179,7 @@ export function validatePostWrite(
   if (content.includes("——")) {
     violations.push({
       rule: "禁止破折号",
-      severity: "error",
+      severity: "warning",
       description: "出现了破折号「——」",
       suggestion: "用逗号或句号断句",
     });
@@ -174,7 +251,7 @@ export function validatePostWrite(
   if (foundTerms.length > 0) {
     violations.push({
       rule: "报告术语",
-      severity: "error",
+      severity: "warning",
       description: `正文中出现分析报告术语：${foundTerms.map(t => `"${t}"`).join("、")}`,
       suggestion: "这些术语只能用于 PRE_WRITE_CHECK 内部推理，正文中用口语化表达替代",
     });
@@ -187,7 +264,7 @@ export function validatePostWrite(
     const unique = [...new Set(chapterRefs)];
     violations.push({
       rule: isEnglish ? "chapter-number-reference" : "章节号指称",
-      severity: "error",
+      severity: "warning",
       description: isEnglish
         ? `Chapter text contains explicit chapter number references: ${unique.map(r => `"${r}"`).join(", ")}. Characters do not know they are in a numbered chapter.`
         : `正文中出现了章节号指称：${unique.map(r => `"${r}"`).join("、")}。角色不知道自己在第几章。`,
@@ -360,7 +437,7 @@ export function validatePostWrite(
     }
   }
 
-  return violations;
+  return enrichPostWriteViolations(violations);
 }
 
 /**
@@ -428,7 +505,7 @@ export function detectCrossChapterRepetition(
     }
   }
 
-  return violations;
+  return enrichPostWriteViolations(violations);
 }
 
 export function detectParagraphLengthDrift(
@@ -453,21 +530,21 @@ export function detectParagraphLengthDrift(
 
   const dropPercent = Math.round((1 - shrinkRatio) * 100);
 
-  return [
-    language === "en"
-      ? {
-          rule: "Paragraph density drift",
-          severity: "warning",
-          description: `Average paragraph length dropped from ${Math.round(recent.averageLength)} to ${Math.round(current.averageLength)} characters (${dropPercent}% shorter) compared with recent chapters.`,
-          suggestion: "Let action, observation, and reaction share paragraphs more often instead of cutting every beat into a single short line.",
-        }
-      : {
-          rule: "段落密度漂移",
-          severity: "warning",
-          description: `当前章平均段长从近期章节的${Math.round(recent.averageLength)}字降到${Math.round(current.averageLength)}字，缩短了${dropPercent}%。`,
-          suggestion: "不要把每个动作都切成单独短句；适当把动作、观察和反应并入同一段，恢复段落层次。",
-        },
-  ];
+  const violation: PostWriteViolation = language === "en"
+    ? ({
+        rule: "Paragraph density drift",
+        severity: "warning",
+        description: `Average paragraph length dropped from ${Math.round(recent.averageLength)} to ${Math.round(current.averageLength)} characters (${dropPercent}% shorter) compared with recent chapters.`,
+        suggestion: "Let action, observation, and reaction share paragraphs more often instead of cutting every beat into a single short line.",
+      } satisfies PostWriteViolation)
+    : ({
+        rule: "段落密度漂移",
+        severity: "warning",
+        description: `当前章平均段长从近期章节的${Math.round(recent.averageLength)}字降到${Math.round(current.averageLength)}字，缩短了${dropPercent}%。`,
+        suggestion: "不要把每个动作都切成单独短句；适当把动作、观察和反应并入同一段，恢复段落层次。",
+      } satisfies PostWriteViolation);
+
+  return enrichPostWriteViolations([violation]);
 }
 
 /** English-specific post-write validation rules. */
@@ -553,7 +630,7 @@ function validatePostWriteEnglish(
     }
   }
 
-  return violations;
+  return enrichPostWriteViolations(violations);
 }
 
 function appendParagraphShapeWarnings(
@@ -607,7 +684,7 @@ export function detectParagraphShapeWarnings(
 ): ReadonlyArray<PostWriteViolation> {
   const violations: PostWriteViolation[] = [];
   appendParagraphShapeWarnings(violations, content, language);
-  return violations;
+  return enrichPostWriteViolations(violations);
 }
 
 function isDialogueParagraph(paragraph: string): boolean {
@@ -728,6 +805,102 @@ const CHINESE_TITLE_STOP_WORDS = new Set([
 const CHINESE_TITLE_STOP_CHARS = new Set(["的", "了", "着", "一", "只", "从", "在", "和", "与", "把", "被", "有", "没", "里", "又", "才"]);
 
 /**
+ * Parse PRE_WRITE_CHECK table and validate key commitments are fulfilled in the chapter content.
+ * Catches cases where the model writes a self-check but doesn't actually follow through.
+ */
+export function validatePreWriteCommitments(
+  preWriteCheck: string,
+  chapterContent: string,
+  language: "zh" | "en" = "zh",
+): ReadonlyArray<PostWriteViolation> {
+  if (!preWriteCheck || !chapterContent) return [];
+  const violations: PostWriteViolation[] = [];
+  const isEnglish = language === "en";
+
+  // Parse markdown table rows: | key | value | note |
+  const tableRows = preWriteCheck.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("|") && line.endsWith("|"))
+    .map((line) => line.split("|").map((cell) => cell.trim()))
+    .filter((cells) => cells.length >= 4); // leading empty + key + value + note + trailing empty
+
+  for (const cells of tableRows) {
+    const key = cells[1] ?? "";
+    const value = cells[2] ?? "";
+
+    // 1. Validate "待回收伏笔" / "Hooks to recover" row
+    if (key.includes("待回收伏笔") || key.includes("hooks to recover")) {
+      if (!value || value === "none" || value === "无") continue;
+
+      // Extract hook IDs like H01, H02
+      const promisedHookIds = value.match(/H\d{2,}/g);
+      if (!promisedHookIds || promisedHookIds.length === 0) {
+        violations.push({
+          rule: "prewrite-hook-ids",
+          severity: "warning",
+          description: isEnglish
+            ? `PRE_WRITE_CHECK "Hooks to recover" row does not contain valid hook IDs: "${value}"`
+            : `PRE_WRITE_CHECK "待回收伏笔"行未包含有效 hook_id：${value}`,
+          suggestion: isEnglish
+            ? "Use real hook IDs (e.g., H01, H02) from the pending hooks pool"
+            : "使用伏笔池中的真实 hook_id（如 H01、H02）",
+        });
+        continue;
+      }
+
+      // Check if each promised hook is at least mentioned in the content
+      const missingHooks = promisedHookIds.filter((hookId) => !chapterContent.includes(hookId));
+      if (missingHooks.length > 0) {
+        violations.push({
+          rule: "prewrite-hook-missing",
+          severity: "warning",
+          description: isEnglish
+            ? `PRE_WRITE_CHECK promises to recover ${missingHooks.join(", ")}, but these hook IDs are not found in chapter content`
+            : `PRE_WRITE_CHECK 承诺回收 ${missingHooks.join("、")}，但正文中未找到这些伏笔的引用`,
+          suggestion: isEnglish
+            ? "Add scenes or mentions that address these hooks, or update PRE_WRITE_CHECK"
+            : "补充与这些伏笔相关的场景或提及，或更新 PRE_WRITE_CHECK",
+        });
+      }
+    }
+
+    // 2. Validate "大纲锚定" / "Outline anchor" row is not empty
+    if (key.includes("大纲锚定") || key.includes("outline anchor") || key.includes("Chapter Design")) {
+      if (!value || value.length < 4) {
+        violations.push({
+          rule: "prewrite-outline-anchor",
+          severity: "warning",
+          description: isEnglish
+            ? `PRE_WRITE_CHECK "${key}" row is empty or too vague: "${value}"`
+            : `PRE_WRITE_CHECK "${key}"行为空或过于模糊：${value}`,
+          suggestion: isEnglish
+            ? "Identify which specific outline node this chapter covers"
+            : "明确指出本章对应卷纲的哪个具体节点",
+        });
+      }
+    }
+
+    // 3. Validate "本章冲突" / "Chapter conflict" row is not empty
+    if (key.includes("本章冲突") || key.includes("chapter conflict")) {
+      if (!value || value.length < 4) {
+        violations.push({
+          rule: "prewrite-conflict-empty",
+          severity: "warning",
+          description: isEnglish
+            ? `PRE_WRITE_CHECK "Chapter conflict" row is empty or vague: "${value}"`
+            : `PRE_WRITE_CHECK "本章冲突"行为空或过于模糊：${value}`,
+          suggestion: isEnglish
+            ? "Summarize the primary conflict of this chapter"
+            : "用一句话概括本章的核心冲突",
+        });
+      }
+    }
+  }
+
+  return enrichPostWriteViolations(violations);
+}
+
+/**
  * Detect duplicate or near-duplicate chapter titles.
  * Compares the new title against existing chapter titles from index.
  */
@@ -768,7 +941,7 @@ export function detectDuplicateTitle(
     }
   }
 
-  return violations;
+  return enrichPostWriteViolations(violations);
 }
 
 export function resolveDuplicateTitle(
@@ -855,21 +1028,21 @@ function detectTitleCollapse(
     return [];
   }
 
-  return [
-    language === "en"
-      ? {
-          rule: "title-collapse",
-          severity: "warning",
-          description: `Chapter title "${newTitle}" keeps leaning on the recent "${titlePressure.repeatedToken}" title shell.`,
-          suggestion: "Rename the chapter around a new image, action, consequence, or character focus.",
-        }
-      : {
-          rule: "title-collapse",
-          severity: "warning",
-          description: `章节标题"${newTitle}"仍在沿用近期围绕“${titlePressure.repeatedToken}”的命名壳。`,
-          suggestion: "换一个新的意象、动作、后果或人物焦点来命名。",
-        },
-  ];
+  const violation: PostWriteViolation = language === "en"
+    ? ({
+        rule: "title-collapse",
+        severity: "warning",
+        description: `Chapter title "${newTitle}" keeps leaning on the recent "${titlePressure.repeatedToken}" title shell.`,
+        suggestion: "Rename the chapter around a new image, action, consequence, or character focus.",
+      } satisfies PostWriteViolation)
+    : ({
+        rule: "title-collapse",
+        severity: "warning",
+        description: `章节标题"${newTitle}"仍在沿用近期围绕“${titlePressure.repeatedToken}”的命名壳。`,
+        suggestion: "换一个新的意象、动作、后果或人物焦点来命名。",
+      } satisfies PostWriteViolation);
+
+  return enrichPostWriteViolations([violation]);
 }
 
 function regenerateDuplicateTitle(

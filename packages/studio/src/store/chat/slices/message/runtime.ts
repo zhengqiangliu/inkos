@@ -177,9 +177,15 @@ export function deserializeMessages(
   return msgs
     .filter((message) => message.role === "user" || message.role === "assistant")
     .map((message) => {
-      const toolExecutions = (message as any).toolExecutions as ToolExecution[] | undefined;
+      const toolExecutions = message.toolExecutions;
       const parts: MessagePart[] = [];
-      if (message.thinking) parts.push({ type: "thinking", content: message.thinking, streaming: false });
+      if (message.thinking || message.thinkingStreaming) {
+        parts.push({
+          type: "thinking",
+          content: message.thinking ?? "",
+          streaming: message.thinkingStreaming === true,
+        });
+      }
       if (toolExecutions) {
         for (const execution of toolExecutions) {
           parts.push({ type: "tool", execution });
@@ -190,6 +196,7 @@ export function deserializeMessages(
         role: message.role as "user" | "assistant",
         content: message.content,
         thinking: message.thinking,
+        thinkingStreaming: message.thinkingStreaming,
         audit: (message as { audit?: unknown }).audit as Message["audit"],
         toolExecutions,
         timestamp: message.timestamp,

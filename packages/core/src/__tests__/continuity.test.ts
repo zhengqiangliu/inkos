@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ContinuityAuditor } from "../agents/continuity.js";
+import { buildAuditDimensions } from "../agents/audit-dimensions.js";
 
 const ZERO_USAGE = {
   promptTokens: 0,
@@ -82,6 +83,93 @@ describe("ContinuityAuditor", () => {
       const systemPrompt = messages?.[0]?.content ?? "";
 
       expect(systemPrompt).toContain("ALL OUTPUT MUST BE IN ENGLISH");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves structured audit issue ids and fills fallbacks when parsing audit output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-auditor-issue-id-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+
+    await Promise.all([
+      writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: "issue-book",
+          title: "Issue Book",
+          genre: "other",
+          platform: "tomato",
+          chapterWordCount: 800,
+          targetChapters: 60,
+          status: "active",
+          language: "zh",
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        }, null, 2),
+        "utf-8",
+      ),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+      writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
+      writeFile(join(storyDir, "subplot_board.md"), "# Subplot Board\n", "utf-8"),
+      writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n", "utf-8"),
+      writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n", "utf-8"),
+      writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n", "utf-8"),
+    ]);
+
+    const auditor = new ContinuityAuditor({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ContinuityAuditor.prototype as never, "chat" as never).mockResolvedValue({
+      content: JSON.stringify({
+        passed: false,
+        issues: [
+          {
+            issueId: "ISSUE-07",
+            dimensionId: "outline_drift",
+            severity: "critical",
+            category: "Outline Drift Check",
+            description: "Chapter drifts from the outline.",
+            suggestion: "Bring the chapter back to the plan.",
+            excerpt: "The chapter ignores the planned conflict.",
+          },
+          {
+            severity: "warning",
+            category: "Hook Check",
+            description: "A hook is undercooked.",
+            suggestion: "Clarify the hook payoff.",
+          },
+        ],
+        summary: "needs work",
+      }),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      const result = await auditor.auditChapter(bookDir, "Chapter body.", 1, "other");
+      expect(result.issues).toHaveLength(2);
+      expect(result.issues[0]?.issueId).toBe("ISSUE-07");
+      expect(result.issues[0]?.dimensionId).toBe("outline_drift");
+      expect(result.issues[0]?.excerpt).toBe("The chapter ignores the planned conflict.");
+      expect(result.issues[1]?.issueId).toBe("ISSUE-02");
+      expect(result.issues[1]?.dimensionId).toBe("Hook Check");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -174,6 +262,30 @@ describe("ContinuityAuditor", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("shares the same audit dimension source across writer and auditor", () => {
+    const dimensions = buildAuditDimensions(
+      {
+        id: "g",
+        name: "综合",
+        language: "zh",
+        chapterTypes: ["setup"],
+        fatigueWords: [],
+        numericalSystem: false,
+        powerScaling: false,
+        eraResearch: false,
+        pacingRule: "",
+        satisfactionTypes: [],
+        auditDimensions: [],
+      },
+      null,
+      "zh",
+    );
+
+    expect(dimensions.map((dimension) => dimension.name)).toEqual(
+      expect.arrayContaining(["读者期待管理", "大纲偏离检测", "章节衔接检查"]),
+    );
   });
 
   it("uses selected summary and hook evidence instead of full long-history markdown in governed mode", async () => {

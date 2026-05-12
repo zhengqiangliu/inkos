@@ -14,22 +14,27 @@ import {
   readCharacterMatrix,
   readEmotionalArcs,
   readPendingHooks,
-  readBrief,
   formatRecentSummaries,
 } from "./planner-context.js";
+import { readStoryFrame } from "../utils/outline-paths.js";
+import { extractChapterLimitFromOutline } from "../utils/chapter-limit.js";
 
 export interface DesignChapterInput {
   readonly book: BookConfig;
   readonly bookDir: string;
+  readonly volumeOutline: string;
   readonly chapterNumber: number;
+  readonly outlineChapterLimit?: number;
   readonly language?: string;
 }
 
 export interface DesignBatchInput {
   readonly book: BookConfig;
   readonly bookDir: string;
+  readonly volumeOutline: string;
   readonly startChapter: number;
   readonly count: number;
+  readonly outlineChapterLimit?: number;
   readonly existingPlans?: ReadonlyArray<ChapterPlan>;
   readonly language?: string;
 }
@@ -37,9 +42,11 @@ export interface DesignBatchInput {
 export interface AnalyzeChapterInput {
   readonly book: BookConfig;
   readonly bookDir: string;
+  readonly volumeOutline: string;
   readonly chapterNumber: number;
   readonly title: string;
   readonly content: string;
+  readonly outlineChapterLimit?: number;
   readonly language?: string;
 }
 
@@ -52,10 +59,19 @@ export class ChapterDesignAgent extends BaseAgent {
    * Design a single chapter based on book context.
    */
   async designChapter(input: DesignChapterInput, existingPlans?: ReadonlyArray<ChapterPlan>): Promise<ChapterPlan> {
-    const storyDir = join(input.bookDir, "story");
     const language = input.language ?? input.book.language ?? "zh";
 
-    const context = await this.loadContext(storyDir, language, existingPlans);
+    const context = await this.loadContext({
+      bookDir: input.bookDir,
+      volumeOutline: input.volumeOutline,
+      referenceChapterNumber: input.chapterNumber,
+      existingPlans,
+      outlineChapterLimit: input.outlineChapterLimit,
+    });
+
+    if (typeof context.outlineChapterLimit === "number" && input.chapterNumber > context.outlineChapterLimit) {
+      throw new Error(`Chapter ${input.chapterNumber} exceeds outline chapter limit ${context.outlineChapterLimit}`);
+    }
 
     const messages = [
       { role: "system" as const, content: getChapterDesignSystemPrompt(language) },
@@ -73,7 +89,7 @@ export class ChapterDesignAgent extends BaseAgent {
 
     const now = new Date().toISOString();
     return ChapterPlanSchema.parse({
-      chapterNumber: first.chapterNumber,
+      chapterNumber: input.chapterNumber,
       chapterName: first.chapterName,
       highlight: first.highlight,
       coreConflict: first.coreConflict,
@@ -105,24 +121,44 @@ export class ChapterDesignAgent extends BaseAgent {
    * Reads more context to ensure coherence across chapters.
    */
   async designBatch(input: DesignBatchInput): Promise<ChapterPlan[]> {
-    const storyDir = join(input.bookDir, "story");
     const language = input.language ?? input.book.language ?? "zh";
 
-    const context = await this.loadContext(storyDir, language, input.existingPlans);
+    const context = await this.loadContext({
+      bookDir: input.bookDir,
+      volumeOutline: input.volumeOutline,
+      referenceChapterNumber: input.startChapter,
+      existingPlans: input.existingPlans,
+      outlineChapterLimit: input.outlineChapterLimit,
+    });
+
+    if (typeof context.outlineChapterLimit === "number" && input.startChapter > context.outlineChapterLimit) {
+      return [];
+    }
+
+    const effectiveCount = typeof context.outlineChapterLimit === "number"
+      ? Math.max(0, Math.min(input.count, context.outlineChapterLimit - input.startChapter + 1))
+      : Math.max(0, input.count);
+
+    if (effectiveCount <= 0) {
+      return [];
+    }
 
     const messages = [
       { role: "system" as const, content: getChapterDesignSystemPrompt(language) },
-      { role: "user" as const, content: buildChapterDesignUserMessage(context, input.startChapter, input.count, language) },
+      { role: "user" as const, content: buildChapterDesignUserMessage(context, input.startChapter, effectiveCount, language) },
     ];
 
     const response = await this.chat(messages, { temperature: 0.7 });
 
-    const parsed = parseChapterDesignOutput(response.content, input.startChapter, input.count);
+    const parsed = parseChapterDesignOutput(response.content, input.startChapter, effectiveCount);
+    if (parsed.length !== effectiveCount) {
+      throw new Error(`Failed to parse complete chapter design output for chapters ${input.startChapter}-${input.startChapter + effectiveCount - 1}: expected ${effectiveCount}, got ${parsed.length}`);
+    }
     const now = new Date().toISOString();
 
-    return parsed.map((p) =>
+    return parsed.map((p, index) =>
       ChapterPlanSchema.parse({
-        chapterNumber: p.chapterNumber,
+        chapterNumber: input.startChapter + index,
         chapterName: p.chapterName,
         highlight: p.highlight,
         coreConflict: p.coreConflict,
@@ -150,40 +186,60 @@ export class ChapterDesignAgent extends BaseAgent {
     );
   }
 
-  private async loadContext(
-    storyDir: string,
-    language: string,
-    existingPlans?: ReadonlyArray<ChapterPlan>,
-  ): Promise<ChapterDesignContext> {
+  private async loadContext(params: {
+    readonly bookDir: string;
+    readonly volumeOutline: string;
+    readonly referenceChapterNumber: number;
+    readonly existingPlans?: ReadonlyArray<ChapterPlan>;
+    readonly outlineChapterLimit?: number;
+  }): Promise<ChapterDesignContext> {
+    const normalizedVolumeOutline = params.volumeOutline.trim();
+    if (!normalizedVolumeOutline) {
+      throw new Error("卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。");
+    }
+
+    const outlineChapterLimit = params.outlineChapterLimit ?? extractChapterLimitFromOutline(normalizedVolumeOutline);
+    if (typeof outlineChapterLimit !== "number" || !Number.isFinite(outlineChapterLimit) || outlineChapterLimit < 1) {
+      throw new Error("卷纲规划缺少总章数或章节范围，无法进行分章设计。");
+    }
+
+    const storyDir = join(params.bookDir, "story");
     const [
-      volumeOutline,
       characterMatrix,
       storyBible,
       emotionalArcs,
       pendingHooks,
       chapterSummaries,
     ] = await Promise.all([
-      this.readFileOrDefault(join(storyDir, "volume_outline.md")),
       readCharacterMatrix(storyDir),
-      this.readFileOrDefault(join(storyDir, "story_bible.md")),
+      readStoryFrame(params.bookDir, ""),
       readEmotionalArcs(storyDir),
       readPendingHooks(storyDir),
       this.readFileOrDefault(join(storyDir, "chapter_summaries.md")),
     ]);
-
-    return {
-      volumeOutline,
-      characterMatrix,
-      storyBible: storyBible || undefined,
-      emotionalArcs,
-      pendingHooks,
-      chapterSummaries,
-      existingPlans: existingPlans?.map((plan) => ({
+    const recentSummaries = formatRecentSummaries(chapterSummaries, params.referenceChapterNumber, 6);
+    const existingPlans = params.existingPlans
+      ?.filter((plan) => plan.chapterNumber < params.referenceChapterNumber)
+      .sort((left, right) => left.chapterNumber - right.chapterNumber)
+      .slice(-6)
+      .map((plan) => ({
         chapterNumber: plan.chapterNumber,
         chapterName: plan.chapterName,
         highlight: plan.highlight,
         endingHook: plan.endingHook,
-      })),
+      }));
+
+    return {
+      volumeOutline: normalizedVolumeOutline,
+      characterMatrix,
+      storyBible: storyBible || undefined,
+      emotionalArcs,
+      pendingHooks,
+      chapterSummaries: recentSummaries === "（暂无前章摘要）" && chapterSummaries.trim()
+        ? chapterSummaries.trim()
+        : recentSummaries,
+      outlineChapterLimit,
+      existingPlans,
     };
   }
 
@@ -293,20 +349,21 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
   /**
    * Analyze an existing chapter and infer its design from content.
    */
-  async analyzeAndDesignChapter(input: {
-    readonly book: BookConfig;
-    readonly bookDir: string;
-    readonly chapterNumber: number;
-    readonly title: string;
-    readonly content: string;
-    readonly language?: string;
-  }): Promise<ChapterPlan> {
-    const storyDir = join(input.bookDir, "story");
+  async analyzeAndDesignChapter(input: AnalyzeChapterInput): Promise<ChapterPlan> {
     const language = input.language ?? input.book.language ?? "zh";
     const isZh = language !== "en";
 
     // Load context for better design
-    const context = await this.loadContext(storyDir, language, undefined);
+    const context = await this.loadContext({
+      bookDir: input.bookDir,
+      volumeOutline: input.volumeOutline,
+      referenceChapterNumber: input.chapterNumber,
+      outlineChapterLimit: input.outlineChapterLimit,
+    });
+
+    if (typeof context.outlineChapterLimit === "number" && input.chapterNumber > context.outlineChapterLimit) {
+      throw new Error(`Chapter ${input.chapterNumber} exceeds outline chapter limit ${context.outlineChapterLimit}`);
+    }
 
     // Build prompt for analyzing existing content
     const userMessage = this.buildBackfillUserMessage(input, context, isZh);
@@ -356,29 +413,41 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
     isZh: boolean,
   ): string {
     const parts: string[] = [];
+    const normalizedVolumeOutline = context.volumeOutline.trim();
+    if (!normalizedVolumeOutline) {
+      throw new Error("卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。");
+    }
 
     // Instruction
     parts.push(isZh
       ? `请分析以下第 ${input.chapterNumber} 章的正文内容，生成章节设计。`
       : `Please analyze the following Chapter ${input.chapterNumber} content and generate a chapter design.`);
     parts.push("");
+    if (typeof context.outlineChapterLimit === "number") {
+      parts.push(isZh ? "## 章数硬约束" : "## Chapter Count Constraint");
+      parts.push(isZh
+        ? `- 卷纲总章数：${context.outlineChapterLimit}章`
+        : `- Volume total chapter limit: ${context.outlineChapterLimit}`);
+      parts.push(isZh
+        ? `- 仅允许在卷纲总章数范围内分析，不要输出任何超纲章节`
+        : `- Only analyze chapters within the outline limit; do not output any out-of-range chapter designs`);
+      parts.push("");
+    }
 
     // Chapter title
     parts.push(isZh ? "## 本章标题" : "## Chapter Title");
     parts.push(input.title || `第${input.chapterNumber}章`);
     parts.push("");
 
+    // Volume outline
+    parts.push(isZh ? "## 卷纲规划（必须输入，唯一规划依据）" : "## Volume Outline (required, authoritative)");
+    parts.push(normalizedVolumeOutline);
+    parts.push("");
+
     // Chapter content excerpt (first 2000 chars for analysis)
     parts.push(isZh ? "## 正文内容（前2000字）" : "## Chapter Content (first 2000 chars)");
     parts.push(input.content.slice(0, 2000));
     parts.push("");
-
-    // Context: volume outline
-    if (context.volumeOutline.trim()) {
-      parts.push(isZh ? "## 卷纲（参考）" : "## Volume Outline (reference)");
-      parts.push(context.volumeOutline.trim().slice(0, 1500));
-      parts.push("");
-    }
 
     // Context: character matrix
     if (context.characterMatrix.trim()) {
@@ -405,6 +474,12 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
     if (context.pendingHooks.trim()) {
       parts.push(isZh ? "## 伏笔池（参考）" : "## Pending Hooks (reference)");
       parts.push(context.pendingHooks.trim().slice(0, 1000));
+      parts.push("");
+    }
+
+    if (context.chapterSummaries.trim()) {
+      parts.push(isZh ? "## 前章摘要（Previous Chapter Summaries）" : "## Previous Chapter Summaries");
+      parts.push(context.chapterSummaries.trim());
       parts.push("");
     }
 

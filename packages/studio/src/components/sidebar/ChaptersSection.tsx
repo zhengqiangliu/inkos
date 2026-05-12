@@ -715,10 +715,16 @@ export function ChaptersSection({
     if (message.event === "revise:complete") {
       const chapterNum = chapterNumFromEventData(data);
       const autoTriggeredByAudit = Boolean((data as { autoTriggeredByAudit?: unknown } | null)?.autoTriggeredByAudit);
-      if (chapterNum === null || !autoTriggeredByAudit) return;
-      // Auto-review may continue with next audit round after revise completion.
-      // Refresh fallback timeout to avoid false timeout while backend keeps running.
-      scheduleAuditFallback(chapterNum);
+      if (chapterNum === null) return;
+      if (autoTriggeredByAudit) {
+        // Auto-review may continue with next audit round after revise completion.
+        // Refresh fallback timeout to avoid false timeout while backend keeps running.
+        scheduleAuditFallback(chapterNum);
+        return;
+      }
+      // Manual revise: refresh UI to show updated content
+      bumpBookDataVersion();
+      refreshChapters();
       return;
     }
 

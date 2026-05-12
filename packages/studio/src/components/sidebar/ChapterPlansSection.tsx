@@ -42,6 +42,7 @@ interface ChapterPlanBatchActionResponse {
   ok?: boolean;
   partial?: boolean;
   successChapters?: ReadonlyArray<number>;
+  removedChapters?: ReadonlyArray<number>;
   failedChapters?: ReadonlyArray<{
     chapterNumber: number;
     reasonCode?: string;
@@ -165,11 +166,15 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
     setError(null);
     try {
       const result = await runner();
-      if (result && (Array.isArray(result.successChapters) || Array.isArray(result.failedChapters))) {
+      if (result && (Array.isArray(result.successChapters) || Array.isArray(result.removedChapters) || Array.isArray(result.failedChapters))) {
         setActionSummary({
           label,
           partial: Boolean(result.partial),
-          successChapters: Array.isArray(result.successChapters) ? [...result.successChapters] : [],
+          successChapters: Array.isArray(result.successChapters)
+            ? [...result.successChapters]
+            : Array.isArray(result.removedChapters)
+              ? [...result.removedChapters]
+              : [],
           failedChapters: Array.isArray(result.failedChapters)
             ? result.failedChapters.map((item) => ({
               chapterNumber: Number(item.chapterNumber),
@@ -204,16 +209,6 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
   const displayRows = useMemo(() => {
     return buildChapterPlanRows(plans, missingChapters, filter);
   }, [plans, missingChapters, filter]);
-
-  const handleGenerate20 = useCallback(() => {
-    void runAction("生成20章", async () => {
-      return await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/generate-batch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ count: 20 }),
-      });
-    });
-  }, [bookId, runAction]);
 
   const handleGenerateClick = useCallback(() => {
     // 默认起始章节为下一章
@@ -290,6 +285,14 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
       });
     });
   }, [bookId, coverageEnd, runAction]);
+
+  const handleCleanupOverflow = useCallback(() => {
+    void runAction("清理超纲分章", async () => {
+      return await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/cleanup-overflow`, {
+        method: "POST",
+      });
+    });
+  }, [bookId, runAction]);
 
   const handleApprove = useCallback((chapterNumber: number) => {
     void runAction(`通过第${chapterNumber}章`, async () => {
@@ -405,6 +408,13 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
           className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
         >
           回填已写章节
+        </button>
+        <button
+          type="button"
+          onClick={handleCleanupOverflow}
+          className="rounded-md border border-amber-500/30 px-2 py-1 text-[11px] text-amber-500 hover:bg-amber-500/10"
+        >
+          清理超纲
         </button>
       </div>
 

@@ -12,6 +12,7 @@ import {
   detectCrossChapterRepetition,
   detectParagraphLengthDrift,
   validatePostWrite,
+  validatePreWriteCommitments,
   type PostWriteViolation,
 } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
@@ -202,9 +203,9 @@ export class WriterAgent extends BaseAgent {
     // Load more chapters for dialogue fingerprint extraction (voice consistency over longer span)
     const fingerprintChapters = await this.loadRecentChapters(bookDir, chapterNumber, 5);
 
-    // Extract previous chapter tail for衔接 guidance (only the last ~800 chars worth of paragraphs)
+    // Extract previous chapter tail for衔接 guidance (last ~800 chars, full paragraph boundaries)
     const previousChapterTail = chapterNumber > 1
-      ? extractChapterTail(recentChapters)
+      ? extractChapterTail(recentChapters, 800)
       : undefined;
 
     // Load genre profile + book rules
@@ -480,6 +481,7 @@ export class WriterAgent extends BaseAgent {
       ...validatePostWrite(chapterContent, genreProfile, bookRules, resolvedLanguage),
       ...detectCrossChapterRepetition(chapterContent, fingerprintChapters, resolvedLanguage),
       ...detectParagraphLengthDrift(chapterContent, fingerprintChapters, resolvedLanguage),
+      ...validatePreWriteCommitments(creative.preWriteCheck, chapterContent, resolvedLanguage),
     ];
     const aiTellIssues = analyzeAITells(chapterContent, resolvedLanguage).issues;
 
@@ -924,16 +926,17 @@ ${params.parentCanon}\n`
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
 ${contextBlock}
+${previousChapterTailBlock}
+${hookDebtConstraintBlock}
+
 ## Current State
 ${params.currentState}
 ${ledgerBlock}
 ## Plot Threads
 ${params.hooks}
-${hookDebtConstraintBlock}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## Recent Chapters
 ${params.recentChapters || "(This is the first chapter, no previous text)"}
-${previousChapterTailBlock}
 
 ## Worldbuilding
 ${params.storyBible}
@@ -955,16 +958,17 @@ ${lengthRequirementBlock}
 
     return `请续写第${params.chapterNumber}章。
 ${contextBlock}
+${previousChapterTailBlock}
+${hookDebtConstraintBlock}
+
 ## 当前状态卡
 ${params.currentState}
 ${ledgerBlock}
 ## 伏笔池
 ${params.hooks}
-${hookDebtConstraintBlock}
 ${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}
-${previousChapterTailBlock}
 
 ## 世界观设定
 ${params.storyBible}

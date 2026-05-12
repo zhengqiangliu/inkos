@@ -38,14 +38,17 @@ describe("validatePostWrite", () => {
     const content = "这不是勇气，而是愚蠢。他知道这一点。";
     const result = validatePostWrite(content, baseProfile, null);
     expect(findRule(result, "禁止句式")).toBeDefined();
-    expect(findRule(result, "禁止句式")!.severity).toBe("error");
+    expect(findRule(result, "禁止句式")!.severity).toBe("warning");
   });
 
   it("detects dash '——'", () => {
     const content = "他走了过去——然后停下来。";
     const result = validatePostWrite(content, baseProfile, null);
-    expect(findRule(result, "禁止破折号")).toBeDefined();
-    expect(findRule(result, "禁止破折号")!.severity).toBe("error");
+    const violation = findRule(result, "禁止破折号");
+    expect(violation).toBeDefined();
+    expect(violation!.severity).toBe("warning");
+    expect(violation!.issueId).toBe("PW-002");
+    expect(violation!.dimensionId).toBe("postwrite.syntax.dash");
   });
 
   it("skips Chinese-only rules when the book language override is English", () => {
@@ -95,7 +98,7 @@ describe("validatePostWrite", () => {
     const result = validatePostWrite(content, baseProfile, null);
     const v = findRule(result, "报告术语");
     expect(v).toBeDefined();
-    expect(v!.severity).toBe("error");
+    expect(v!.severity).toBe("warning");
     expect(v!.description).toContain("核心动机");
     expect(v!.description).toContain("信息边界");
   });
@@ -305,6 +308,7 @@ describe("validatePostWrite", () => {
     const result = detectParagraphLengthDrift(current, recent, "zh");
     expect(findRule(result, "段落密度漂移")).toBeDefined();
     expect(findRule(result, "段落密度漂移")?.severity).toBe("warning");
+    expect(findRule(result, "段落密度漂移")?.issueId).toBe("PW-019");
   });
 
   it("exposes paragraph shape warnings for final-stage reuse", () => {

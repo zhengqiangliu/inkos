@@ -167,4 +167,71 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("English Variance Brief");
     expect(prompt).toContain("resistance-bearing exchange");
   });
+
+  it("surfaces the fuller audit preview in writer prompts", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide\n\nKeep the prose restrained.",
+      undefined,
+      3,
+      "creative",
+      undefined,
+      "zh",
+      "legacy",
+    );
+
+    expect(prompt).toContain("章节衔接检查");
+    expect(prompt).toContain("大纲偏离检测");
+    expect(prompt).toContain("读者期待管理");
+    expect(prompt).toContain("章节衔接检查");
+  });
+
+  it("uses a shorter governed pre-write checklist", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide\n\nKeep the prose restrained.",
+      undefined,
+      3,
+      "creative",
+      undefined,
+      "zh",
+      "governed",
+    );
+
+    expect(prompt).toContain("## Governed Pre-Write Checklist");
+    expect(prompt).toContain("本章必须推进哪个卷纲节点");
+    expect(prompt).toContain("本章的主冲突是什么");
+    expect(prompt).not.toContain("## 动笔前必须自问");
+  });
+
+  it("includes post-write guardrails that mirror deterministic validator risks", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide\n\nKeep the prose restrained.",
+      undefined,
+      3,
+      "creative",
+      undefined,
+      "zh",
+      "governed",
+    );
+
+    expect(prompt).toContain("## 写后硬门禁镜像");
+    expect(prompt).toContain("分析报告式语言");
+    expect(prompt).toContain("章节号");
+    expect(prompt).toContain("仿佛");
+    expect(prompt).toContain("全场震惊");
+  });
 });

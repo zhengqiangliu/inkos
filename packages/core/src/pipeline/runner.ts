@@ -33,6 +33,7 @@ import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRa
 import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
 import { loadNarrativeMemorySeed, loadRuntimeStateSnapshot, loadSnapshotCurrentStateFacts, type NarrativeMemorySeed } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
+import { classifyAuditIssueClass, countAuditIssueClasses, isStructuralAuditIssue } from "../utils/audit-issue-classification.js";
 import { appendFile, readFile, readdir, writeFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -57,6 +58,22 @@ const SEQUENCE_LEVEL_CATEGORIES = new Set([
 
 const FACT_HISTORY_SYNC_PROGRESS_FILE = "current_state_fact_sync.json";
 const NARRATIVE_MEMORY_SYNC_PROGRESS_FILE = "narrative_memory_sync.json";
+const AUDIT_FAILURE_HISTORY_FILE = "audit_failure_history.json";
+
+interface AuditFailureHistoryEntry {
+  readonly chapterNumber: number;
+  readonly issues: ReadonlyArray<{
+    readonly category: string;
+    readonly severity: AuditIssue["severity"];
+    readonly dimensionId?: string;
+  }>;
+  readonly recordedAt: string;
+}
+
+interface AuditFailureHistoryPayload {
+  readonly version: 2;
+  readonly entries: ReadonlyArray<AuditFailureHistoryEntry>;
+}
 
 function isSequenceLevelCategory(category: string): boolean {
   return SEQUENCE_LEVEL_CATEGORIES.has(category);
@@ -404,29 +421,17 @@ function countAuditIssueSeverities(issues: ReadonlyArray<AuditIssue>): Readonly<
 }
 
 function estimateAuditScore(severityCounts: Readonly<{ critical: number; warning: number; info: number }>): number {
-  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12 - severityCounts.info * 4;
+  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12;
   return Math.max(0, Math.min(100, raw));
+}
+
+function countBlockingAITellIssues(issues: ReadonlyArray<{ readonly severity: "warning" | "info" }>): number {
+  return issues.filter((issue) => issue.severity === "warning").length;
 }
 
 const MIN_AUDIT_PASS_SCORE = 80;
 
 const AUTO_REVIEW_FINAL_NOTE_PREFIX = "[auto-review-final]";
-const STRUCTURAL_AUDIT_SIGNALS = [
-  "volume_outline",
-  "卷纲",
-  "大纲偏离",
-  "hook debt",
-  "伏笔债务",
-  "paragraph-shape",
-  "读者期待管理",
-  "篇幅控制",
-  "length control",
-  "资源账本",
-  "ledger",
-  "状态卡",
-  "评分门禁",
-  "score gate",
-];
 
 function buildReviseAuditSummaryFromResult(
   auditResult: AuditResult,
@@ -462,23 +467,11 @@ function buildAutoReviewFinalNote(args: {
   return `${AUTO_REVIEW_FINAL_NOTE_PREFIX} 自动审计未通过（${reasonText}）；评分 ${args.audit.score}/100；问题 ${args.audit.issueCount} 项${summarySegment}`;
 }
 
-function isStructuralAuditIssue(issue: AuditIssue): boolean {
-  const merged = `${issue.category} ${issue.description}`.toLowerCase();
-  return STRUCTURAL_AUDIT_SIGNALS.some((signal) => merged.includes(signal));
-}
-
 function countIssueClassesForMetrics(issues: ReadonlyArray<AuditIssue>): Readonly<{
   structural: number;
   textual: number;
 }> {
-  let structural = 0;
-  for (const issue of issues) {
-    if (isStructuralAuditIssue(issue)) structural += 1;
-  }
-  return {
-    structural,
-    textual: Math.max(0, issues.length - structural),
-  };
+  return countAuditIssueClasses(issues);
 }
 
 function normalizeTruthPayload(payload: string | undefined): string | undefined {
@@ -546,6 +539,228 @@ export class PipelineRunner {
     };
   }
 
+  private async readAuditFailureHistory(bookDir: string): Promise<AuditFailureHistoryPayload> {
+    const historyPath = join(bookDir, "story", AUDIT_FAILURE_HISTORY_FILE);
+    const raw = await readFile(historyPath, "utf-8").catch(() => "");
+    if (!raw.trim()) {
+      return { version: 2, entries: [] };
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as Partial<AuditFailureHistoryPayload> & {
+        readonly entries?: Array<{
+          readonly chapterNumber?: unknown;
+          readonly recordedAt?: unknown;
+          readonly categories?: unknown;
+          readonly issues?: unknown;
+        }>;
+      };
+      if (!parsed || !Array.isArray(parsed.entries)) {
+        return { version: 2, entries: [] };
+      }
+      const entries = parsed.entries
+        .filter((entry): entry is AuditFailureHistoryEntry => Boolean(
+          entry
+          && Number.isFinite(Number(entry.chapterNumber))
+          && typeof entry.recordedAt === "string",
+        ))
+        .map((entry: {
+          readonly chapterNumber?: unknown;
+          readonly recordedAt: string;
+          readonly categories?: unknown;
+          readonly issues?: unknown;
+        }) => ({
+          chapterNumber: Math.max(1, Math.trunc(Number(entry.chapterNumber))),
+          issues: Array.isArray(entry.issues)
+            ? entry.issues
+              .filter((issue): issue is { readonly category: string; readonly severity: AuditIssue["severity"]; readonly dimensionId?: string } => Boolean(
+                issue
+                && typeof issue === "object"
+                && typeof (issue as { category?: unknown }).category === "string"
+                && typeof (issue as { severity?: unknown }).severity === "string",
+              ))
+              .map((issue) => ({
+                category: issue.category.trim(),
+                severity: issue.severity === "critical" || issue.severity === "warning" || issue.severity === "info"
+                  ? issue.severity
+                  : "warning",
+                ...(typeof issue.dimensionId === "string" && issue.dimensionId.trim().length > 0
+                  ? { dimensionId: issue.dimensionId.trim() }
+                  : {}),
+              }))
+              : Array.isArray(entry.categories)
+                ? entry.categories
+                  .filter((category): category is string => typeof category === "string" && category.trim().length > 0)
+                  .map((category) => ({
+                    category: category.trim(),
+                    severity: "warning" as const,
+                  }))
+                : [],
+          recordedAt: entry.recordedAt,
+        }))
+        .filter((entry) => entry.issues.length > 0);
+      return { version: 2, entries };
+    } catch {
+      return { version: 2, entries: [] };
+    }
+  }
+
+  private async writeAuditFailureHistory(bookDir: string, payload: AuditFailureHistoryPayload): Promise<void> {
+    const historyPath = join(bookDir, "story", AUDIT_FAILURE_HISTORY_FILE);
+    await writeFile(historyPath, JSON.stringify(payload, null, 2), "utf-8");
+  }
+
+  private async recordAuditFailureHistory(bookDir: string, chapterNumber: number, auditResult: AuditResult): Promise<void> {
+    const severityRank: Record<AuditIssue["severity"], number> = {
+      critical: 2,
+      warning: 1,
+      info: 0,
+    };
+    const issueMap = new Map<string, {
+      category: string;
+      severity: AuditIssue["severity"];
+      dimensionId?: string;
+    }>();
+
+    for (const issue of auditResult.issues) {
+      if (issue.severity !== "critical" && issue.severity !== "warning") continue;
+      const category = typeof issue.category === "string" ? issue.category.trim() : "";
+      if (!category) continue;
+      const dimensionId = typeof issue.dimensionId === "string" && issue.dimensionId.trim().length > 0
+        ? issue.dimensionId.trim()
+        : undefined;
+      const current = issueMap.get(category);
+      if (!current) {
+        issueMap.set(category, { category, severity: issue.severity, ...(dimensionId ? { dimensionId } : {}) });
+        continue;
+      }
+      if (severityRank[issue.severity] > severityRank[current.severity]) {
+        issueMap.set(category, { category, severity: issue.severity, ...(dimensionId ? { dimensionId } : {}) });
+        continue;
+      }
+      if (!current.dimensionId && dimensionId) {
+        current.dimensionId = dimensionId;
+      }
+    }
+
+    const issues = [...issueMap.values()];
+    if (issues.length === 0) return;
+
+    const current = await this.readAuditFailureHistory(bookDir);
+    const entries = [...current.entries.filter((entry) => entry.chapterNumber !== chapterNumber)];
+    entries.push({
+      chapterNumber,
+      issues,
+      recordedAt: new Date().toISOString(),
+    });
+    entries.sort((left, right) => left.chapterNumber - right.chapterNumber);
+    await this.writeAuditFailureHistory(bookDir, { version: 2, entries });
+  }
+
+  private async buildAuditFailureHints(bookDir: string): Promise<string | undefined> {
+    const history = await this.readAuditFailureHistory(bookDir);
+    if (history.entries.length === 0) return undefined;
+
+    type FailureStats = {
+      readonly category: string;
+      dimensionId?: string;
+      critical: number;
+      warning: number;
+      chapters: number[];
+    };
+
+    const stats = new Map<string, FailureStats>();
+    for (const entry of history.entries.slice(-8)) {
+      for (const issue of entry.issues) {
+        const category = issue.category.trim();
+        if (!category) continue;
+        const dimensionId = typeof issue.dimensionId === "string" && issue.dimensionId.trim().length > 0
+          ? issue.dimensionId.trim()
+          : undefined;
+        const current = stats.get(category) ?? {
+          category,
+          ...(dimensionId ? { dimensionId } : {}),
+          critical: 0,
+          warning: 0,
+          chapters: [],
+        };
+        if (!stats.has(category)) {
+          stats.set(category, current);
+        } else if (!current.dimensionId && dimensionId) {
+          current.dimensionId = dimensionId;
+        }
+        if (issue.severity === "critical") current.critical += 1;
+        if (issue.severity === "warning") current.warning += 1;
+        if (!current.chapters.includes(entry.chapterNumber)) {
+          current.chapters.push(entry.chapterNumber);
+          current.chapters.sort((left, right) => left - right);
+        }
+      }
+    }
+
+    const describeRun = (chapters: ReadonlyArray<number>): string => {
+      if (chapters.length === 0) return "最近未出现";
+      let recentRun = 1;
+      for (let index = chapters.length - 1; index > 0; index -= 1) {
+        if (chapters[index] === chapters[index - 1]! + 1) {
+          recentRun += 1;
+        } else {
+          break;
+        }
+      }
+      return recentRun > 1 ? `最近连续${recentRun}章` : "最近1章";
+    };
+
+    const latestChapter = (chapters: ReadonlyArray<number>): number => chapters[chapters.length - 1] ?? 0;
+
+    const selected = [...stats.values()]
+      .filter((item) => item.critical > 0 || item.warning > 0)
+      .sort((left, right) =>
+        right.critical - left.critical
+        || right.warning - left.warning
+        || latestChapter(right.chapters) - latestChapter(left.chapters)
+        || left.category.localeCompare(right.category),
+      )
+      .slice(0, 3);
+
+    if (selected.length === 0) return undefined;
+
+    const selectedStructural = selected.filter((item) => classifyAuditIssueClass(item) === "structural");
+    const selectedTextual = selected.filter((item) => classifyAuditIssueClass(item) === "textual");
+
+    const formatCounts = (item: FailureStats): string => {
+      const parts: string[] = [];
+      if (item.critical > 0) parts.push(`critical×${item.critical}`);
+      if (item.warning > 0) parts.push(`warning×${item.warning}`);
+      return parts.join("，");
+    };
+
+    const formatItem = (item: FailureStats): string => {
+      const dimSegment = item.dimensionId && item.dimensionId !== item.category ? `，${item.dimensionId}` : "";
+      return `- ${item.category}${dimSegment}（${formatCounts(item)}，${describeRun(item.chapters)}）`;
+    };
+
+    const lines = [
+      "## 高频失败维度提示",
+      "",
+      "近期反复出现的审计问题已按结构性 / 文本性拆分。最多保留3项，先修结构，再修句面：",
+    ];
+
+    if (selectedStructural.length > 0) {
+      lines.push("### 结构性（先修）");
+      lines.push("先回到节点、衔接、回收和推进，再考虑句面润色。");
+      lines.push(...selectedStructural.map(formatItem));
+    }
+
+    if (selectedTextual.length > 0) {
+      lines.push("### 文本性（后修）");
+      lines.push("先压缩重复、套话和AI味，再做表达微调。");
+      lines.push(...selectedTextual.map(formatItem));
+    }
+
+    return lines.join("\n");
+  }
+
   private resolveTruthFileOverridesFromReviseOutput(
     reviseOutput: ReviseOutput,
     includeLedger: boolean,
@@ -580,7 +795,7 @@ export class PipelineRunner {
       (issue) => issue.category === "篇幅控制" || issue.category === "Length Control",
     );
     const lengthIssue: AuditIssue = {
-      severity: "warning",
+      severity: "info",
       category: params.language === "en" ? "Length Control" : "篇幅控制",
       description: this.localize(params.language, {
         zh: `字数未达目标区间（${params.lengthSpec.softMin}-${params.lengthSpec.softMax}字，当前 ${chapterWordCount}字）。`,
@@ -604,7 +819,7 @@ export class PipelineRunner {
     return {
       auditResult: {
         ...params.auditResult,
-        passed: false,
+        passed: params.auditResult.passed,
         issues: normalizedIssues,
         summary: normalizedSummary,
       },
@@ -2430,6 +2645,7 @@ export class PipelineRunner {
         ...(persistenceOutput.hookHealthIssues ?? []),
       ],
     };
+    await this.recordAuditFailureHistory(bookDir, chapterNumber, auditResult).catch(() => undefined);
     finalWordCount = persistenceOutput.wordCount;
     const lengthWarnings = this.buildLengthWarnings(
       chapterNumber,
@@ -3447,6 +3663,13 @@ ${matrix}`,
     chapterNumber: number,
     externalContext?: string,
   ): Promise<Pick<WriteChapterInput, "externalContext" | "chapterIntent" | "contextPackage" | "ruleStack" | "trace" | "chapterPlan">> {
+    const auditDriftGuidance = await this.loadAuditDriftGuidance(bookDir);
+    const auditFailureHints = await this.buildAuditFailureHints(bookDir);
+    const mergedExternalContext = this.mergeExternalContext(
+      externalContext,
+      [auditDriftGuidance, auditFailureHints].filter((part): part is string => Boolean(part && part.trim().length > 0)).join("\n\n") || undefined,
+    );
+
     // Load chapter plan if available
     let chapterPlan: ChapterPlan | undefined;
     try {
@@ -3461,14 +3684,14 @@ ${matrix}`,
     } catch { /* no chapter-plans.json — ignore */ }
 
     if ((this.config.inputGovernanceMode ?? "v2") === "legacy") {
-      return { externalContext, chapterPlan };
+      return { externalContext: mergedExternalContext, chapterPlan };
     }
 
     const { plan, composed } = await this.createGovernedArtifacts(
       book,
       bookDir,
       chapterNumber,
-      externalContext,
+      mergedExternalContext,
       { reuseExistingIntentWhenContextMissing: true },
     );
 
@@ -3539,6 +3762,56 @@ ${matrix}`,
     const suffix = outline.endsWith("\n") ? "" : "\n";
     const entry = isZh ? `\n## 第${chapterNumber}章` : `\n## Chapter ${chapterNumber}`;
     await writeFile(outlinePath, outline + suffix + entry + "\n", "utf-8");
+  }
+
+  private mergeExternalContext(
+    externalContext: string | undefined,
+    auditDriftGuidance: string | undefined,
+  ): string | undefined {
+    const parts = [externalContext?.trim(), auditDriftGuidance?.trim()].filter((part): part is string => Boolean(part && part.length > 0));
+    if (parts.length === 0) return undefined;
+    return parts.join("\n\n");
+  }
+
+  private async loadAuditDriftGuidance(bookDir: string): Promise<string | undefined> {
+    const driftPath = join(bookDir, "story", "audit_drift.md");
+    const raw = await readFile(driftPath, "utf-8").catch(() => "");
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return undefined;
+
+    const lines = trimmed.split("\n").map((line) => line.trimEnd());
+    const summaryLines: string[] = [];
+    let inQuoteBlock = false;
+    for (const line of lines) {
+      if (line.startsWith(">")) {
+        const cleaned = line.replace(/^>\s?/u, "").trim();
+        if (!cleaned) continue;
+        if (cleaned.startsWith("- ")) {
+          summaryLines.push(cleaned);
+        } else if (cleaned.startsWith("Chapter ") || cleaned.startsWith("第")) {
+          summaryLines.push(cleaned);
+        }
+        continue;
+      }
+      if (line === "## Audit Drift Correction" || line === "## 审计纠偏（自动生成，下一章写作前参照）") {
+        continue;
+      }
+      if (line.startsWith("## ")) {
+        summaryLines.push(line);
+        continue;
+      }
+      if (line.length === 0) {
+        inQuoteBlock = false;
+        continue;
+      }
+      if (!inQuoteBlock && summaryLines.length === 0) {
+        summaryLines.push(line);
+      }
+      inQuoteBlock = false;
+    }
+
+    const compact = summaryLines.slice(0, 8).join("\n").trim();
+    return compact.length > 0 ? compact : trimmed;
   }
 
   private async resetImportReplayTruthFiles(
@@ -4284,19 +4557,54 @@ ${matrix}`,
   }
 
   private restoreLostAuditIssues(previous: AuditResult, next: AuditResult): AuditResult {
-    if (next.passed || next.issues.length > 0 || previous.issues.length === 0) {
+    if (next.passed || previous.issues.length === 0) {
       return next;
     }
 
-    // Only restore structural-relevant issues when re-audit returns empty but failed.
-    // Textual-only issues should not be restored — they were likely resolved and
-    // re-introducing them would cause the reviser to waste rounds on fixed problems.
-    const previousHadCritical = previous.issues.some((issue) => issue.severity === "critical");
-    if (!previousHadCritical) return next;
+    const issueKey = (issue: AuditIssue): string => {
+      const issueId = typeof issue.issueId === "string" ? issue.issueId.trim().toUpperCase() : "";
+      if (issueId.length > 0) return `id:${issueId}`;
+      return `text:${issue.category}:${issue.description}`
+        .replace(/\s+/gu, " ")
+        .trim()
+        .toLowerCase();
+    };
+
+    // Case 1: re-audit returned zero issues — restore previous critical issues
+    // (the audit gap is likely a structural-repair intermediate state)
+    if (next.issues.length === 0) {
+      const previousHadCritical = previous.issues.some((issue) => issue.severity === "critical");
+      if (!previousHadCritical) return next;
+      return {
+        ...next,
+        issues: previous.issues,
+        summary: next.summary || previous.summary,
+      };
+    }
+
+    // Case 2: re-audit returned different issues — merge unmatched previous
+    // critical issues to prevent auditor attention drift from silently replacing
+    // unresolved problems.
+    const nextKeys = new Set(next.issues.map(issueKey));
+    const unmatchedPreviousCritical = previous.issues.filter(
+      (issue) => issue.severity === "critical" && !nextKeys.has(issueKey(issue)),
+    );
+    if (unmatchedPreviousCritical.length === 0) return next;
+
+    // Check match rate: how many of the NEW issues overlap with PREVIOUS issues?
+    // Low overlap (< 30%) signals auditor attention drift — critical issues
+    // are being silently abandoned rather than actually resolved.
+    const prevKeys = new Set(previous.issues.map(issueKey));
+    let matchedCount = 0;
+    for (const issue of next.issues) {
+      if (prevKeys.has(issueKey(issue))) matchedCount += 1;
+    }
+    const matchRate = matchedCount / Math.max(1, next.issues.length);
+    if (matchRate >= 0.3) return next;
 
     return {
       ...next,
-      issues: previous.issues,
+      issues: [...next.issues, ...unmatchedPreviousCritical],
       summary: next.summary || previous.summary,
     };
   }
@@ -4412,7 +4720,7 @@ ${matrix}`,
 
     return {
       auditResult,
-      aiTellCount: aiTells.issues.length,
+      aiTellCount: countBlockingAITellIssues(aiTells.issues),
       blockingCount: revisionBlockingIssues.filter((issue) => issue.severity === "warning" || issue.severity === "critical").length,
       criticalCount: revisionBlockingIssues.filter((issue) => issue.severity === "critical").length,
       revisionBlockingIssues,

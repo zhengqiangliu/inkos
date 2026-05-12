@@ -24,7 +24,7 @@ describe("analyzeAITells", () => {
     const result = analyzeAITells(content);
     const paraIssues = result.issues.filter((i) => i.category === "段落等长");
     expect(paraIssues.length).toBeGreaterThan(0);
-    expect(paraIssues[0]!.severity).toBe("warning");
+    expect(paraIssues[0]!.severity).toBe("info");
   });
 
   it("detects high hedge word density (dim 21)", () => {
@@ -39,6 +39,7 @@ describe("analyzeAITells", () => {
     const result = analyzeAITells(content);
     const hedgeIssues = result.issues.filter((i) => i.category === "套话密度");
     expect(hedgeIssues.length).toBeGreaterThan(0);
+    expect(hedgeIssues[0]!.severity).toBe("info");
   });
 
   it("detects formulaic transition repetition (dim 22)", () => {
@@ -53,6 +54,7 @@ describe("analyzeAITells", () => {
     const result = analyzeAITells(content);
     const transIssues = result.issues.filter((i) => i.category === "公式化转折");
     expect(transIssues.length).toBeGreaterThan(0);
+    expect(transIssues[0]!.severity).toBe("info");
     expect(transIssues[0]!.description).toContain("然而");
   });
 

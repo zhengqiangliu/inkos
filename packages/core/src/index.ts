@@ -112,6 +112,7 @@ export {
   type GlobalSession,
   createBookSession,
   appendBookSessionMessage,
+  upsertBookSessionMessage,
 } from "./interaction/session.js";
 export {
   resolveProjectSessionPath,
@@ -218,6 +219,8 @@ export { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeIn
 // Utils
 export { fetchUrl, searchWeb } from "./utils/web-search.js";
 export { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "./utils/context-filter.js";
+export { readVolumeMap } from "./utils/outline-paths.js";
+export { extractChapterLimitFromOutline } from "./utils/chapter-limit.js";
 export { extractPOVFromOutline, filterMatrixByPOV, filterHooksByPOV } from "./utils/pov-filter.js";
 export { ConsolidatorAgent } from "./agents/consolidator.js";
 export { ChapterDesignAgent } from "./agents/chapter-design.js";

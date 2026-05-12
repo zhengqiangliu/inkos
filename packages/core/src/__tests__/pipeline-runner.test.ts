@@ -45,6 +45,8 @@ const CRITICAL_ISSUE: AuditIssue = {
   category: "continuity",
   description: "Fix the chapter state",
   suggestion: "Repair the contradiction",
+  issueId: "ISSUE-01",
+  dimensionId: "continuity",
 };
 
 function createAuditResult(overrides: Partial<AuditResult>): AuditResult {
@@ -1467,6 +1469,37 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("feeds audit drift guidance back into the next write input", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await writeFile(join(storyDir, "audit_drift.md"), [
+      "# Audit Drift",
+      "",
+      "## Audit Drift Correction",
+      "",
+      "> Chapter 2 audit found the following issues to avoid in the next chapter:",
+      "> - [warning] continuity: Keep the berth timing precise in the next chapter.",
+      "",
+    ].join("\n"), "utf-8");
+
+    try {
+      const result = await (
+        runner as unknown as {
+          prepareWriteInput: (book: BookConfig, bookDir: string, chapterNumber: number, externalContext?: string) => Promise<{ externalContext?: string }>;
+        }
+      ).prepareWriteInput(await state.loadBookConfig(bookId), state.bookDir(bookId), 3, "Keep the focus on the mentor conflict.");
+      expect(result.externalContext).toContain("# Audit Drift");
+      expect(result.externalContext).toContain("Keep the focus on the mentor conflict.");
+      expect(result.externalContext).toContain("Keep the berth timing precise");
+      expect(result.externalContext).not.toContain("Audit Drift Correction");
+      expect(result.externalContext?.length ?? 0).toBeLessThan(260);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("passes reduced control inputs into auditor and reviser in v2 mode", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "v2",
@@ -1781,7 +1814,7 @@ describe("PipelineRunner", () => {
     }
   });
 
-  it("attempts auto-revision when normalized draft still misses the hard range", async () => {
+  it("records a hard-range warning without auto-revision after normalization", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const overlongDraft = "冗余句子。".repeat(60);
     const stillOverHard = "仍然过长。".repeat(70);
@@ -1815,25 +1848,19 @@ describe("PipelineRunner", () => {
         summary: "clean",
       }),
     );
-    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
-      createAnalyzedOutput({
-        content: stillOverHard,
-        wordCount: stillOverHard.length,
-      }),
-    );
 
     try {
       const result = await runner.writeNextChapter(bookId, 220);
       const chapterIndex = await state.loadChapterIndex(bookId);
       const chapterMeta = chapterIndex.find((entry) => entry.number === 1);
 
-      expect(normalizeChapter).toHaveBeenCalledTimes(2);
+      expect(normalizeChapter).toHaveBeenCalledTimes(1);
       expect(normalizeChapter.mock.calls[0]?.[0]?.chapterContent).toBe(overlongDraft);
-      expect(normalizeChapter.mock.calls[1]?.[0]?.chapterContent).toBe(stillOverHard);
-      expect(reviseChapter).toHaveBeenCalledTimes(1);
+      expect(reviseChapter).not.toHaveBeenCalled();
       expect((result as { lengthWarnings?: ReadonlyArray<string> }).lengthWarnings?.[0]).toContain(
         "超出硬区间",
       );
+      expect(result.wordCount).toBe(stillOverHard.length);
       expect((result as { lengthTelemetry?: { finalCount: number } }).lengthTelemetry?.finalCount).toBe(
         stillOverHard.length,
       );
@@ -1940,6 +1967,50 @@ describe("PipelineRunner", () => {
       expect(writeInput?.chapterIntent).toBeUndefined();
       expect(writeInput?.contextPackage).toBeUndefined();
       expect(writeInput?.ruleStack).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("feeds frequent audit failure categories back into the next write input", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const storyDir = join(state.bookDir(bookId), "story");
+    await mkdir(join(storyDir, "state"), { recursive: true });
+
+    await writeFile(join(storyDir, "audit_failure_history.json"), JSON.stringify({
+      version: 2,
+      entries: [
+        { chapterNumber: 1, issues: [{ category: "节奏单调", severity: "warning" }, { category: "伏笔债务", severity: "critical" }], recordedAt: "2026-05-01T00:00:00.000Z" },
+        { chapterNumber: 2, issues: [{ category: "节奏单调", severity: "warning" }], recordedAt: "2026-05-02T00:00:00.000Z" },
+        { chapterNumber: 3, issues: [{ category: "伏笔债务", severity: "critical" }], recordedAt: "2026-05-03T00:00:00.000Z" },
+        { chapterNumber: 4, issues: [{ category: "信息重复", severity: "warning" }], recordedAt: "2026-05-04T00:00:00.000Z" },
+        { chapterNumber: 5, issues: [{ category: "对话拖沓", severity: "warning" }], recordedAt: "2026-05-05T00:00:00.000Z" },
+      ],
+    }, null, 2), "utf-8");
+
+    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 4,
+        content: "Chapter body.",
+        wordCount: "Chapter body.".length,
+      }),
+    );
+
+    try {
+      await runner.writeDraft(bookId, "Keep the focus on the mentor conflict.");
+      const writeInput = writeChapter.mock.calls[0]?.[0];
+      expect(writeInput?.externalContext).toContain("## 高频失败维度提示");
+      expect(writeInput?.externalContext).toContain("### 结构性（先修）");
+      expect(writeInput?.externalContext).toContain("### 文本性（后修）");
+      expect(writeInput?.externalContext).toContain("先回到节点、衔接、回收和推进");
+      expect(writeInput?.externalContext).toContain("最近连续2章");
+      expect(writeInput?.externalContext).toContain("节奏单调");
+      expect(writeInput?.externalContext).toContain("伏笔债务");
+      expect(writeInput?.externalContext).toContain("对话拖沓");
+      expect(writeInput?.externalContext).not.toContain("信息重复");
+      expect(writeInput?.externalContext).toContain("Keep the focus on the mentor conflict.");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -5368,6 +5439,44 @@ describe("PipelineRunner", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("restores previous critical issues by issueId even when text changes slightly", async () => {
+    const { root, runner } = await createRunnerFixture();
+    const previous: AuditResult = createAuditResult({
+      passed: false,
+      issues: [{
+        severity: "critical",
+        category: "Outline Drift Check",
+        description: "The chapter drifts from the outline.",
+        suggestion: "Return to the planned beat.",
+        issueId: "ISSUE-07",
+        dimensionId: "outline_drift",
+      }],
+      summary: "previous",
+    });
+    const next: AuditResult = createAuditResult({
+      passed: false,
+      issues: [{
+        severity: "critical",
+        category: "Outline Drift Check",
+        description: "The chapter drifts from the outline, but the wording changed.",
+        suggestion: "Return to the planned beat.",
+        issueId: "ISSUE-07",
+        dimensionId: "outline_drift",
+      }],
+      summary: "next",
+    });
+
+    const restored = (
+      runner as unknown as {
+        restoreLostAuditIssues: (previous: AuditResult, next: AuditResult) => AuditResult;
+      }
+    ).restoreLostAuditIssues(previous, next);
+
+    expect(restored).toBe(next);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("keeps chapter-level blockers even when sequence-level fatigue shares the same category label", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const bookDir = state.bookDir(bookId);
@@ -5526,7 +5635,7 @@ describe("PipelineRunner", () => {
     }
   });
 
-  it("does not treat out-of-range chapter as clean during revise and can apply length-focused revision", async () => {
+  it("keeps out-of-range chapters advisory during revise and skips manual rewrite when only length is out of band", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const storyDir = join(state.bookDir(bookId), "story");
     const chaptersDir = join(state.bookDir(bookId), "chapters");
@@ -5590,17 +5699,20 @@ describe("PipelineRunner", () => {
       const result = await runner.reviseDraft(bookId, 1, "polish");
       const savedIndex = await state.loadChapterIndex(bookId);
 
-      expect(reviseChapter).toHaveBeenCalledTimes(1);
-      expect(result.applied).toBe(true);
-      expect(result.status).toBe("ready-for-review");
+      expect(reviseChapter).not.toHaveBeenCalled();
+      expect(result.applied).toBe(false);
+      expect(result.status).toBe("unchanged");
+      expect(result.skippedReason).toBe("No warning, critical, or AI-tell issues to fix.");
+      expect(result.audit?.issues.some((issue) => issue.category === "篇幅控制")).toBe(true);
       expect(savedIndex[0]?.status).toBe("ready-for-review");
-      expect(savedIndex[0]?.wordCount).toBe(3200);
+      expect(savedIndex[0]?.wordCount).toBe(originalBody.length);
+      expect(savedIndex[0]?.auditIssues.some((issue) => issue.includes("字数未达目标区间"))).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  it("syncs audit word count into index and fails audit when chapter length is below target band", async () => {
+  it("syncs audit word count into index and records advisory length issues when chapter length is below target band", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const chaptersDir = join(state.bookDir(bookId), "chapters");
     const chapterBody = "字".repeat(2392);
@@ -5633,10 +5745,10 @@ describe("PipelineRunner", () => {
       const result = await runner.auditDraft(bookId, 1);
       const savedIndex = await state.loadChapterIndex(bookId);
 
-      expect(result.passed).toBe(false);
+      expect(result.passed).toBe(true);
       expect(result.issues.some((issue) => issue.category === "篇幅控制")).toBe(true);
       expect(savedIndex[0]?.wordCount).toBe(chapterBody.length);
-      expect(savedIndex[0]?.status).toBe("audit-failed");
+      expect(savedIndex[0]?.status).toBe("ready-for-review");
       expect(savedIndex[0]?.auditIssues.some((issue) => issue.includes("字数未达目标区间"))).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });

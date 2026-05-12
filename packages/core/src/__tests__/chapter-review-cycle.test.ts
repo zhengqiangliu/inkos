@@ -252,12 +252,22 @@ describe("runChapterReviewCycle", () => {
 
     expect(reviseChapter).toHaveBeenCalledTimes(1);
     expect(auditChapter).toHaveBeenNthCalledWith(1, "/tmp/book", "original draft", 1, "xuanhuan", { temperature: 0 });
-    expect(auditChapter).toHaveBeenNthCalledWith(2, "/tmp/book", "original draft", 1, "xuanhuan", { temperature: 0 });
+    expect(auditChapter.mock.calls[1]?.[4]).toEqual(expect.objectContaining({
+      temperature: 0,
+      previousAuditIssues: expect.arrayContaining([
+        expect.objectContaining({
+          severity: "critical",
+          category: "continuity",
+          description: "broken continuity",
+          suggestion: "fix it",
+        }),
+      ]),
+    }));
     expect(result.finalContent).toBe("original draft");
     expect(result.revised).toBe(false);
   });
 
-  it("auto-revises length out-of-band draft and passes after re-audit", async () => {
+  it("keeps length out-of-band draft as advisory-only and passes without revision", async () => {
     const longDraft = "字".repeat(300);
     const normalizedDraft = "字".repeat(300);
     const revisedDraft = "字".repeat(220);
@@ -315,9 +325,9 @@ describe("runChapterReviewCycle", () => {
       logStage: () => undefined,
     });
 
-    expect(reviseChapter).toHaveBeenCalledTimes(1);
-    expect(result.revised).toBe(true);
-    expect(result.finalWordCount).toBe(220);
+    expect(reviseChapter).toHaveBeenCalledTimes(0);
+    expect(result.revised).toBe(false);
+    expect(result.finalWordCount).toBe(300);
     expect(result.auditResult.passed).toBe(true);
   });
 
@@ -592,7 +602,7 @@ describe("runChapterReviewCycle", () => {
     });
   });
 
-  it("falls back to spot-fix after first-round rework for structural issues", async () => {
+  it("falls back to rewrite after first-round rework for structural issues", async () => {
     const draft = "字".repeat(220);
     const firstAudit = createAuditResult({
       passed: false,
@@ -687,10 +697,10 @@ describe("runChapterReviewCycle", () => {
       maxReviseRounds: 2,
     });
 
-    expect(reviseModes).toEqual(["rework", "spot-fix"]);
+    expect(reviseModes).toEqual(["rework", "rewrite"]);
   });
 
-  it("escalates textual critical issues from spot-fix to rework on later rounds", async () => {
+  it("escalates textual critical issues from spot-fix to rewrite on later rounds", async () => {
     const draft = "字".repeat(220);
     const failingAudit = createAuditResult({
       passed: false,
@@ -762,7 +772,7 @@ describe("runChapterReviewCycle", () => {
       maxReviseRounds: 2,
     });
 
-    expect(reviseModes).toEqual(["spot-fix", "rework"]);
+    expect(reviseModes).toEqual(["spot-fix", "rewrite"]);
     expect(result.auditResult.passed).toBe(false);
     expect(result.autoReview.stoppedByMaxRounds).toBe(true);
   });
@@ -937,7 +947,7 @@ describe("runChapterReviewCycle", () => {
       maxReviseRounds: 2,
     });
 
-    expect(reviseModes).toEqual(["rework", "spot-fix"]);
+    expect(reviseModes).toEqual(["rework", "rework"]);
     expect(auditChapter).toHaveBeenCalledTimes(3);
     expect(result.auditResult.passed).toBe(true);
   });

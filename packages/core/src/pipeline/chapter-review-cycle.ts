@@ -4,6 +4,7 @@ import type { WriteChapterOutput } from "../agents/writer.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { countChapterLength, isOutsideSoftRange } from "../utils/length-metrics.js";
+import { countAuditIssueClasses, isStructuralAuditIssue, resolvePrimaryIssueClass, splitAuditIssuesByClass } from "../utils/audit-issue-classification.js";
 
 export interface ChapterReviewCycleUsage {
   readonly promptTokens: number;
@@ -15,6 +16,24 @@ export interface ChapterReviewCycleControlInput {
   readonly chapterIntent: string;
   readonly contextPackage: ContextPackage;
   readonly ruleStack: RuleStack;
+}
+
+export interface ChapterReviewContext {
+  readonly failureGate?: "critical" | "score" | "none";
+  readonly score?: number;
+  readonly passScoreThreshold?: number;
+  readonly unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
+  readonly mustFixFirstIssueIds?: ReadonlyArray<string>;
+  readonly issueClassCounts?: Readonly<{
+    structural: number;
+    textual: number;
+  }>;
+  readonly primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
+  readonly dimensionChecks?: ReadonlyArray<{
+    dimension: string;
+    status: "pass" | "warning" | "failed";
+    evidence?: string;
+  }>;
 }
 
 export interface ChapterReviewCycleResult {
@@ -37,26 +56,13 @@ export interface ChapterReviewCycleResult {
 }
 
 const DEFAULT_AUTO_REVISE_ROUNDS = 2;
+const MAX_ADAPTIVE_REVISE_ROUNDS = 5;
+const MAX_REVISE_TOTAL_TOKENS = 200_000;
 const AUTO_REVIEW_STOP_REASON_MAX_ROUNDS = "达到自动修订轮次上限，仍未通过审计";
+const AUTO_REVIEW_STOP_REASON_TOKEN_LIMIT = "修订消耗总 token 超过安全阈值，停止修订";
 const MIN_AUDIT_PASS_SCORE = 80;
 const AUTO_REVIEW_DEFAULT_MODE: ReviseMode = "spot-fix";
 const STRUCTURAL_REPAIR_EXCLUDED_CATEGORIES = new Set(["篇幅控制", "Length Control", "评分门禁", "Score Gate"]);
-const STRUCTURAL_AUDIT_SIGNALS = [
-  "volume_outline",
-  "卷纲",
-  "大纲偏离",
-  "hook debt",
-  "伏笔债务",
-  "paragraph-shape",
-  "读者期待管理",
-  "篇幅控制",
-  "length control",
-  "资源账本",
-  "ledger",
-  "状态卡",
-  "评分门禁",
-  "score gate",
-];
 
 export interface AuditSeverityCounts {
   readonly critical: number;
@@ -69,6 +75,16 @@ export interface AuditIssueClassCounts {
   readonly textual: number;
 }
 
+export interface IssueLifecycleSummary {
+  readonly previousIssueCount: number;
+  readonly unresolvedIssueCount: number;
+  readonly partialIssueCount: number;
+  readonly freshIssueCount: number;
+  readonly resolvedIssueCount: number;
+  readonly unresolvedIssueIds: ReadonlyArray<string>;
+  readonly partialIssueDimensions: ReadonlyArray<string>;
+}
+
 export interface AuditRoundSummary {
   readonly chapterNumber: number;
   readonly passed: boolean;
@@ -79,6 +95,7 @@ export interface AuditRoundSummary {
   readonly score: number;
   readonly summary?: string;
   readonly issues: ReadonlyArray<AuditIssue>;
+  readonly issueLifecycle?: IssueLifecycleSummary;
 }
 
 function countIssueSeverities(issues: ReadonlyArray<AuditIssue>): AuditSeverityCounts {
@@ -94,44 +111,44 @@ function countIssueSeverities(issues: ReadonlyArray<AuditIssue>): AuditSeverityC
 }
 
 function estimateAuditScore(severityCounts: AuditSeverityCounts): number {
-  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12 - severityCounts.info * 4;
+  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12;
   return Math.max(0, Math.min(100, raw));
 }
 
-function isStructuralAuditIssue(issue: AuditIssue): boolean {
-  const merged = `${issue.category} ${issue.description}`.toLowerCase();
-  return STRUCTURAL_AUDIT_SIGNALS.some((signal) => merged.includes(signal));
+function countBlockingAITellIssues(issues: ReadonlyArray<{ readonly severity: AuditIssue["severity"] }>): number {
+  return issues.filter((issue) => issue.severity === "warning").length;
 }
 
 function countIssueClasses(issues: ReadonlyArray<AuditIssue>): AuditIssueClassCounts {
-  let structural = 0;
-  for (const issue of issues) {
-    if (isStructuralAuditIssue(issue)) structural += 1;
-  }
-  return {
-    structural,
-    textual: Math.max(0, issues.length - structural),
-  };
-}
-
-function resolvePrimaryIssueClass(counts: AuditIssueClassCounts): "none" | "structural" | "textual" | "mixed" {
-  if (counts.structural === 0 && counts.textual === 0) return "none";
-  if (counts.structural > 0 && counts.textual > 0) return "mixed";
-  return counts.structural > 0 ? "structural" : "textual";
+  return countAuditIssueClasses(issues);
 }
 
 function applyScoreGateToAuditResult(params: {
   auditResult: AuditResult;
   lengthSpec: LengthSpec;
+  previousScore?: number;
 }): AuditResult {
   if (!params.auditResult.passed) return params.auditResult;
-  const score = estimateAuditScore(countIssueSeverities(params.auditResult.issues));
+  const severityCounts = countIssueSeverities(params.auditResult.issues);
+  const score = estimateAuditScore(severityCounts);
   if (score >= MIN_AUDIT_PASS_SCORE) return params.auditResult;
 
-  // Remove any existing score gate issues — they add a warning that recursively
-  // penalizes the score without being fixable by the reviser, creating a
-  // convergence deadlock. Score gate only blocks `passed` but does not
-  // contribute a fixable issue.
+  // Score gate is a convergence guard, not a second auditor.
+  // Only block when the chapter still has actionable risk signals;
+  // otherwise, let the LLM pass stand to avoid false-negative churn.
+  const hasBlockingSignal = severityCounts.critical > 0 || severityCounts.warning > 0;
+  if (!hasBlockingSignal) {
+    return params.auditResult;
+  }
+
+  // Trend-aware tolerance: if the chapter is clearly improving and has no
+  // critical issues, keep the pass to avoid oscillating around the threshold.
+  const hasCritical = severityCounts.critical > 0;
+  if (!hasCritical && typeof params.previousScore === "number" && score > params.previousScore) {
+    return params.auditResult;
+  }
+
+  // Remove any existing score gate issues — they are not useful revision targets.
   const filteredIssues = params.auditResult.issues.filter(
     (issue) => issue.category !== "评分门禁" && issue.category !== "Score Gate",
   );
@@ -146,9 +163,36 @@ function applyScoreGateToAuditResult(params: {
 function buildAuditRoundSummary(
   chapterNumber: number,
   auditResult: AuditResult,
+  previousBlockingIssues?: ReadonlyArray<AuditIssue>,
 ): AuditRoundSummary {
   const severityCounts = countIssueSeverities(auditResult.issues);
   const issueClassCounts = countIssueClasses(auditResult.issues);
+  const currentBlockingIssues = auditResult.issues.filter(
+    (issue) => issue.severity === "critical" || issue.severity === "warning",
+  );
+  const issueLifecycle = previousBlockingIssues && previousBlockingIssues.length > 0
+    ? (() => {
+        const partition = partitionIssueCarryover(currentBlockingIssues, previousBlockingIssues);
+        const previousIssueCount = previousBlockingIssues.length;
+        const unresolvedIssueCount = partition.unresolved.length;
+        const partialIssueCount = partition.partial.length;
+        const freshIssueCount = partition.fresh.length;
+        const resolvedIssueCount = Math.max(0, previousIssueCount - unresolvedIssueCount - partialIssueCount);
+        const unresolvedIssueIds = collectIssueIds(partition.unresolved);
+        const partialIssueDimensions = [...new Set(
+          partition.partial.map((issue) => normalizeIssueDimensionForCompare(issue)),
+        )];
+        return {
+          previousIssueCount,
+          unresolvedIssueCount,
+          partialIssueCount,
+          freshIssueCount,
+          resolvedIssueCount,
+          unresolvedIssueIds,
+          partialIssueDimensions,
+        } satisfies IssueLifecycleSummary;
+      })()
+    : undefined;
   return {
     chapterNumber,
     passed: auditResult.passed,
@@ -159,48 +203,109 @@ function buildAuditRoundSummary(
     score: estimateAuditScore(severityCounts),
     summary: auditResult.summary?.trim() ? auditResult.summary.trim() : undefined,
     issues: auditResult.issues,
+    ...(issueLifecycle ? { issueLifecycle } : {}),
   };
 }
 
-function normalizeIssueTextForCompare(issue: AuditIssue): string {
+function normalizeIssueIdForCompare(value: unknown, fallback = ""): string {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim().toUpperCase();
+  return /^(?:ISSUE-\d{2,}|PW-\d{3})$/u.test(normalized) ? normalized : fallback;
+}
+
+function normalizeIssueDimensionForCompare(issue: AuditIssue): string {
+  const dimensionId = typeof issue.dimensionId === "string" && issue.dimensionId.trim().length > 0
+    ? issue.dimensionId.trim()
+    : issue.category;
+  return dimensionId.toLowerCase();
+}
+
+function normalizeIssueSignatureForCompare(issue: AuditIssue): string {
   return `${issue.category}:${issue.description}`
     .replace(/\s+/gu, " ")
     .trim()
     .toLowerCase();
 }
 
-function prioritizeUnresolvedIssues(
+interface IssueCarryoverPartition {
+  readonly unresolved: ReadonlyArray<AuditIssue>;
+  readonly partial: ReadonlyArray<AuditIssue>;
+  readonly fresh: ReadonlyArray<AuditIssue>;
+}
+
+function partitionIssueCarryover(
+  issues: ReadonlyArray<AuditIssue>,
+  previousIssues: ReadonlyArray<AuditIssue>,
+): IssueCarryoverPartition {
+  if (issues.length === 0 || previousIssues.length === 0) {
+    return {
+      unresolved: [],
+      partial: [],
+      fresh: issues,
+    };
+  }
+
+  const previousIds = new Set(
+    previousIssues
+      .map((issue) => normalizeIssueIdForCompare(issue.issueId))
+      .filter((value) => value.length > 0),
+  );
+  const previousDimensions = new Set(previousIssues.map((issue) => normalizeIssueDimensionForCompare(issue)));
+  const previousSignatures = new Set(previousIssues.map((issue) => normalizeIssueSignatureForCompare(issue)));
+
+  const unresolved: AuditIssue[] = [];
+  const partial: AuditIssue[] = [];
+  const fresh: AuditIssue[] = [];
+
+  for (const issue of issues) {
+    const issueId = normalizeIssueIdForCompare(issue.issueId);
+    const dimension = normalizeIssueDimensionForCompare(issue);
+    const signature = normalizeIssueSignatureForCompare(issue);
+
+    if ((issueId.length > 0 && previousIds.has(issueId)) || previousSignatures.has(signature)) {
+      unresolved.push(issue);
+      continue;
+    }
+
+    if (previousDimensions.has(dimension)) {
+      partial.push(issue);
+      continue;
+    }
+
+    fresh.push(issue);
+  }
+
+  return { unresolved, partial, fresh };
+}
+
+function prioritizeIssuesByCarryover(
   issues: ReadonlyArray<AuditIssue>,
   previousIssues: ReadonlyArray<AuditIssue>,
 ): ReadonlyArray<AuditIssue> {
-  if (issues.length === 0 || previousIssues.length === 0) {
+  const partition = partitionIssueCarryover(issues, previousIssues);
+  if (partition.unresolved.length === 0 && partition.partial.length === 0) {
     return issues;
   }
-  const unresolved = new Set(previousIssues.map((issue) => normalizeIssueTextForCompare(issue)));
-  const prioritized: AuditIssue[] = [];
-  const remaining: AuditIssue[] = [];
-  for (const issue of issues) {
-    const normalized = normalizeIssueTextForCompare(issue);
-    if (unresolved.has(normalized)) prioritized.push(issue);
-    else remaining.push(issue);
+  return [...partition.unresolved, ...partition.partial, ...partition.fresh];
+}
+
+function collectIssueIds(issues: ReadonlyArray<AuditIssue>): ReadonlyArray<string> {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const [index, issue] of issues.entries()) {
+    const issueId = normalizeIssueIdForCompare(issue.issueId, `ISSUE-${String(index + 1).padStart(2, "0")}`);
+    if (!issueId || seen.has(issueId)) continue;
+    seen.add(issueId);
+    ids.push(issueId);
   }
-  if (prioritized.length === 0) {
-    return issues;
-  }
-  return [...prioritized, ...remaining];
+  return ids;
 }
 
 function splitIssuesByClass(issues: ReadonlyArray<AuditIssue>): {
   structural: ReadonlyArray<AuditIssue>;
   textual: ReadonlyArray<AuditIssue>;
 } {
-  const structural: AuditIssue[] = [];
-  const textual: AuditIssue[] = [];
-  for (const issue of issues) {
-    if (isStructuralAuditIssue(issue)) structural.push(issue);
-    else textual.push(issue);
-  }
-  return { structural, textual };
+  return splitAuditIssuesByClass(issues);
 }
 
 function resolveTextualReviseMode(
@@ -222,6 +327,13 @@ function resolveTextualReviseMode(
 function hasMeaningfulContentDelta(previous: string, next: string): boolean {
   const normalize = (value: string) => value.replace(/\s+/gu, " ").trim();
   return normalize(previous) !== normalize(next);
+}
+
+function isLengthOnlyIssues(issues: ReadonlyArray<AuditIssue>): boolean {
+  if (issues.length === 0) return false;
+  return issues.every((issue) =>
+    issue.category === "篇幅控制" || issue.category === "Length Control"
+  );
 }
 
 function hasStructuralAuditSignals(issues: ReadonlyArray<AuditIssue>): boolean {
@@ -249,16 +361,26 @@ function resolveAdaptiveMaxReviseRounds(
   if (severity.critical >= 2) {
     resolved = Math.max(resolved, 5);
   }
-  return Math.max(0, Math.min(3, resolved));
+  return Math.max(0, Math.min(MAX_ADAPTIVE_REVISE_ROUNDS, resolved));
 }
 
 function resolveAdaptiveReviseMode(
   configuredMode: ReviseMode,
   issues: ReadonlyArray<AuditIssue>,
   reviseRound: number,
+  carryover?: IssueCarryoverPartition,
 ): ReviseMode {
   if (configuredMode !== "spot-fix") return configuredMode;
-  if (!hasStructuralAuditSignals(issues)) return resolveTextualReviseMode(issues, reviseRound);
+  if (reviseRound > 1 && carryover && (carryover.unresolved.length > 0 || carryover.partial.length > 0)) {
+    return hasStructuralAuditSignals([...carryover.unresolved, ...carryover.partial])
+      ? "rework"
+      : "rewrite";
+  }
+  if (!hasStructuralAuditSignals(issues)) {
+    // Pure word-count deficiency: use rewrite (broader than spot-fix but lighter than rework)
+    if (isLengthOnlyIssues(issues)) return "rewrite";
+    return resolveTextualReviseMode(issues, reviseRound);
+  }
   // Stage switch: first round tackles structural issues with deeper rewrite,
   // then fallback to spot-fix for follow-up convergence rounds.
   return reviseRound <= 1 ? "rework" : "spot-fix";
@@ -290,11 +412,26 @@ function applyLengthGateToAuditResult(params: {
   auditResult: AuditResult;
   chapterContent: string;
   lengthSpec: LengthSpec;
+  previousWordCount?: number;
 }): { auditResult: AuditResult; lengthOutOfBand: boolean } {
   const count = countChapterLength(params.chapterContent, params.lengthSpec.countingMode);
   const lengthOutOfBand = isOutsideSoftRange(count, params.lengthSpec);
   if (!lengthOutOfBand) {
     return { auditResult: params.auditResult, lengthOutOfBand: false };
+  }
+
+  // Trend-aware tolerance: if previous word count existed and current count
+  // is converging toward the target range, skip re-adding the length warning
+  // (avoids score gate oscillation when length is improving but not yet in range).
+  if (typeof params.previousWordCount === "number" && params.previousWordCount > 0) {
+    const target = params.lengthSpec.target;
+    const prevDist = Math.abs(params.previousWordCount - target);
+    const curDist = Math.abs(count - target);
+    if (curDist < prevDist) {
+      // Converging — don't add another length warning; it would only
+      // penalize the score gate without helping convergence.
+      return { auditResult: params.auditResult, lengthOutOfBand: true };
+    }
   }
 
   const isEnglish = params.lengthSpec.countingMode === "en_words";
@@ -309,7 +446,7 @@ function applyLengthGateToAuditResult(params: {
   const issues = hasLengthIssue
     ? params.auditResult.issues
     : [...params.auditResult.issues, {
-        severity: "warning",
+        severity: "info",
         category,
         description,
         suggestion,
@@ -323,7 +460,7 @@ function applyLengthGateToAuditResult(params: {
   return {
     auditResult: {
       ...params.auditResult,
-      passed: false,
+      passed: params.auditResult.passed,
       issues,
       summary,
     },
@@ -352,6 +489,7 @@ export async function runChapterReviewCycle(params: {
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
         lengthSpec?: LengthSpec;
+        reviseContext?: ChapterReviewContext;
         onRevisedContentDelta?: (text: string) => void;
         onSpotFixPatchDelta?: (text: string) => void;
         onThinkingDelta?: (text: string) => void;
@@ -376,6 +514,7 @@ export async function runChapterReviewCycle(params: {
         chapterIntent?: string;
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
+        previousAuditIssues?: ReadonlyArray<AuditIssue>;
         onThinkingDelta?: (text: string) => void;
         onThinkingEnd?: () => void;
       },
@@ -434,7 +573,7 @@ export async function runChapterReviewCycle(params: {
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
   const configuredMaxReviseRounds = Number.isFinite(Number(params.maxReviseRounds))
-    ? Math.max(0, Math.min(3, Math.trunc(Number(params.maxReviseRounds))))
+    ? Math.max(0, Math.min(MAX_ADAPTIVE_REVISE_ROUNDS, Math.trunc(Number(params.maxReviseRounds))))
     : DEFAULT_AUTO_REVISE_ROUNDS;
   const configuredReviseMode = params.reviseMode ?? AUTO_REVIEW_DEFAULT_MODE;
   let maxReviseRounds = configuredMaxReviseRounds;
@@ -450,7 +589,14 @@ export async function runChapterReviewCycle(params: {
       category: violation.rule,
       description: violation.description,
       suggestion: violation.suggestion,
+      ...(typeof violation.issueId === "string" && violation.issueId.trim().length > 0
+        ? { issueId: violation.issueId.trim().toUpperCase() }
+        : {}),
+      ...(typeof violation.dimensionId === "string" && violation.dimensionId.trim().length > 0
+        ? { dimensionId: violation.dimensionId.trim() }
+        : {}),
     }));
+    const spotFixIssueClassCounts = countIssueClasses(spotFixIssues);
     const fixResult = await reviser.reviseChapter(
       params.bookDir,
       finalContent,
@@ -461,6 +607,13 @@ export async function runChapterReviewCycle(params: {
       {
         ...params.reducedControlInput,
         lengthSpec: params.lengthSpec,
+        reviseContext: {
+          failureGate: "critical",
+          issueClassCounts: spotFixIssueClassCounts,
+          primaryIssueClass: resolvePrimaryIssueClass(spotFixIssueClassCounts),
+          mustFixFirstIssueIds: collectIssueIds(spotFixIssues),
+          unresolvedIssueIdsFromPrevRound: collectIssueIds(spotFixIssues),
+        },
       },
     );
     totalUsage = params.addUsage(totalUsage, fixResult.tokenUsage);
@@ -515,12 +668,13 @@ export async function runChapterReviewCycle(params: {
       : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}) },
   );
   totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
-  const aiTellsResult = params.analyzeAITells(finalContent);
+  const aiTellsInitial = params.analyzeAITells(finalContent);
   const sensitiveWriteResult = params.analyzeSensitiveWords(finalContent);
   const hasBlockedWriteWords = sensitiveWriteResult.found.some((item) => item.severity === "block");
+  let previousAITellCount = countBlockingAITellIssues(aiTellsInitial.issues);
   let auditResult: AuditResult = {
     passed: hasBlockedWriteWords ? false : llmAudit.passed,
-    issues: [...llmAudit.issues, ...aiTellsResult.issues, ...sensitiveWriteResult.issues],
+    issues: [...llmAudit.issues, ...aiTellsInitial.issues, ...sensitiveWriteResult.issues],
     summary: llmAudit.summary,
   };
   {
@@ -542,11 +696,23 @@ export async function runChapterReviewCycle(params: {
     audit: buildAuditRoundSummary(params.chapterNumber, auditResult),
   });
 
-  let priorRoundIssues: ReadonlyArray<AuditIssue> = [];
+  let priorRoundIssues: ReadonlyArray<AuditIssue> = auditResult.issues.filter(
+    (issue) => issue.severity === "critical" || issue.severity === "warning",
+  );
+  let priorAuditScore = estimateAuditScore(countIssueSeverities(auditResult.issues));
+  let priorWordCount = finalWordCount;
   let reviseRoundsUsed = 0;
   let stoppedByMaxRounds = false;
   let stopReason: string | undefined;
+  let previousSpotFixHadNoDelta = false;
+  const reviseLoopStartTokens = totalUsage.totalTokens;
   for (let reviseRound = 1; reviseRound <= maxReviseRounds && !auditResult.passed; reviseRound += 1) {
+    // Token safety valve: prevent runaway consumption in high-round scenarios
+    if (totalUsage.totalTokens - reviseLoopStartTokens > MAX_REVISE_TOTAL_TOKENS) {
+      stoppedByMaxRounds = true;
+      stopReason = AUTO_REVIEW_STOP_REASON_TOKEN_LIMIT;
+      break;
+    }
     const blockingIssues = auditResult.issues.filter(
       (issue) => issue.severity === "critical" || issue.severity === "warning",
     );
@@ -555,19 +721,54 @@ export async function runChapterReviewCycle(params: {
     }
     reviseRoundsUsed = reviseRound;
     const reviser = params.createReviser();
+    const carryover = reviseRound > 1
+      ? partitionIssueCarryover(blockingIssues, priorRoundIssues)
+      : null;
     const unresolvedPrioritizedIssues = reviseRound > 1
-      ? prioritizeUnresolvedIssues(blockingIssues, priorRoundIssues)
+      ? prioritizeIssuesByCarryover(blockingIssues, priorRoundIssues)
       : blockingIssues;
     const issuesForRound = resolveAdaptiveIssuesForRound(
       configuredReviseMode,
       unresolvedPrioritizedIssues,
       reviseRound,
     );
-    let reviseMode = resolveAdaptiveReviseMode(configuredReviseMode, issuesForRound, reviseRound);
+    let reviseMode = resolveAdaptiveReviseMode(configuredReviseMode, issuesForRound, reviseRound, carryover ?? undefined);
+    if (configuredReviseMode === "spot-fix" && reviseRound > 1 && carryover && (carryover.unresolved.length > 0 || carryover.partial.length > 0)) {
+      const persistentIssues = [...carryover.unresolved, ...carryover.partial];
+      reviseMode = hasStructuralAuditSignals(persistentIssues) ? "rework" : "rewrite";
+      params.logWarn({
+        zh: `第${reviseRound}轮仍有 ${persistentIssues.length} 个未收敛问题，切换为${reviseMode}以避免 spot-fix 空转`,
+        en: `Round ${reviseRound} still has ${persistentIssues.length} unresolved/partial issue(s); switching to ${reviseMode} to avoid spot-fix churn`,
+      });
+    }
+    // Early escalation: if previous round's spot-fix made no meaningful delta,
+    // skip straight to rewrite instead of waiting for the final round.
+    if (reviseMode === "spot-fix" && previousSpotFixHadNoDelta) {
+      params.logWarn({
+        zh: `第${reviseRound - 1}轮spot-fix未产生有效改动，提前升级为rewrite`,
+        en: `Round ${reviseRound - 1} spot-fix made no meaningful change; early escalating to rewrite`,
+      });
+      reviseMode = "rewrite";
+    }
     // On the final round, escalate to rewrite for a stronger convergence attempt
     if (reviseMode === "spot-fix" && reviseRound >= maxReviseRounds) {
       reviseMode = "rewrite";
     }
+    const issueClassCounts = countIssueClasses(issuesForRound);
+    const primaryIssueClass = resolvePrimaryIssueClass(issueClassCounts);
+    const persistentIssues = carryover ? [...carryover.unresolved, ...carryover.partial] : [];
+    const structuralPriorityIssues = issuesForRound.filter((issue) => isStructuralAuditIssue(issue));
+    const mustFixFirstSource = structuralPriorityIssues.length > 0 ? structuralPriorityIssues : issuesForRound;
+    const reviseContext: ChapterReviewContext = {
+      failureGate: countIssueSeverities(blockingIssues).critical > 0 ? "critical" as const : "score" as const,
+      score: priorAuditScore,
+      passScoreThreshold: MIN_AUDIT_PASS_SCORE,
+      issueClassCounts,
+      primaryIssueClass,
+      dimensionChecks: auditResult.dimensionChecks,
+      unresolvedIssueIdsFromPrevRound: collectIssueIds(persistentIssues),
+      mustFixFirstIssueIds: collectIssueIds(mustFixFirstSource.slice(0, 3)),
+    };
     if (hasStructuralAuditSignals(issuesForRound)) {
       try {
         await params.onStructuralPreRevise?.({
@@ -603,6 +804,7 @@ export async function runChapterReviewCycle(params: {
       {
         ...params.reducedControlInput,
         lengthSpec: params.lengthSpec,
+        reviseContext,
         onRevisedContentDelta: params.onRevisedContentDelta,
         onSpotFixPatchDelta: params.onSpotFixPatchDelta,
         onThinkingDelta: params.onReviserThinkingDelta,
@@ -628,8 +830,16 @@ export async function runChapterReviewCycle(params: {
 
     const preMarkers = params.analyzeAITells(finalContent);
     const postMarkers = params.analyzeAITells(normalizedRevision.content);
+    const preMarkerCount = countBlockingAITellIssues(preMarkers.issues);
+    const postMarkerCount = countBlockingAITellIssues(postMarkers.issues);
     const contentChanged = hasMeaningfulContentDelta(finalContent, normalizedRevision.content);
-    if (postMarkers.issues.length <= preMarkers.issues.length + 1 && contentChanged) {
+    // Track ineffective spot-fix for early mode escalation in the next round
+    if (reviseMode === "spot-fix" && !contentChanged) {
+      previousSpotFixHadNoDelta = true;
+    } else {
+      previousSpotFixHadNoDelta = false;
+    }
+    if (postMarkerCount <= preMarkerCount + 1 && contentChanged) {
       finalContent = normalizedRevision.content;
       finalWordCount = normalizedRevision.wordCount;
       revised = true;
@@ -644,30 +854,41 @@ export async function runChapterReviewCycle(params: {
       params.chapterNumber,
       params.book.genre,
       params.reducedControlInput
-        ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd }
-        : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}) },
+        ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd, previousAuditIssues: priorRoundIssues }
+        : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}), previousAuditIssues: priorRoundIssues },
     );
     totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
     const reAuditReturnedNoIssues = Array.isArray(reAudit.issues) && reAudit.issues.length === 0;
     const reAITells = params.analyzeAITells(finalContent);
+    // Only inject AI-tell issues on re-audit if the count worsened, to prevent
+    // the reviser from being penalized by the same or diminishing AI markers
+    // across rounds (which creates a convergence deadlock).
+    const reAITellCount = countBlockingAITellIssues(reAITells.issues);
+    const aiTellWorsened = reAITellCount > previousAITellCount;
+    const aiTellIssuesForRound = aiTellWorsened
+      ? reAITells.issues
+      : [];
+    previousAITellCount = reAITellCount;
     const reSensitive = params.analyzeSensitiveWords(finalContent);
     const reHasBlocked = reSensitive.found.some((item) => item.severity === "block");
     const previousAuditResult = auditResult;
     auditResult = params.restoreLostAuditIssues(auditResult, {
       passed: reHasBlocked ? false : reAudit.passed,
-      issues: [...reAudit.issues, ...reAITells.issues, ...reSensitive.issues],
+      issues: [...reAudit.issues, ...aiTellIssuesForRound, ...reSensitive.issues],
       summary: reAudit.summary,
     });
     auditResult = applyLengthGateToAuditResult({
       auditResult,
       chapterContent: finalContent,
       lengthSpec: params.lengthSpec,
+      previousWordCount: priorWordCount,
     }).auditResult;
     auditResult = applyScoreGateToAuditResult({
-      auditResult,
-      lengthSpec: params.lengthSpec,
-    });
-    const reviseAuditSummary = buildAuditRoundSummary(params.chapterNumber, auditResult);
+    auditResult,
+    lengthSpec: params.lengthSpec,
+    previousScore: auditRound > 1 ? priorAuditScore : undefined,
+  });
+    const reviseAuditSummary = buildAuditRoundSummary(params.chapterNumber, auditResult, priorRoundIssues);
     await params.onReviseComplete?.({
       round: reviseRound,
       maxReviseRounds,
@@ -681,6 +902,8 @@ export async function runChapterReviewCycle(params: {
       audit: reviseAuditSummary,
     });
     priorRoundIssues = issuesForRound;
+    priorAuditScore = estimateAuditScore(countIssueSeverities(auditResult.issues));
+    priorWordCount = finalWordCount;
     if (!auditResult.passed && reAuditReturnedNoIssues) {
       const unresolvedBlockingIssues = hasBlockingIssues(auditResult.issues);
       const structuralRepairInProgress = hasRepairStructuralSignals(previousAuditResult.issues)

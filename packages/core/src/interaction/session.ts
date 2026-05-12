@@ -11,12 +11,80 @@ export const PendingDecisionSchema = z.object({
 
 export type PendingDecision = z.infer<typeof PendingDecisionSchema>;
 
+export const MessageAuditDimensionCheckSchema = z.object({
+  dimension: z.string(),
+  status: z.enum(["pass", "warning", "failed"]),
+  evidence: z.string().optional(),
+});
+
+export const MessageAuditSummarySchema = z.object({
+  chapter: z.number().int().min(1),
+  passed: z.boolean(),
+  issueCount: z.number().int().nonnegative(),
+  score: z.number().int().nonnegative(),
+  severityCounts: z.object({
+    critical: z.number().int().nonnegative(),
+    warning: z.number().int().nonnegative(),
+    info: z.number().int().nonnegative(),
+  }).optional(),
+  failureGate: z.enum(["none", "critical", "score"]).optional(),
+  summary: z.string().optional(),
+  report: z.string().optional(),
+  issues: z.array(z.string()).optional(),
+  dimensionChecks: z.array(MessageAuditDimensionCheckSchema).optional(),
+});
+
+export type MessageAuditSummary = z.infer<typeof MessageAuditSummarySchema>;
+
+export const PipelineStageProgressSchema = z.object({
+  status: z.string().optional(),
+  elapsedMs: z.number().int().nonnegative(),
+  totalChars: z.number().int().nonnegative(),
+  chineseChars: z.number().int().nonnegative(),
+});
+
 export const PipelineStageSchema = z.object({
   label: z.string(),
   status: z.enum(["pending", "active", "completed"]),
+  activatedAt: z.number().int().nonnegative().optional(),
+  progress: PipelineStageProgressSchema.optional(),
 });
 
 export type PipelineStage = z.infer<typeof PipelineStageSchema>;
+
+export const ToolExecutionBatchSchema = z.object({
+  batchId: z.string(),
+  status: z.enum(["running", "completed", "failed"]),
+  total: z.number().int().nonnegative(),
+  completed: z.number().int().nonnegative(),
+  elapsedMs: z.number().int().nonnegative(),
+  currentChapter: z.number().int().min(1).optional(),
+  currentWords: z.number().int().nonnegative().optional(),
+  failedChapterNumber: z.number().int().min(1).optional(),
+  error: z.string().optional(),
+});
+
+export type ToolExecutionBatch = z.infer<typeof ToolExecutionBatchSchema>;
+
+export const ToolExecutionAutoReviewSchema = z.object({
+  enabled: z.boolean(),
+  phase: z.enum(["audit", "revise"]),
+  round: z.number().int().min(1),
+  maxRounds: z.number().int().nonnegative(),
+  final: z.boolean(),
+  state: z.enum(["retrying", "passed", "failed-max-rounds", "failed-single-audit"]).optional(),
+  stopReason: z.string().optional(),
+  mode: z.string().optional(),
+  strategyReason: z.string().optional(),
+  passed: z.boolean().optional(),
+  reviseRoundsUsed: z.number().int().nonnegative().optional(),
+  failureGate: z.enum(["none", "critical", "score"]).optional(),
+  failedDimensions: z.array(z.string()).optional(),
+  mustFixUnresolvedCount: z.number().int().nonnegative().optional(),
+  mustFixTotalCount: z.number().int().nonnegative().optional(),
+});
+
+export type ToolExecutionAutoReview = z.infer<typeof ToolExecutionAutoReviewSchema>;
 
 export const ToolExecutionSchema = z.object({
   id: z.string(),
@@ -28,6 +96,12 @@ export const ToolExecutionSchema = z.object({
   result: z.string().optional(),
   error: z.string().optional(),
   stages: z.array(PipelineStageSchema).optional(),
+  logs: z.array(z.string()).optional(),
+  previewText: z.string().optional(),
+  previewChapterNumber: z.number().int().min(1).optional(),
+  previewKind: z.enum(["patch"]).optional(),
+  batch: ToolExecutionBatchSchema.optional(),
+  autoReview: ToolExecutionAutoReviewSchema.optional(),
   startedAt: z.number(),
   completedAt: z.number().optional(),
 });
@@ -36,10 +110,20 @@ export type ToolExecution = z.infer<typeof ToolExecutionSchema>;
 
 export const InteractionMessageSchema = z.object({
   role: z.enum(["user", "assistant", "system"]),
-  content: z.string().min(1),
+  content: z.string(),
   thinking: z.string().optional(),
+  thinkingStreaming: z.boolean().optional(),
   toolExecutions: z.array(ToolExecutionSchema).optional(),
+  audit: MessageAuditSummarySchema.optional(),
   timestamp: z.number().int().nonnegative(),
+}).superRefine((message, ctx) => {
+  if ((message.role === "user" || message.role === "system") && message.content.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["content"],
+      message: "content is required",
+    });
+  }
 });
 
 export type InteractionMessage = z.infer<typeof InteractionMessageSchema>;
@@ -143,6 +227,23 @@ export function appendBookSessionMessage(
   return {
     ...session,
     messages: [...session.messages, message].sort((a, b) => a.timestamp - b.timestamp),
+    updatedAt: Date.now(),
+  };
+}
+
+export function upsertBookSessionMessage(
+  session: BookSession,
+  message: InteractionMessage,
+): BookSession {
+  const index = session.messages.findIndex(
+    (entry) => entry.role === message.role && entry.timestamp === message.timestamp,
+  );
+  const messages = index >= 0
+    ? session.messages.map((entry, entryIndex) => (entryIndex === index ? { ...entry, ...message } : entry))
+    : [...session.messages, message];
+  return {
+    ...session,
+    messages: [...messages].sort((a, b) => a.timestamp - b.timestamp),
     updatedAt: Date.now(),
   };
 }

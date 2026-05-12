@@ -4,6 +4,7 @@ import type { BookRules } from "../models/book-rules.js";
 import type { FanficMode } from "../models/book.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import { readGenreProfile, readBookLanguage, readBookRules } from "./rules-reader.js";
+import { buildAuditDimensions } from "./audit-dimensions.js";
 import { getFanficDimensionConfig, FANFIC_DIMENSIONS } from "./fanfic-dimensions.js";
 import { extractChapterTail } from "../utils/chapter-tail.js";
 import { readFile, readdir } from "node:fs/promises";
@@ -28,6 +29,9 @@ export interface AuditIssue {
   readonly category: string;
   readonly description: string;
   readonly suggestion: string;
+  readonly issueId?: string;
+  readonly dimensionId?: string;
+  readonly excerpt?: string;
 }
 
 export interface AuditDimensionCheck {
@@ -112,6 +116,18 @@ function normalizeAuditDimensionStatus(value: unknown): AuditDimensionCheck["sta
     return "failed";
   }
   return null;
+}
+
+function normalizeIssueId(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.trim().toUpperCase();
+  return /^ISSUE-\d{2,}$/u.test(normalized) ? normalized : fallback;
+}
+
+function normalizeOptionalText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function inferDimensionStatusFromSeverity(severity: AuditIssue["severity"]): AuditDimensionCheck["status"] {
@@ -356,6 +372,7 @@ export class ContinuityAuditor extends BaseAgent {
       chapterIntent?: string;
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
+      previousAuditIssues?: ReadonlyArray<AuditIssue>;
       truthFileOverrides?: {
         currentState?: string;
         ledger?: string;
@@ -406,7 +423,7 @@ export class ContinuityAuditor extends BaseAgent {
     const resolvedLanguage = bookLanguage ?? gp.language;
     const isEnglish = resolvedLanguage === "en";
     const fanficMode = hasFanficCanon ? (bookRules?.fanficMode as FanficMode | undefined) : undefined;
-    const dimensions = buildDimensionList(gp, bookRules, resolvedLanguage, hasParentCanon, fanficMode);
+    const dimensions = buildAuditDimensions(gp, bookRules, resolvedLanguage, hasParentCanon, fanficMode);
     const dimList = dimensions
       .map((d) => `${d.id}. ${d.name}${d.note ? (isEnglish ? ` (${d.note})` : `（${d.note}）`) : ""}`)
       .join("\n");
@@ -442,10 +459,13 @@ Output format MUST be JSON:
   ],
   "issues": [
     {
+      "issueId": "ISSUE-01",
+      "dimensionId": "outline_drift",
       "severity": "critical|warning|info",
       "category": "dimension name",
       "description": "specific issue description",
-      "suggestion": "fix suggestion"
+      "suggestion": "fix suggestion",
+      "excerpt": "short supporting text"
     }
   ],
   "summary": "one-sentence audit conclusion"
@@ -469,10 +489,13 @@ ${dimList}
   ],
   "issues": [
     {
+      "issueId": "ISSUE-01",
+      "dimensionId": "大纲偏离检测",
       "severity": "critical|warning|info",
       "category": "审查维度名称",
       "description": "具体问题描述",
-      "suggestion": "修改建议"
+      "suggestion": "修改建议",
+      "excerpt": "简短证据片段"
     }
   ],
   "summary": "一句话总结审查结论"
@@ -559,9 +582,13 @@ ${dimList}
         : `\n## 上一章全文（用于衔接检查）\n${previousChapter}\n`
       : "";
 
+    const deltaAuditBlock = options?.previousAuditIssues && options.previousAuditIssues.length > 0
+      ? this.buildDeltaAuditPromptBlock(options.previousAuditIssues, isEnglish)
+      : "";
+
     const userPrompt = isEnglish
       ? `Review chapter ${chapterNumber}.
-
+${deltaAuditBlock}
 ## Current State Card
 ${currentState}
 ${ledgerBlock}
@@ -570,7 +597,7 @@ ${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBloc
 ## Chapter Content Under Review
 ${chapterContent}`
       : `请审查第${chapterNumber}章。
-
+${deltaAuditBlock}
 ## 当前状态卡
 ${currentState}
 ${ledgerBlock}
@@ -636,12 +663,16 @@ ${chapterContent}`;
         let match: RegExpExecArray | null;
         while ((match = issuePattern.exec(issuesMatch[1]!)) !== null) {
           try {
-            const issue = JSON.parse(match[0]);
+            const issue = JSON.parse(match[0]) as Record<string, unknown>;
+            const fallbackIssueId = `ISSUE-${String(issues.length + 1).padStart(2, "0")}`;
             issues.push({
-              severity: issue.severity ?? "warning",
-              category: issue.category ?? (language === "en" ? "Uncategorized" : "未分类"),
-              description: issue.description ?? "",
-              suggestion: issue.suggestion ?? "",
+              severity: (issue.severity as AuditIssue["severity"]) ?? "warning",
+              category: typeof issue.category === "string" ? issue.category : (language === "en" ? "Uncategorized" : "未分类"),
+              description: typeof issue.description === "string" ? issue.description : "",
+              suggestion: typeof issue.suggestion === "string" ? issue.suggestion : "",
+              issueId: normalizeIssueId(issue.issueId, fallbackIssueId),
+              dimensionId: normalizeOptionalText(issue.dimensionId) ?? (typeof issue.category === "string" ? issue.category : undefined),
+              excerpt: normalizeOptionalText(issue.excerpt),
             });
           } catch {
             // skip malformed individual issue
@@ -669,6 +700,46 @@ ${chapterContent}`;
       }],
       summary: language === "en" ? "Audit output parsing failed" : "审稿输出解析失败",
     };
+  }
+
+  private buildDeltaAuditPromptBlock(
+    previousIssues: ReadonlyArray<AuditIssue>,
+    isEnglish: boolean,
+  ): string {
+  if (isEnglish) {
+      const issueLines = previousIssues
+        .filter((i) => i.severity === "critical" || i.severity === "warning")
+        .map((i, index) => {
+          const issueId = normalizeIssueId(i.issueId, `ISSUE-${String(index + 1).padStart(2, "0")}`);
+          const dimensionId = normalizeOptionalText(i.dimensionId) ?? i.category;
+          return `- [${issueId}] [${i.severity}] [${dimensionId}] ${i.category}: ${i.description}`;
+        })
+        .join("\n");
+      return `
+
+## Delta Audit Prompt (this is a revision re-audit)
+The chapter below has been revised from a previous version. The previous audit found these blocking issues:
+
+${issueLines}
+
+**Instruction**: First check whether each of the above issues has been resolved. Only report NEW issues if they are genuinely severe—do not report different issues merely because the reviser changed unrelated parts of the chapter. If all previous blocking issues are resolved, set passed=true even if minor new issues exist.`;
+    }
+    const issueLines = previousIssues
+      .filter((i) => i.severity === "critical" || i.severity === "warning")
+      .map((i, index) => {
+        const issueId = normalizeIssueId(i.issueId, `ISSUE-${String(index + 1).padStart(2, "0")}`);
+        const dimensionId = normalizeOptionalText(i.dimensionId) ?? i.category;
+        return `- [${issueId}] [${i.severity}] [${dimensionId}] ${i.category}: ${i.description}`;
+      })
+      .join("\n");
+    return `
+
+## 增量审计提示（本轮为重审）
+以下章节是在上一版基础上修订后的版本。上一轮审稿发现了以下阻塞性问题：
+
+${issueLines}
+
+**指令**：请优先检查以上各项问题是否已解决。仅当确实出现严重的新问题时才报告新问题——不要因为修订者修改了无关段落而报告完全不同的维度问题。如果以上阻塞性问题均已解决，即使存在少量新问题也应判定 passed=true。`;
   }
 
   private buildReducedControlBlock(
@@ -732,12 +803,20 @@ ${overrides}\n`;
       const parsed = JSON.parse(json);
       if (typeof parsed.passed !== "boolean" && parsed.passed !== undefined) return null;
       const normalizedIssues: AuditIssue[] = Array.isArray(parsed.issues)
-        ? parsed.issues.map((i: Record<string, unknown>) => ({
-            severity: (i.severity as string) ?? "warning",
-            category: (i.category as string) ?? (language === "en" ? "Uncategorized" : "未分类"),
-            description: (i.description as string) ?? "",
-            suggestion: (i.suggestion as string) ?? "",
-          }))
+        ? parsed.issues.map((i: Record<string, unknown>, index: number) => {
+            const category = typeof i.category === "string" && i.category.trim()
+              ? i.category.trim()
+              : (language === "en" ? "Uncategorized" : "未分类");
+            return {
+              severity: (i.severity as AuditIssue["severity"]) ?? "warning",
+              category,
+              description: typeof i.description === "string" ? i.description : "",
+              suggestion: typeof i.suggestion === "string" ? i.suggestion : "",
+              issueId: normalizeIssueId(i.issueId, `ISSUE-${String(index + 1).padStart(2, "0")}`),
+              dimensionId: normalizeOptionalText(i.dimensionId) ?? category,
+              excerpt: normalizeOptionalText(i.excerpt),
+            };
+          })
         : [];
       const dimensionChecksFromPayload = Array.isArray(parsed.dimensionChecks)
         ? parsed.dimensionChecks

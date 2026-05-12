@@ -20,6 +20,53 @@ const loadBookConfigMock = vi.fn();
 const createLLMClientMock = vi.fn(() => ({}));
 const chatCompletionMock = vi.fn();
 const loadProjectConfigMock = vi.fn();
+const readVolumeMapMock = vi.fn(async (bookDir: string) => {
+  const newPath = join(bookDir, "story", "outline", "volume_map.md");
+  const legacyPath = join(bookDir, "story", "volume_outline.md");
+  const newContent = await readFile(newPath, "utf-8").catch(() => "");
+  if (newContent.trim()) return newContent;
+  return readFile(legacyPath, "utf-8").catch(() => "");
+});
+const extractChapterLimitFromOutlineMock = vi.fn((outline: string) => {
+  const chinese: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    两: 2,
+  };
+  const parseToken = (token: string): number | null => {
+    const raw = token.trim();
+    if (!raw) return null;
+    if (/^\d+$/.test(raw)) return Number(raw);
+    if (raw === "十") return 10;
+    if (raw.length === 1 && raw in chinese) return chinese[raw] ?? null;
+    const match = raw.match(/^([一二三四五六七八九两])?十([一二三四五六七八九两])?$/);
+    if (match) {
+      const tens = match[1] ? (chinese[match[1]] ?? 0) : 1;
+      const ones = match[2] ? (chinese[match[2]] ?? 0) : 0;
+      return tens * 10 + ones;
+    }
+    return null;
+  };
+
+  const total = outline.match(/(?:共|总(?:章数|计)|章节总数|总章节数)\s*([零〇一二三四五六七八九十两\d]+)\s*章?/);
+  if (total) {
+    return parseToken(total[1] ?? "");
+  }
+  const range = outline.match(/第\s*([零〇一二三四五六七八九十两\d]+)\s*[-~–—至到]\s*([零〇一二三四五六七八九十两\d]+)\s*章/);
+  if (range) {
+    return parseToken(range[2] ?? "");
+  }
+  return null;
+});
 const pipelineConfigs: unknown[] = [];
 const processProjectInteractionInputMock = vi.fn();
 const processProjectInteractionRequestMock = vi.fn();
@@ -210,6 +257,8 @@ vi.mock("@actalk/inkos-core", () => {
     saveSecrets: saveSecretsMock,
     getServiceApiKey: getServiceApiKeyMock,
     listModelsForService: listModelsForServiceMock,
+    readVolumeMap: readVolumeMapMock,
+    extractChapterLimitFromOutline: extractChapterLimitFromOutlineMock,
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
   };
 });
@@ -329,6 +378,7 @@ describe("createStudioServer daemon lifecycle", () => {
     saveChapterIndexMock.mockReset();
     loadChapterIndexMock.mockReset();
     loadBookConfigMock.mockReset();
+    readVolumeMapMock.mockClear();
     await mkdir(join(root, "books", "demo-book", "chapters"), { recursive: true });
     await writeFile(join(root, "books", "demo-book", "chapters", "0003_Demo.md"), "# Demo\n\nBody", "utf-8");
     runRadarMock.mockResolvedValue({
@@ -458,6 +508,7 @@ describe("createStudioServer daemon lifecycle", () => {
     resolveServiceProviderFamilyMock.mockClear();
     resolveServiceModelsBaseUrlMock.mockClear();
     listModelsForServiceMock.mockClear();
+    extractChapterLimitFromOutlineMock.mockClear();
     // Default BookSession for agent tests
     const defaultBookSession = {
       sessionId: "agent-session-1",
@@ -472,9 +523,11 @@ describe("createStudioServer daemon lifecycle", () => {
     createAndPersistBookSessionMock.mockResolvedValue(defaultBookSession);
     loadBookSessionMock.mockResolvedValue(defaultBookSession);
     persistBookSessionMock.mockResolvedValue(undefined);
-    appendBookSessionMessageMock.mockImplementation(
-      (session: unknown, _msg: unknown) => session,
-    );
+    appendBookSessionMessageMock.mockImplementation((session: any, msg: any) => ({
+      ...session,
+      messages: [...(session.messages ?? []), msg].sort((left: any, right: any) => left.timestamp - right.timestamp),
+      updatedAt: Date.now(),
+    }));
     renameBookSessionMock.mockResolvedValue(null);
     deleteBookSessionMock.mockResolvedValue(undefined);
     migrateBookSessionMock.mockImplementation(async (_root: string, _sessionId: string, bookId: string) => ({
@@ -2667,6 +2720,36 @@ describe("createStudioServer daemon lifecycle", () => {
         }),
       ]),
     );
+  });
+
+  it("parses Chinese chapter limits from volume outline during precheck generation", async () => {
+    const storyDir = join(root, "books", "demo-book", "story");
+    await mkdir(storyDir, { recursive: true });
+    await writeFile(
+      join(storyDir, "volume_outline.md"),
+      "# 卷纲\n\n### 第一卷：风起（1-十章）\n\n共十章推进主线。",
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/precheck-generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 9, count: 4 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      startChapter: 9,
+      endChapter: 10,
+      count: 2,
+      chapters: [
+        { chapterNumber: 9, hasPlan: false },
+        { chapterNumber: 10, hasPlan: false },
+      ],
+    });
   });
 
   it("uses rollback semantics for chapter rejection instead of only flipping status", async () => {
@@ -6871,7 +6954,38 @@ describe("createStudioServer daemon lifecycle", () => {
         code: "AGENT_TOOL_CALL_BLOCKED",
       },
     });
-    expect(persistBookSessionMock).not.toHaveBeenCalled();
+    expect(appendBookSessionMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "agent-session-1",
+        bookId: "demo-book",
+        title: null,
+        messages: [],
+      }),
+      expect.objectContaining({
+        role: "user",
+        content: "请检查当前作品状态",
+      }),
+    );
+    expect(persistBookSessionMock).toHaveBeenCalledTimes(2);
+    expect(persistBookSessionMock.mock.calls[0]?.[1]).toMatchObject({
+      sessionId: "agent-session-1",
+      title: expect.any(String),
+      messages: [
+        expect.objectContaining({
+          role: "user",
+          content: "请检查当前作品状态",
+        }),
+      ],
+    });
+    expect(persistBookSessionMock.mock.calls[1]?.[1]).toMatchObject({
+      sessionId: "agent-session-1",
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("✗ 当前模型返回了被拦截的工具调用"),
+        }),
+      ]),
+    });
   });
 
   it("returns AGENT_WRITE_NOT_PERSISTED when writer succeeds but no chapter index is added", async () => {
@@ -7628,6 +7742,38 @@ describe("createStudioServer daemon lifecycle", () => {
         code: "AGENT_ERROR",
         message: "boom",
       },
+    });
+    expect(appendBookSessionMessageMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "agent-session-1",
+        bookId: "demo-book",
+        title: null,
+        messages: [],
+      }),
+      expect.objectContaining({
+        role: "user",
+        content: "continue",
+      }),
+    );
+    expect(persistBookSessionMock).toHaveBeenCalledTimes(2);
+    expect(persistBookSessionMock.mock.calls[0]?.[1]).toMatchObject({
+      sessionId: "agent-session-1",
+      title: "continue",
+      messages: [
+        expect.objectContaining({
+          role: "user",
+          content: "continue",
+        }),
+      ],
+    });
+    expect(persistBookSessionMock.mock.calls[1]?.[1]).toMatchObject({
+      sessionId: "agent-session-1",
+      messages: expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.stringContaining("✗ boom"),
+        }),
+      ]),
     });
   });
 

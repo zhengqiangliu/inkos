@@ -5,6 +5,7 @@ import type { LengthSpec } from "../models/length-governance.js";
 import type { ChapterPlan } from "../models/chapter-plan.js";
 import { buildFanficCanonSection, buildCharacterVoiceProfiles, buildFanficModeInstructions } from "./fanfic-prompt-sections.js";
 import { buildEnglishCoreRules, buildEnglishAntiAIRules, buildEnglishCharacterMethod, buildEnglishPreWriteChecklist, buildEnglishGenreIntro } from "./en-prompt-sections.js";
+import { formatAuditDimensionsPreview } from "./audit-dimensions.js";
 import { buildLengthSpec } from "../utils/length-metrics.js";
 
 export interface FanficContext {
@@ -90,14 +91,15 @@ export function buildWriterSystemPrompt(
   const resolvedLengthSpec = lengthSpec ?? buildLengthSpec(book.chapterWordCount, isEnglish ? "en" : "zh");
 
   const outputSection = mode === "creative"
-    ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec, chapterPlan)
-    : buildOutputFormat(book, genreProfile, resolvedLengthSpec, chapterPlan);
+    ? buildCreativeOutputFormat(book, genreProfile, resolvedLengthSpec, isEnglish, chapterPlan)
+    : buildOutputFormat(book, genreProfile, resolvedLengthSpec, isEnglish, chapterPlan);
   const useOpeningThreeChaptersRules = shouldInjectOpeningThreeChaptersRules(
     chapterNumber,
     bookRules,
     governed,
   );
   const chapterPlanBlock = chapterPlan ? buildChapterPlanBlock(chapterPlan, isEnglish) : "";
+  const auditPreviewBlock = buildAuditDimensionsPreview(genreProfile, bookRules, isEnglish);
 
   const sections = isEnglish
     ? [
@@ -116,8 +118,10 @@ export function buildWriterSystemPrompt(
         fanficContext ? buildFanficCanonSection(fanficContext.fanficCanon, fanficContext.fanficMode) : "",
         fanficContext ? buildCharacterVoiceProfiles(fanficContext.fanficCanon) : "",
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
-        !governed ? buildEnglishPreWriteChecklist(book, genreProfile) : "",
+        governed ? buildGovernedPreWriteChecklist(book, genreProfile) : buildEnglishPreWriteChecklist(book, genreProfile),
+        buildPostWriteGuardrails(book, genreProfile, true),
         chapterPlanBlock,
+        auditPreviewBlock,
         outputSection,
       ]
     : [
@@ -141,8 +145,10 @@ export function buildWriterSystemPrompt(
         fanficContext ? buildFanficCanonSection(fanficContext.fanficCanon, fanficContext.fanficMode) : "",
         fanficContext ? buildCharacterVoiceProfiles(fanficContext.fanficCanon) : "",
         fanficContext ? buildFanficModeInstructions(fanficContext.fanficMode, fanficContext.allowedDeviations) : "",
-        !governed ? buildPreWriteChecklist(book, genreProfile) : "",
+        governed ? buildGovernedPreWriteChecklist(book, genreProfile) : buildPreWriteChecklist(book, genreProfile),
+        buildPostWriteGuardrails(book, genreProfile, false),
         chapterPlanBlock,
+        auditPreviewBlock,
         outputSection,
       ];
 
@@ -582,6 +588,53 @@ function buildPreWriteChecklist(book: BookConfig, gp: GenreProfile): string {
   return lines.join("\n");
 }
 
+function buildGovernedPreWriteChecklist(book: BookConfig, gp: GenreProfile): string {
+  let idx = 1;
+  const lines = [
+    "## Governed Pre-Write Checklist",
+    "",
+    `${idx++}. 本章必须推进哪个卷纲节点？`,
+    `${idx++}. 本章的主冲突是什么，谁在施压？`,
+    `${idx++}. 本章结束时读者要记住什么钩子？`,
+    `${idx++}. 需要回收的伏笔有哪些？`,
+    `${idx++}. 当前视角能知道什么，不能知道什么？`,
+  ];
+
+  if (gp.numericalSystem) {
+    lines.push(`${idx++}. 本章是否会改变资源、数值、地位或账本？`);
+  }
+
+  if (book.chapterWordCount > 0) {
+    lines.push(`${idx++}. 字数目标是否仍在允许区间内？`);
+  }
+
+  return lines.join("\n");
+}
+
+function buildPostWriteGuardrails(book: BookConfig, gp: GenreProfile, isEnglish: boolean): string {
+  const heading = isEnglish ? "## Post-Write Guardrails" : "## 写后硬门禁镜像";
+  const lines = isEnglish
+    ? [
+        "No analytical/report language in prose; keep planning terms out of chapter text.",
+        "Do not put chapter numbers, hook_id labels, or ledger-like numbers into the body text.",
+        "Keep suddenness words rare; use actions and sensory detail instead of repeated 'suddenly' beats.",
+        "Use concrete reactions instead of crowd-shock shorthand in multi-character scenes.",
+        "Keep dialogue punctuation consistent if book rules enforce a quote policy.",
+        "Avoid one-line paragraph chains; keep action, observation, and reaction in readable blocks.",
+      ]
+    : [
+        "正文中不要出现分析报告式语言或推理框架词，留在 PRE_WRITE_CHECK 里想，别写进正文。",
+        "正文中不要出现章节号、hook_id、账本式数字或控制标签，数值结算只放 POST_SETTLEMENT。",
+        "转折/惊讶词少用，遇到突然性改用动作、感官和具体反应，不要反复写仿佛、忽然、竟然、猛地、不禁、宛如。",
+        "群像反应要具体到1-2个角色，不要写全场震惊、所有人惊呼这类总括句。",
+        "如果 book_rules 规定了对白引号体例，整章保持一致，不要混用。",
+        "不要把动作和反应切成一串单行短段，段落要能承载完整动作链。",
+        gp.numericalSystem ? "涉及资源/数值/账本变化时，正文只写结果，不写结算表。" : "不需要结算表时，也不要把控制信息塞进正文。",
+      ];
+
+  return [heading, "", ...lines.map((line, index) => `${index + 1}. ${line}`)].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Creative-only output format (no settlement blocks)
 // ---------------------------------------------------------------------------
@@ -597,11 +650,15 @@ function buildChapterPlanRow(plan: ChapterPlan, isEnglish: boolean): string {
   return `| 分章设计 | ${parts.join(" / ")} | 与分章设计对齐 |\n`;
 }
 
-function buildCreativeOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec, chapterPlan?: ChapterPlan): string {
+function buildAuditDimensionsPreview(gp: GenreProfile, bookRules: BookRules | null, isEnglish: boolean): string {
+  return formatAuditDimensionsPreview(gp, bookRules, isEnglish);
+}
+
+function buildCreativeOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec, isEnglish: boolean, chapterPlan?: ChapterPlan): string {
   const resourceRow = gp.numericalSystem
     ? "| 当前资源总量 | X | 与账本一致 |\n| 本章预计增量 | +X（来源） | 无增量写+0 |"
     : "";
-  const chapterDesignRow = chapterPlan ? buildChapterPlanRow(chapterPlan, false) : "";
+  const chapterDesignRow = chapterPlan ? buildChapterPlanRow(chapterPlan, isEnglish) : "";
 
   const preWriteTable = `=== PRE_WRITE_CHECK ===
 （必须输出Markdown表格）
@@ -620,7 +677,13 @@ ${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） |
 ${preWriteTable}
 
 === CHAPTER_TITLE ===
-(章节标题，不含"第X章"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)
+${chapterPlan
+    ? isEnglish
+      ? `(Chapter title. MUST use the chapter name from Chapter Design Constraints: "${chapterPlan.chapterName}". Do not include "Chapter X" prefix. Must differ from existing chapter titles.)`
+      : `(章节标题，不含"第X章"。必须使用分章设计中指定的章节名称："${chapterPlan.chapterName}"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)`
+    : isEnglish
+      ? `(Chapter title, no "Chapter X" prefix. Must differ from existing chapter titles; avoid repeating similar titles if recent title history or high-frequency title words are provided.)`
+      : `(章节标题，不含"第X章"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)`}
 
 === CHAPTER_CONTENT ===
 (正文内容，目标${lengthSpec.target}字，允许区间${lengthSpec.softMin}-${lengthSpec.softMax}字)
@@ -633,11 +696,11 @@ ${preWriteTable}
 // Output format
 // ---------------------------------------------------------------------------
 
-function buildOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec, chapterPlan?: ChapterPlan): string {
+function buildOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: LengthSpec, isEnglish: boolean, chapterPlan?: ChapterPlan): string {
   const resourceRow = gp.numericalSystem
     ? "| 当前资源总量 | X | 与账本一致 |\n| 本章预计增量 | +X（来源） | 无增量写+0 |"
     : "";
-  const chapterDesignRow = chapterPlan ? buildChapterPlanRow(chapterPlan, false) : "";
+  const chapterDesignRow = chapterPlan ? buildChapterPlanRow(chapterPlan, isEnglish) : "";
 
   const preWriteTable = `=== PRE_WRITE_CHECK ===
 （必须输出Markdown表格）
@@ -674,7 +737,13 @@ ${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） |
 ${preWriteTable}
 
 === CHAPTER_TITLE ===
-(章节标题，不含"第X章"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)
+${chapterPlan
+    ? isEnglish
+      ? `(Chapter title. MUST use the chapter name from Chapter Design Constraints: "${chapterPlan.chapterName}". Do not include "Chapter X" prefix. Must differ from existing chapter titles.)`
+      : `(章节标题，不含"第X章"。必须使用分章设计中指定的章节名称："${chapterPlan.chapterName}"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)`
+    : isEnglish
+      ? `(Chapter title, no "Chapter X" prefix. Must differ from existing chapter titles; avoid repeating similar titles if recent title history or high-frequency title words are provided.)`
+      : `(章节标题，不含"第X章"。标题必须与已有章节标题不同，不要重复使用相同或相似的标题；若提供了 recent title history 或高频标题词，必须主动避开重复词根和高频意象)`}
 
 === CHAPTER_CONTENT ===
 (正文内容，目标${lengthSpec.target}字，允许区间${lengthSpec.softMin}-${lengthSpec.softMax}字)

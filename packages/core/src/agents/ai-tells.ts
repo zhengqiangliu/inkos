@@ -55,7 +55,7 @@ export function analyzeAITells(content: string, language: AITellLanguage = "zh")
       const cv = stdDev / mean;
       if (cv < 0.15) {
         issues.push({
-          severity: "warning",
+          severity: "info",
           category: isEnglish ? "Paragraph uniformity" : "段落等长",
           description: isEnglish
             ? `Paragraph-length coefficient of variation is only ${cv.toFixed(3)} (threshold <0.15), which suggests unnaturally uniform paragraph sizing`
@@ -80,7 +80,7 @@ export function analyzeAITells(content: string, language: AITellLanguage = "zh")
     const hedgeDensity = hedgeCount / (totalChars / 1000);
     if (hedgeDensity > 3) {
       issues.push({
-        severity: "warning",
+        severity: "info",
         category: isEnglish ? "Hedge density" : "套话密度",
         description: isEnglish
           ? `Hedge-word density is ${hedgeDensity.toFixed(1)} per 1k characters (threshold >3), making the prose sound overly tentative`
@@ -109,7 +109,7 @@ export function analyzeAITells(content: string, language: AITellLanguage = "zh")
       .map(([word, count]) => `"${word}"×${count}`)
       .join(joiner);
     issues.push({
-      severity: "warning",
+      severity: "info",
       category: isEnglish ? "Formulaic transitions" : "公式化转折",
       description: isEnglish
         ? `Transition words repeat too often: ${detail}. Reusing the same transition pattern 3+ times creates a formulaic AI texture`

@@ -17,6 +17,9 @@ const CRITICAL_ISSUE: AuditIssue = {
   category: "continuity",
   description: "Fix the broken continuity",
   suggestion: "Repair the contradiction",
+  issueId: "ISSUE-07",
+  dimensionId: "continuity",
+  excerpt: "The scene jumps without transition.",
 };
 
 describe("ReviserAgent", () => {
@@ -294,7 +297,7 @@ describe("ReviserAgent", () => {
         "他把手按在潮冷的门框上，没有出声。",
         "更远处传来极轻的脚步回响，又很快断掉。",
       ].join("\n"));
-      expect(result.fixedIssues).toEqual(["[ISSUE-01] - 收紧了开头动作句。"]);
+      expect(result.fixedIssues).toEqual(["[ISSUE-07] - 收紧了开头动作句。"]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -352,8 +355,9 @@ describe("ReviserAgent", () => {
       const userPrompt = messages?.[1]?.content ?? "";
 
       expect(systemPrompt).toContain("FIXED_ISSUES");
-      expect(systemPrompt).toContain("[ISSUE-XX]");
-      expect(userPrompt).toContain("[ISSUE-01]");
+      expect(systemPrompt).toContain("优先沿用原 issueId");
+      expect(userPrompt).toContain("[ISSUE-07]");
+      expect(userPrompt).toContain("[continuity]");
       expect(userPrompt).toContain("[critical]");
     } finally {
       await rm(root, { recursive: true, force: true });

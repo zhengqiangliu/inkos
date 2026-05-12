@@ -14,11 +14,13 @@ import {
   loadProjectConfig,
   loadProjectSession,
   processProjectInteractionRequest,
+  readVolumeMap,
   resolveSessionActiveBook,
   listBookSessions,
   loadBookSession,
   persistBookSession,
   appendBookSessionMessage,
+  upsertBookSessionMessage,
   createAndPersistBookSession,
   renameBookSession,
   deleteBookSession,
@@ -37,6 +39,7 @@ import {
   chatCompletion,
   buildExportArtifact,
   GLOBAL_ENV_PATH,
+  extractChapterLimitFromOutline,
   type AgentContext,
   type ResolvedModel,
   type PipelineConfig,
@@ -872,8 +875,6 @@ const STRUCTURAL_AUDIT_SIGNALS = [
   "伏笔债务",
   "paragraph-shape",
   "读者期待管理",
-  "篇幅控制",
-  "length control",
   "资源账本",
   "ledger",
   "状态卡",
@@ -885,6 +886,14 @@ function hasStructuralAuditSignals(audit: Pick<NormalizedAuditDraftSummary, "iss
   if (audit.issueTexts.length === 0) return false;
   const merged = audit.issueTexts.join("\n").toLowerCase();
   return STRUCTURAL_AUDIT_SIGNALS.some((signal) => merged.includes(signal));
+}
+
+function isLengthOnlyIssueTexts(issueTexts: ReadonlyArray<string>): boolean {
+  if (issueTexts.length === 0) return false;
+  return issueTexts.every((text) => {
+    const lower = text.toLowerCase();
+    return lower.includes("篇幅控制") || lower.includes("length control");
+  });
 }
 
 function resolveAdaptiveMaxReviseRounds(
@@ -912,7 +921,11 @@ function resolveAdaptiveReviseMode(
 ): AutoReviseMode {
   if (options?.forceRewrite) return "rewrite";
   if (configuredMode !== "spot-fix") return configuredMode;
-  if (!hasStructuralAuditSignals(audit)) return "spot-fix";
+  if (!hasStructuralAuditSignals(audit)) {
+    // Pure word-count deficiency: use rewrite (broader than spot-fix but lighter than rework)
+    if (isLengthOnlyIssueTexts(audit.issueTexts)) return "rewrite";
+    return "spot-fix";
+  }
   return reviseRound <= 1 ? "rework" : "rewrite";
 }
 
@@ -1961,8 +1974,180 @@ interface CollectedToolExec {
   result?: string;
   error?: string;
   stages?: Array<{ label: string; status: "pending" | "completed" }>;
+  batch?: BatchProgressState;
+  autoReview?: UnifiedReviewLoopAutoReviewPayload;
+  previewText?: string;
+  previewChapterNumber?: number;
+  previewKind?: "chapter" | "patch";
   startedAt: number;
   completedAt?: number;
+}
+
+type PersistedToolExecution = NonNullable<Parameters<typeof upsertBookSessionMessage>[1]["toolExecutions"]>[number];
+type PersistedToolExecutionAutoReview = NonNullable<PersistedToolExecution["autoReview"]>;
+
+function serializeCollectedToolExecutionAutoReview(
+  autoReview: UnifiedReviewLoopAutoReviewPayload,
+): PersistedToolExecutionAutoReview {
+  const reviseRoundsUsed = Math.max(0, Math.trunc(Number(autoReview.reviseRoundsUsed ?? 0)));
+  const auditRoundsRaw = Number(autoReview.auditRounds);
+  const round = Number.isFinite(auditRoundsRaw) && auditRoundsRaw > 0
+    ? Math.max(1, Math.trunc(auditRoundsRaw))
+    : Math.max(1, reviseRoundsUsed + 1);
+  const maxRounds = Math.max(0, Math.trunc(Number(autoReview.maxReviseRounds ?? 0)));
+  const finalState = autoReview.finalState === "passed"
+    ? "passed"
+    : autoReview.finalState === "failed-max-rounds"
+      ? "failed-max-rounds"
+      : "failed-single-audit";
+
+  return {
+    enabled: Boolean(autoReview.enabled),
+    phase: reviseRoundsUsed > 0 ? "revise" : "audit",
+    round,
+    maxRounds,
+    final: true,
+    state: finalState,
+    ...(typeof autoReview.stopReason === "string" && autoReview.stopReason.trim().length > 0
+      ? { stopReason: autoReview.stopReason.trim() }
+      : {}),
+    ...(typeof autoReview.reviseRoundsUsed === "number"
+      ? { reviseRoundsUsed }
+      : {}),
+    passed: finalState === "passed",
+  };
+}
+
+function serializeCollectedToolExecution(
+  execution: CollectedToolExec,
+): PersistedToolExecution {
+  return {
+    id: execution.id,
+    tool: execution.tool,
+    ...(execution.agent ? { agent: execution.agent } : {}),
+    label: execution.label,
+    status: execution.status,
+    ...(execution.args ? { args: execution.args } : {}),
+    ...(execution.result ? { result: execution.result } : {}),
+    ...(execution.error ? { error: execution.error } : {}),
+    ...(execution.stages ? { stages: execution.stages } : {}),
+    ...(execution.logs ? { logs: execution.logs } : {}),
+    ...(execution.previewText ? { previewText: execution.previewText } : {}),
+    ...(typeof execution.previewChapterNumber === "number" ? { previewChapterNumber: execution.previewChapterNumber } : {}),
+    ...(execution.previewKind === "patch" ? { previewKind: "patch" } : {}),
+    ...(execution.batch ? { batch: execution.batch } : {}),
+    ...(execution.autoReview ? { autoReview: serializeCollectedToolExecutionAutoReview(execution.autoReview) } : {}),
+    startedAt: execution.startedAt,
+    ...(typeof execution.completedAt === "number" ? { completedAt: execution.completedAt } : {}),
+  };
+}
+
+function serializeCollectedToolExecutions(
+  executions: ReadonlyArray<CollectedToolExec>,
+): PersistedToolExecution[] {
+  return executions.map((execution) => serializeCollectedToolExecution(execution));
+}
+
+type CheckpointMessagePart =
+  | { type: "thinking"; content: string; streaming: boolean }
+  | { type: "text"; content: string }
+  | { type: "tool"; execution: CollectedToolExec };
+
+function findRunningCheckpointToolPart(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+): (CheckpointMessagePart & { type: "tool" }) | undefined {
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    const part = parts[i];
+    if (part?.type === "tool" && part.execution.status === "running") {
+      return part;
+    }
+  }
+  return undefined;
+}
+
+function appendCheckpointTextPart(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+  text: string,
+): CheckpointMessagePart[] {
+  if (!text) return [...parts];
+  const next = [...parts];
+  const last = next[next.length - 1];
+  if (last?.type === "text") {
+    next[next.length - 1] = { ...last, content: `${last.content}${text}` };
+    return next;
+  }
+  next.push({ type: "text", content: text });
+  return next;
+}
+
+function appendCheckpointThinkingDelta(
+  parts: ReadonlyArray<CheckpointMessagePart>,
+  text: string,
+  streaming = true,
+): CheckpointMessagePart[] {
+  if (!text) return [...parts];
+  const next = [...parts];
+  const last = next[next.length - 1];
+  if (last?.type === "thinking") {
+    next[next.length - 1] = {
+      ...last,
+      content: `${last.content}${text}`,
+      streaming: last.streaming || streaming,
+    };
+    return next;
+  }
+  next.push({ type: "thinking", content: text, streaming });
+  return next;
+}
+
+function deriveCheckpointFlat(parts: ReadonlyArray<CheckpointMessagePart>): {
+  content: string;
+  thinking?: string;
+  thinkingStreaming?: boolean;
+  toolExecutions?: CollectedToolExec[];
+} {
+  let content = "";
+  let thinking = "";
+  let thinkingStreaming = false;
+  const toolExecutions: CollectedToolExec[] = [];
+
+  for (const part of parts) {
+    if (part.type === "thinking") {
+      if (thinking) thinking += "\n\n---\n\n";
+      thinking += part.content;
+      if (part.streaming) thinkingStreaming = true;
+      continue;
+    }
+    if (part.type === "text") {
+      content += part.content;
+      continue;
+    }
+    toolExecutions.push(part.execution);
+  }
+
+  return {
+    content,
+    ...(thinking ? { thinking } : {}),
+    ...(thinkingStreaming ? { thinkingStreaming: true } : {}),
+    ...(toolExecutions.length > 0 ? { toolExecutions } : {}),
+  };
+}
+
+function buildCheckpointAssistantMessage(args: {
+  timestamp: number;
+  parts: ReadonlyArray<CheckpointMessagePart>;
+}): Parameters<typeof upsertBookSessionMessage>[1] {
+  const flat = deriveCheckpointFlat(args.parts);
+  return {
+    role: "assistant",
+    content: flat.content,
+    timestamp: args.timestamp,
+    ...(flat.thinking ? { thinking: flat.thinking } : {}),
+    ...(flat.thinkingStreaming ? { thinkingStreaming: true } : {}),
+    ...(flat.toolExecutions && flat.toolExecutions.length > 0
+      ? { toolExecutions: serializeCollectedToolExecutions(flat.toolExecutions) }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2054,10 +2239,14 @@ function formatAuditReportForChat(report: AuditToolReport): string {
 
 interface BatchProgressState {
   batchId: string;
+  status: "running" | "completed" | "failed";
   total: number;
   completed: number;
-  startedAt: number;
+  elapsedMs: number;
   currentChapter?: number;
+  currentWords?: number;
+  failedChapterNumber?: number;
+  error?: string;
 }
 
 interface ChapterIndexEntryLike {
@@ -5754,6 +5943,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const abortController = new AbortController();
     registerInFlightAgentRun(sessionId, runId, abortController);
+    let persistedBookSession: Awaited<ReturnType<typeof loadBookSession>> = null;
+    let assistantCheckpointTimestamp = Date.now() + 1;
+    const persistAssistantErrorResponse = async (message: string): Promise<void> => {
+      if (!persistedBookSession) return;
+      persistedBookSession = appendBookSessionMessage(persistedBookSession, {
+        role: "assistant",
+        content: `✗ ${message}`,
+        timestamp: assistantCheckpointTimestamp + 1,
+      });
+      await persistBookSession(root, persistedBookSession);
+    };
 
     if (writerKernelIntent && activeBookId) {
       writeIndexBefore = await state.loadChapterIndex(activeBookId).catch(() => [] as ChapterIndexEntryLike[]);
@@ -5771,6 +5971,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         throw new ApiError(404, "SESSION_NOT_FOUND", `Session not found: ${sessionId}`);
       }
       let bookSession = loadedBookSession;
+      persistedBookSession = bookSession;
       const streamSessionId = loadedBookSession.sessionId;
       const emitAgentLog = (
         message: string,
@@ -5844,6 +6045,27 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const effectiveInstruction = explicitAuditChapter !== null
         ? buildAuditInstruction(instruction, explicitAuditChapter)
         : instruction;
+
+      // Persist the user's turn immediately so the session history survives
+      // later model/tool failures, aborts, or write-integrity rejections.
+      const userMessageTimestamp = Date.now();
+      bookSession = appendBookSessionMessage(bookSession, {
+        role: "user",
+        content: instruction,
+        timestamp: userMessageTimestamp,
+      });
+      persistedBookSession = bookSession;
+      assistantCheckpointTimestamp = userMessageTimestamp + 1;
+      if (bookSession.title === null) {
+        const oneLine = instruction.trim().replace(/\s+/g, " ");
+        const title = oneLine.length > 20 ? `${oneLine.slice(0, 20)}…` : oneLine;
+        if (title) {
+          bookSession = { ...bookSession, title };
+          persistedBookSession = bookSession;
+          broadcast("session:title", { sessionId: bookSession.sessionId, title });
+        }
+      }
+      await persistBookSession(root, bookSession);
 
       // Resolve model — multi-service resolution
       let resolvedModel: ResolvedModel["model"] | undefined;
@@ -5968,6 +6190,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       // Run pi-agent session
       const collectedToolExecs: CollectedToolExec[] = [];
       const batchProgressByToolCallId = new Map<string, BatchProgressState>();
+      const batchStartedAt = new Map<string, number>();
       let sawDraftDelta = false;
       let sawWriterToolStart = false;
       let sawWriterToolSuccess = false;
@@ -6032,10 +6255,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
         const state: BatchProgressState = {
           batchId: `${runId}:${toolCallId}`,
+          status: "running",
           total,
           completed: 0,
-          startedAt: Date.now(),
+          elapsedMs: 0,
         };
+        batchStartedAt.set(toolCallId, Date.now());
         batchProgressByToolCallId.set(toolCallId, state);
         broadcast("batch:progress", {
           sessionId: streamSessionId,
@@ -6071,7 +6296,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           status,
           total: state.total,
           completed: state.completed,
-          elapsedMs: elapsedSince(state.startedAt),
+          elapsedMs: elapsedSince(batchStartedAt.get(toolCallId) ?? Date.now()),
           ...(typeof options?.currentChapter === "number" ? { currentChapter: options.currentChapter } : {}),
           ...(typeof options?.currentWords === "number" ? { currentWords: options.currentWords } : {}),
           ...(typeof options?.failedChapterNumber === "number" ? { failedChapterNumber: options.failedChapterNumber } : {}),
@@ -9187,6 +9412,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       ) {
         const message = "当前模型返回了被拦截的工具调用，未执行实际操作。请切换支持工具调用的模型，或使用确定性指令（如“写下一章”“写第19章”“修复第19章索引”）。";
         broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+        await persistAssistantErrorResponse(message);
         return c.json(
           {
             error: { code: "AGENT_TOOL_CALL_BLOCKED", message },
@@ -9214,6 +9440,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           if (degradedPrecondition) {
             const message = "写作被阻止：最新章节处于状态降级（state-degraded）。请先修复该章状态后再继续。";
             broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+            await persistAssistantErrorResponse(message);
             return c.json(
               {
                 error: { code: "AGENT_WRITE_DEGRADED", message },
@@ -9237,6 +9464,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             ? "写作流程执行失败，未完成章节落盘。"
             : "未触发写作工具，章节尚未生成。";
           broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+          await persistAssistantErrorResponse(message);
           return c.json(
             {
               error: { code: "AGENT_WRITE_NOT_EXECUTED", message },
@@ -9262,6 +9490,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           if (degradedPrecondition && writePersistence.addedChapterNumbers.length === 0) {
             const message = "写作被阻止：最新章节处于状态降级（state-degraded）。请先修复该章状态后再继续。";
             broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+            await persistAssistantErrorResponse(message);
             return c.json(
               {
                 error: { code: "AGENT_WRITE_DEGRADED", message },
@@ -9292,6 +9521,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             ? "写作流程结束，但未检测到新章节写入索引。"
             : `写作流程结束，但第${writePersistence.missingChapterFiles.join("、")}章正文文件未落盘。`;
           broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: message });
+          await persistAssistantErrorResponse(message);
           return c.json(
             {
               error: { code: "AGENT_WRITE_NOT_PERSISTED", message },
@@ -9366,22 +9596,6 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
       }
 
-      // Persist user + assistant messages to BookSession
-      bookSession = appendBookSessionMessage(bookSession, {
-        role: "user",
-        content: instruction,
-        timestamp: Date.now(),
-      });
-      // 第一条用户消息就是 session 的标题：如果 title 还是 null，用消息内容（单行、≤20字）写入。
-      // 后续消息不覆盖；用户手动改名通过 renameBookSession 覆盖。
-      if (bookSession.title === null) {
-        const oneLine = instruction.trim().replace(/\s+/g, " ");
-        const title = oneLine.length > 20 ? `${oneLine.slice(0, 20)}…` : oneLine;
-        if (title) {
-          bookSession = { ...bookSession, title };
-          broadcast("session:title", { sessionId: bookSession.sessionId, title });
-        }
-      }
       let responseText = result.responseText?.trim() ?? "";
       if (explicitAuditChapter !== null) {
         if (!explicitAuditToolCalled) {
@@ -9404,13 +9618,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           role: "assistant",
           content: responseText,
           ...(thinking ? { thinking } : {}),
-          ...(collectedToolExecs.length > 0 ? { toolExecutions: collectedToolExecs } : {}),
+          ...(collectedToolExecs.length > 0
+            ? { toolExecutions: serializeCollectedToolExecutions(collectedToolExecs) }
+            : {}),
           timestamp: Date.now() + 1,
         });
+        persistedBookSession = bookSession;
       }
       if (!responseText) {
         if (explicitAuditChapter !== null) {
           const emptyAuditMessage = `第${explicitAuditChapter}章审计未返回文本，请检查模型工具调用链路后重试。`;
+          await persistAssistantErrorResponse(emptyAuditMessage);
           return c.json({
             error: { code: "AGENT_EMPTY_RESPONSE", message: emptyAuditMessage },
             response: emptyAuditMessage,
@@ -9446,6 +9664,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               content: fallback.content,
               timestamp: Date.now() + 1,
             });
+            persistedBookSession = bookSession;
             await persistBookSession(root, bookSession);
             return c.json({
               response: fallback.content,
@@ -9475,6 +9694,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           );
         } catch (probeError) {
           const probeMessage = probeError instanceof Error ? probeError.message : String(probeError);
+          await persistAssistantErrorResponse(probeMessage);
           return c.json({
             error: { code: "AGENT_EMPTY_RESPONSE", message: probeMessage },
             response: probeMessage,
@@ -9483,6 +9703,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
 
         const emptyMessage = "模型未返回文本内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。";
+        await persistAssistantErrorResponse(emptyMessage);
         return c.json({
           error: { code: "AGENT_EMPTY_RESPONSE", message: emptyMessage },
           response: emptyMessage,
@@ -9533,6 +9754,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             const migratedSession = await migrateBookSession(root, bookSession.sessionId, latestBook);
             if (migratedSession) {
               bookSession = migratedSession;
+              persistedBookSession = migratedSession;
             }
           } catch (e) {
             if (!(e instanceof SessionAlreadyMigratedError)) {
@@ -9588,6 +9810,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       });
     } catch (e) {
       if (e instanceof ApiError) {
+        await persistAssistantErrorResponse(e.message);
         throw e;
       }
       if (e instanceof SessionAlreadyMigratedError) {
@@ -9598,6 +9821,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       broadcast("agent:error", { instruction, activeBookId, sessionId, runId, error: msg });
 
       if (abortController.signal.aborted || /abort/i.test(msg)) {
+        await persistAssistantErrorResponse("已停止当前对话");
         return c.json(
           {
             error: { code: "AGENT_ABORTED", message: "已停止当前对话" },
@@ -9619,6 +9843,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       const upstreamFailure = classifyAgentUpstreamFailure(e);
       if (upstreamFailure) {
+        await persistAssistantErrorResponse(upstreamFailure.message);
         return c.json(
           {
             error: { code: upstreamFailure.code, message: upstreamFailure.message },
@@ -9629,6 +9854,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         );
       }
 
+      await persistAssistantErrorResponse(msg);
       return c.json(
         { error: { code: "AGENT_ERROR", message: msg }, runId },
         500,
@@ -10794,13 +11020,23 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   async function readOutlineMaxChapters(bookDir: string): Promise<number | null> {
     try {
-      const outline = await readFile(join(bookDir, "story", "volume_outline.md"), "utf-8");
-      const match = outline.match(/共\s*(\d+)\s*章/);
-      if (match) return parseInt(match[1]!, 10);
-      return null;
+      const outline = await readVolumeMap(bookDir, "");
+      return extractChapterLimitFromOutline(outline);
     } catch {
       return null;
     }
+  }
+
+  async function readRequiredVolumeOutline(bookDir: string): Promise<{
+    readonly volumeOutline: string;
+    readonly outlineChapterLimit: number | null;
+  } | null> {
+    const volumeOutline = (await readVolumeMap(bookDir, "")).trim();
+    if (!volumeOutline) return null;
+    return {
+      volumeOutline,
+      outlineChapterLimit: extractChapterLimitFromOutline(volumeOutline),
+    };
   }
 
   async function createDesignAgent(): Promise<ChapterDesignAgent> {
@@ -10816,24 +11052,28 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return new ChapterDesignAgent(ctx);
   }
 
-  function loadPlansJson(raw: string): { plans: any[]; maxChapter: number } {
-    const data = JSON.parse(raw);
-    const plans = Array.isArray(data.plans) ? data.plans : [];
+  function loadPlansJson(raw: string): { plans: any[]; maxChapter: number; collection: Record<string, unknown> } {
+    const parsed = JSON.parse(raw) as unknown;
+    const collection = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { ...(parsed as Record<string, unknown>) }
+      : {};
+    const plans = Array.isArray(collection.plans) ? collection.plans as any[] : [];
     const maxChapter = plans.reduce((max: number, p: any) => Math.max(max, p.chapterNumber ?? 0), 0);
-    return { plans, maxChapter };
+    return { plans, maxChapter, collection };
   }
 
-  async function trimPlansBeyondOutline(bookDir: string, plansPath: string): Promise<void> {
-    const outlineMax = await readOutlineMaxChapters(bookDir);
-    if (!outlineMax) return;
+  async function trimPlansBeyondLimit(plansPath: string, chapterLimit: number | null): Promise<number[]> {
+    if (!chapterLimit || chapterLimit < 1) return [];
     try {
       const raw = await readFile(plansPath, "utf-8");
-      const { plans } = loadPlansJson(raw);
-      const excess = plans.filter((p: any) => p.chapterNumber > outlineMax);
-      if (excess.length === 0) return;
-      const trimmed = plans.filter((p: any) => p.chapterNumber <= outlineMax);
-      await writeFile(plansPath, JSON.stringify({ plans: trimmed, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+      const { plans, collection } = loadPlansJson(raw);
+      const excess = plans.filter((p: any) => p.chapterNumber > chapterLimit);
+      if (excess.length === 0) return [];
+      const trimmed = plans.filter((p: any) => p.chapterNumber <= chapterLimit);
+      await writeFile(plansPath, JSON.stringify({ ...collection, plans: trimmed, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+      return excess.map((p: any) => Number(p.chapterNumber)).filter((n: number) => Number.isFinite(n) && n > 0);
     } catch { /* file not found or unreadable — nothing to trim */ }
+    return [];
   }
 
   // --- Chapter Plans ---
@@ -10842,7 +11082,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const id = c.req.param("id");
     const bookDir = state.bookDir(id);
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
-    await trimPlansBeyondOutline(bookDir, plansPath);
+    const outlineMax = await readOutlineMaxChapters(bookDir);
+    await trimPlansBeyondLimit(plansPath, outlineMax);
     try {
       const raw = await readFile(plansPath, "utf-8");
       const { plans } = loadPlansJson(raw);
@@ -10861,19 +11102,30 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const bookDir = state.bookDir(id);
     const endChapter = startChapter + count - 1;
 
-    // Validate against outline max chapters
-    const outlineMax = await readOutlineMaxChapters(bookDir);
-    let targetChapters = 200;
-    try {
-      const book = await state.loadBookConfig(id);
-      targetChapters = outlineMax ?? book.targetChapters ?? 200;
-    } catch { /* ignore */ }
-    const effectiveEndChapter = Math.min(endChapter, targetChapters);
-    const effectiveCount = effectiveEndChapter - startChapter + 1;
+    const outlineData = await readRequiredVolumeOutline(bookDir);
+    if (!outlineData) {
+      return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
+    }
+    if (outlineData.outlineChapterLimit == null) {
+      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
+    }
+    const chapterLimit = outlineData.outlineChapterLimit;
+    const effectiveEndChapter = Math.min(endChapter, chapterLimit);
+    if (startChapter > chapterLimit) {
+      return c.json({
+        startChapter,
+        endChapter: chapterLimit,
+        count: 0,
+        chapters: [],
+        hasConflict: false,
+        hasExistingPlan: false,
+      });
+    }
+    const effectiveCount = Math.max(0, effectiveEndChapter - startChapter + 1);
 
     // Trim excess plans beyond outline and load
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
-    await trimPlansBeyondOutline(bookDir, plansPath);
+    await trimPlansBeyondLimit(plansPath, chapterLimit);
     let existingPlans: any[] = [];
     try {
       const raw = await readFile(plansPath, "utf-8");
@@ -10929,12 +11181,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       return c.json({ error: `Book not found: ${e}` }, 404);
     }
-    const outlineMax = await readOutlineMaxChapters(bookDir);
-    const targetChapters = outlineMax ?? book.targetChapters ?? 200;
+    const outlineData = await readRequiredVolumeOutline(bookDir);
+    if (!outlineData) {
+      return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
+    }
+    if (outlineData.outlineChapterLimit == null) {
+      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
+    }
+    const targetChapters = outlineData.outlineChapterLimit;
 
     // Trim excess plans beyond outline and load
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
-    await trimPlansBeyondOutline(bookDir, plansPath);
+    await trimPlansBeyondLimit(plansPath, targetChapters);
     let existingPlans: any[] = [];
     try {
       const raw = await readFile(plansPath, "utf-8");
@@ -10982,8 +11240,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       const plans = await agent.designBatch({
         book,
         bookDir,
+        volumeOutline: outlineData.volumeOutline,
         startChapter,
         count: clampedCount,
+        outlineChapterLimit: targetChapters,
         existingPlans: existingPlans.filter((p: any) => p.chapterNumber < startChapter),
         language: book.language,
       });
@@ -11004,6 +11264,36 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   });
 
+  app.post("/api/v1/books/:id/chapter-plans/cleanup-overflow", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+
+    let book;
+    try {
+      book = await state.loadBookConfig(id);
+    } catch (e) {
+      return c.json({ error: `Book not found: ${e}` }, 404);
+    }
+
+    const outlineData = await readRequiredVolumeOutline(bookDir);
+    if (!outlineData) {
+      return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
+    }
+    if (outlineData.outlineChapterLimit == null) {
+      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
+    }
+    const chapterLimit = outlineData.outlineChapterLimit;
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    const removedChapters = await trimPlansBeyondLimit(plansPath, chapterLimit);
+
+    return c.json({
+      ok: true,
+      removedChapters,
+      removedCount: removedChapters.length,
+      chapterLimit,
+    });
+  });
+
   app.post("/api/v1/books/:id/chapter-plans/fill-missing", async (c) => {
     const id = c.req.param("id");
     const { startChapter, endChapter } = await c.req.json<{ startChapter: number; endChapter: number }>();
@@ -11016,10 +11306,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       return c.json({ error: `Book not found: ${e}` }, 404);
     }
+    const outlineData = await readRequiredVolumeOutline(bookDir);
+    if (!outlineData) {
+      return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
+    }
+    if (outlineData.outlineChapterLimit == null) {
+      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
+    }
+    const chapterLimit = outlineData.outlineChapterLimit;
+    const effectiveEndChapter = Math.min(endChapter, chapterLimit);
+    if (startChapter > effectiveEndChapter) {
+      return c.json({ ok: true, successChapters: [] });
+    }
 
     // Trim excess plans beyond outline and load
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
-    await trimPlansBeyondOutline(bookDir, plansPath);
+    await trimPlansBeyondLimit(plansPath, chapterLimit);
     let existingPlans: any[] = [];
     try {
       const raw = await readFile(plansPath, "utf-8");
@@ -11029,7 +11331,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     // Find missing chapter numbers
     const plannedNumbers = new Set(existingPlans.map((p: any) => p.chapterNumber));
     const missing: number[] = [];
-    for (let ch = startChapter; ch <= endChapter; ch++) {
+    for (let ch = startChapter; ch <= effectiveEndChapter; ch++) {
       if (!plannedNumbers.has(ch)) missing.push(ch);
     }
     if (missing.length === 0) {
@@ -11062,8 +11364,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         const plans = await agent.designBatch({
           book,
           bookDir,
+          volumeOutline: outlineData.volumeOutline,
           startChapter: range.start,
           count: range.count,
+          outlineChapterLimit: chapterLimit,
           existingPlans: existingPlans.filter((p: any) => p.chapterNumber < range.start),
           language: book.language,
         });
@@ -11105,10 +11409,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       return c.json({ error: `Book not found: ${e}` }, 404);
     }
+    const outlineData = await readRequiredVolumeOutline(bookDir);
+    if (!outlineData) {
+      return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
+    }
+    if (outlineData.outlineChapterLimit == null) {
+      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
+    }
+    const chapterLimit = outlineData.outlineChapterLimit;
+    const effectiveEndChapter = Math.min(endChapter, chapterLimit);
+    if (startChapter > effectiveEndChapter) {
+      return c.json({ ok: true, successChapters: [] });
+    }
 
     // Trim excess plans beyond outline and load
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
-    await trimPlansBeyondOutline(bookDir, plansPath);
+    await trimPlansBeyondLimit(plansPath, chapterLimit);
     let existingPlans: any[] = [];
     try {
       const raw = await readFile(plansPath, "utf-8");
@@ -11123,7 +11439,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const plannedNumbers = new Set(existingPlans.map((p: any) => p.chapterNumber));
     const toBackfill = chapterFiles
       .map((f) => parseChapterFileNumber(f))
-      .filter((n): n is number => n !== null && n >= startChapter && n <= endChapter && !plannedNumbers.has(n))
+      .filter((n): n is number => n !== null && n >= startChapter && n <= effectiveEndChapter && !plannedNumbers.has(n))
       .sort((a, b) => a - b);
 
     if (toBackfill.length === 0) {
@@ -11149,9 +11465,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         const plan = await agent.analyzeAndDesignChapter({
           book,
           bookDir,
+          volumeOutline: outlineData.volumeOutline,
           chapterNumber: ch,
           title,
           content,
+          outlineChapterLimit: chapterLimit,
           language: book.language,
         });
         allPlans.push(plan);

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Send, X } from "lucide-react";
 import { useChatStore } from "../../store/chat";
+import {
+  buildChapterRevisionInstruction,
+  getChapterRevisionModeMeta,
+} from "./chapter-revision-utils";
 
 interface ChapterSelectionToolbarProps {
   readonly bookId: string;
@@ -25,9 +29,9 @@ export function ChapterSelectionToolbar({
   const sendMessage = useChatStore((s) => s.sendMessage);
   const createDraftSession = useChatStore((s) => s.createDraftSession);
 
-  const hasSelection = selectedText.length > 0;
+  const modeMeta = getChapterRevisionModeMeta(selectedText);
+  const hasSelection = modeMeta.mode === "selected";
 
-  // Clear selection on Escape
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === "Escape") onDismiss();
   }, [onDismiss]);
@@ -37,7 +41,6 @@ export function ChapterSelectionToolbar({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
 
-  // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -53,42 +56,36 @@ export function ChapterSelectionToolbar({
       if (!sessionId) {
         sessionId = createDraftSession(bookId);
       }
-      const instruction = hasSelection
-        ? `请对第${chapterNumber}章选中的文本按要求修改，不要改动其他内容：\n\n[选中文本]\n${selectedText}\n\n[要求]\n${brief}`
-        : `请按要求修改第${chapterNumber}章，不要改动其他内容：\n${brief}`;
+      const instruction = buildChapterRevisionInstruction({
+        chapterNumber,
+        selectedText,
+        brief,
+        mode: modeMeta.mode,
+      });
       await sendMessage(sessionId, instruction, bookId);
       setBrief("");
     } finally {
       setSending(false);
     }
-  }, [activeSessionId, bookId, chapterNumber, selectedText, brief, sending, sendMessage, createDraftSession, hasSelection]);
+  }, [activeSessionId, bookId, chapterNumber, brief, createDraftSession, modeMeta.mode, selectedText, sendMessage, sending]);
 
   const canModify = brief.trim().length > 0 && !sending;
   const charCount = selectedText.length;
-  const truncatedPreview = selectedText.length > 120
-    ? `${selectedText.slice(0, 120)}...`
-    : selectedText;
+  const truncatedPreview = selectedText.length > 120 ? `${selectedText.slice(0, 120)}...` : selectedText;
 
   return (
     <div
       ref={popupRef}
-      className="absolute top-12 right-2 z-20 w-[240px] rounded-xl border bg-card shadow-xl overflow-hidden"
+      className="absolute top-12 right-2 z-20 w-[240px] overflow-hidden rounded-xl border border-border/50 bg-card/95 shadow-2xl ring-1 ring-black/5"
     >
-      {/* Header */}
-      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border/20">
+      <div className="flex items-center justify-between gap-2 border-b border-border/25 bg-background/65 px-3 py-2">
         <div className="flex items-center gap-2 min-w-0">
-          {hasSelection ? (
-            <>
-              <span className="text-[10px] uppercase tracking-wider text-primary shrink-0">
-                选中修改
-              </span>
-              <span className="text-[10px] text-muted-foreground/60 tabular-nums">
-                {charCount} 字
-              </span>
-            </>
-          ) : (
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/80 shrink-0">
-              全文修改
+          <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide ${modeMeta.chipClassName}`}>
+            {modeMeta.label}
+          </span>
+          {hasSelection && (
+            <span className="text-[10px] text-muted-foreground/60 tabular-nums">
+              {charCount} 字
             </span>
           )}
         </div>
@@ -104,16 +101,26 @@ export function ChapterSelectionToolbar({
         )}
       </div>
 
-      {/* Selected text preview (selection mode only) */}
-      {hasSelection && (
-        <div className="px-3 pt-2 pb-1">
-          <p className="text-[11px] text-foreground/70 leading-5 line-clamp-2 break-words">
-            {truncatedPreview}
+      <div className={`h-1 ${hasSelection ? "bg-primary/70" : "bg-border/60"}`} />
+
+      <div className="px-3 pt-2 pb-1">
+        <div className={`rounded-lg border px-2.5 py-2 ${hasSelection ? "border-primary/25 bg-primary/10" : "border-border/25 bg-background/65"}`}>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className={`text-[10px] uppercase tracking-wider ${hasSelection ? "text-primary/80" : "text-muted-foreground/70"}`}>
+              {hasSelection ? "选中内容" : "全文说明"}
+            </span>
+            {hasSelection && (
+              <span className="text-[10px] text-muted-foreground/60 tabular-nums">
+                {charCount} 字
+              </span>
+            )}
+          </div>
+          <p className={`text-[11px] leading-5 ${hasSelection ? "text-foreground/95" : "text-muted-foreground/80"}`}>
+            {hasSelection ? truncatedPreview : "未选中文本时，面板将自动按全文修改。"}
           </p>
         </div>
-      )}
+      </div>
 
-      {/* Modification input */}
       <div className="px-3 pb-2">
         <textarea
           ref={textareaRef}
@@ -122,11 +129,10 @@ export function ChapterSelectionToolbar({
           placeholder={hasSelection ? "输入选中文本的修改要求..." : "输入全文修改要求..."}
           disabled={sending}
           rows={2}
-          className="w-full rounded-lg border border-border/40 bg-background px-2.5 py-1.5 text-[11px] outline-none transition-colors focus:border-primary/40 resize-none disabled:opacity-50 leading-5"
+          className="w-full rounded-lg border border-border/40 bg-background/85 px-2.5 py-1.5 text-[11px] outline-none transition-colors focus:border-primary/40 resize-none disabled:opacity-50 leading-5"
         />
       </div>
 
-      {/* Action buttons */}
       <div className="flex items-center justify-between px-3 pb-2.5">
         {hasSelection && (
           <button

@@ -117,7 +117,9 @@ export interface SessionMessage {
   readonly role: "user" | "assistant" | "system";
   readonly content: string;
   readonly thinking?: string;
+  readonly thinkingStreaming?: boolean;
   readonly audit?: MessageAuditSummary;
+  readonly toolExecutions?: ToolExecution[];
   readonly timestamp: number;
 }
 

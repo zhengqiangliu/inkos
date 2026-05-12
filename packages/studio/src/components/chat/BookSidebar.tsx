@@ -154,6 +154,7 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
   const artifactChapterMeta = useChatStore((s) => s.artifactChapterMeta);
   const artifactEditMode = useChatStore((s) => s.artifactEditMode);
   const closeArtifact = useChatStore((s) => s.closeArtifact);
+  const bookDataVersion = useChatStore((s) => s.bookDataVersion);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
@@ -209,7 +210,7 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
         .catch(() => setContent(null))
         .finally(() => setLoading(false));
     }
-  }, [bookId, artifactFile, artifactChapter, artifactEditMode, isChapter]);
+  }, [bookId, artifactFile, artifactChapter, artifactEditMode, isChapter, bookDataVersion]);
 
   useEffect(() => {
     if (!isChapter || !artifactEditMode || content === null) return;
@@ -599,6 +600,32 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
             onChange={(e) => setEditContent(e.target.value)}
             className="w-full h-full min-h-[300px] bg-transparent text-sm leading-7 px-4 py-3 resize-none outline-none border-0 font-mono"
           />
+        ) : isChapter ? (
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="shrink-0 border-b border-border/20 bg-card/35 px-4 py-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground/75">
+                  章节正文
+                </span>
+                <span className="text-[10px] text-muted-foreground/60">
+                  阅读区
+                </span>
+              </div>
+            </div>
+            <div ref={contentContainerRef} className="flex-1 px-4 py-4 text-sm leading-7">
+              <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
+            </div>
+            <div className="shrink-0 border-t border-border/20 bg-secondary/20 px-4 py-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground/75">
+                  AI 修订区
+                </span>
+                <span className="text-[10px] text-muted-foreground/60">
+                  选中后自动切换
+                </span>
+              </div>
+            </div>
+          </div>
         ) : (
           <div ref={contentContainerRef} className="px-4 py-3 text-sm leading-7">
             <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
@@ -606,8 +633,7 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
         )}
       </div>
       {isChapter && content !== null && !loading && (
-        <>
-          <div data-revision-section>
+        <div data-revision-section>
           <ChapterRevisionSection
             bookId={bookId}
             chapterNumber={artifactChapter!}
@@ -615,7 +641,6 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
             onRevisionComplete={handleRevisionComplete}
           />
         </div>
-        </>
       )}
       {fullscreen && content !== null && (
         <ChapterFullscreenModal
@@ -974,8 +999,11 @@ export function BookSidebar({ bookId, theme, t, sse }: BookSidebarProps) {
 
   return (
     <aside
-      className="hidden lg:flex shrink-0 flex-col bg-background/30 backdrop-blur-sm overflow-y-auto relative"
-      style={{ width }}
+      className="hidden lg:flex shrink-0 flex-col border-l border-border/30 backdrop-blur-md overflow-y-auto relative shadow-[0_0_30px_rgba(0,0,0,0.08)]"
+      style={{
+        width,
+        background: "linear-gradient(180deg, color-mix(in oklch, var(--background) 82%, var(--card) 18%) 0%, color-mix(in oklch, var(--background) 72%, black 28%) 100%)",
+      }}
     >
       {/* Resize handle */}
       <div
@@ -1008,7 +1036,10 @@ export function BookSidebarToggle({ bookId, theme, t, sse }: BookSidebarProps) {
         <div className="fixed inset-0 z-40 lg:hidden" onClick={() => setOpen(false)}>
           <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" />
           <aside
-            className="absolute right-0 top-0 h-full w-[420px] max-w-[85vw] bg-background border-l border-border/20 overflow-y-auto"
+            className="absolute right-0 top-0 h-full w-[420px] max-w-[85vw] border-l border-border/30 overflow-y-auto shadow-2xl"
+            style={{
+              background: "linear-gradient(180deg, color-mix(in oklch, var(--background) 88%, var(--card) 12%) 0%, color-mix(in oklch, var(--background) 76%, black 24%) 100%)",
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-3 py-2 border-b border-border/20">
