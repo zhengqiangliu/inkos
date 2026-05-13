@@ -130,8 +130,12 @@ export type InteractionMessage = z.infer<typeof InteractionMessageSchema>;
 
 export const BookCreationDraftSchema = z.object({
   concept: z.string().min(1),
+  rawConcept: z.string().min(1).optional(),
   title: z.string().min(1).optional(),
   genre: z.string().min(1).optional(),
+  genreAlias: z.string().min(1).optional(),
+  genreSource: z.enum(["builtin", "project", "custom"]).optional(),
+  mappedGenreId: z.string().min(1).optional(),
   platform: z.string().min(1).optional(),
   language: z.enum(["zh", "en"]).optional(),
   targetChapters: z.number().int().min(1).optional(),
@@ -152,11 +156,132 @@ export const BookCreationDraftSchema = z.object({
   authorIntent: z.string().min(1).optional(),
   currentFocus: z.string().min(1).optional(),
   nextQuestion: z.string().min(1).optional(),
+  draftFields: z.record(z.string(), z.string()).optional(),
+  confirmedFields: z.array(z.string().min(1)).optional(),
   missingFields: z.array(z.string().min(1)).default([]),
   readyToCreate: z.boolean().default(false),
 });
 
 export type BookCreationDraft = z.infer<typeof BookCreationDraftSchema>;
+
+function hasAnyText(...values: ReadonlyArray<string | undefined>): boolean {
+  return values.some((value) => typeof value === "string" && value.trim().length > 0);
+}
+
+export const BookCreationIntroPageDraftSchema = z.object({
+  blurb: z.string().min(1).optional(),
+  storyBackground: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (!hasAnyText(value.blurb, value.storyBackground)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["blurb"],
+      message: "intro page requires either blurb or storyBackground",
+    });
+  }
+});
+
+export const BookCreationWorldPageDraftSchema = z.object({
+  worldPremise: z.string().min(1).optional(),
+  settingNotes: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (!hasAnyText(value.worldPremise, value.settingNotes)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["worldPremise"],
+      message: "world page requires worldPremise or settingNotes",
+    });
+  }
+});
+
+export const BookCreationOutlinePageDraftSchema = z.object({
+  novelOutline: z.string().min(1).optional(),
+  conflictCore: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (!hasAnyText(value.novelOutline, value.conflictCore)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["novelOutline"],
+      message: "outline page requires novelOutline or conflictCore",
+    });
+  }
+});
+
+export const BookCreationVolumePageDraftSchema = z.object({
+  volumeOutline: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (!hasAnyText(value.volumeOutline)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["volumeOutline"],
+      message: "volume page requires volumeOutline",
+    });
+  }
+});
+
+export const BookCreationCharactersPageDraftSchema = z.object({
+  protagonist: z.string().min(1).optional(),
+  supportingCast: z.string().min(1).optional(),
+  characterMatrix: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (!hasAnyText(value.protagonist, value.supportingCast, value.characterMatrix)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["protagonist"],
+      message: "characters page requires protagonist/supportingCast/characterMatrix",
+    });
+  }
+});
+
+export const BookCreationArcPageDraftSchema = z.object({
+  characterArc: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (!hasAnyText(value.characterArc)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["characterArc"],
+      message: "arc page requires characterArc",
+    });
+  }
+});
+
+export const BookCreationRelationPageDraftSchema = z.object({
+  relationshipMap: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (!hasAnyText(value.relationshipMap)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relationshipMap"],
+      message: "relation page requires relationshipMap",
+    });
+  }
+});
+
+export const BookCreationReviewDraftSchema = z.object({
+  title: z.string().min(1),
+  genre: z.string().min(1),
+  platform: z.string().min(1),
+  language: z.enum(["zh", "en"]).optional(),
+  targetChapters: z.number().int().min(1),
+  chapterWordCount: z.number().int().min(1),
+});
+
+export const BookCreationPageDraftSchemaMap = {
+  intro: BookCreationIntroPageDraftSchema,
+  world: BookCreationWorldPageDraftSchema,
+  outline: BookCreationOutlinePageDraftSchema,
+  volume: BookCreationVolumePageDraftSchema,
+  characters: BookCreationCharactersPageDraftSchema,
+  arc: BookCreationArcPageDraftSchema,
+  relation: BookCreationRelationPageDraftSchema,
+  review: BookCreationReviewDraftSchema,
+} as const;
+
+export interface BookCreationConsistencyResult {
+  readonly readyToCreate: boolean;
+  readonly missingFields: ReadonlyArray<string>;
+  readonly warnings: ReadonlyArray<string>;
+}
 
 export const BookCreationWizardStepSchema = z.enum([
   "intro",
@@ -179,6 +304,25 @@ export const BookCreationWizardStateSchema = z.object({
 });
 
 export type BookCreationWizardState = z.infer<typeof BookCreationWizardStateSchema>;
+
+const BOOK_CREATION_WIZARD_ORDER: ReadonlyArray<BookCreationWizardStep> = [
+  "intro",
+  "world",
+  "outline",
+  "volume",
+  "characters",
+  "arc",
+  "relation",
+  "review",
+];
+
+function uniqueWizardSteps(steps: ReadonlyArray<BookCreationWizardStep>): BookCreationWizardStep[] {
+  return [...new Set(steps)];
+}
+
+function resolveWizardStepOrDefault(step?: BookCreationWizardStep): BookCreationWizardStep {
+  return step && BOOK_CREATION_WIZARD_ORDER.includes(step) ? step : "intro";
+}
 
 export const DraftRoundSchema = z.object({
   roundId: z.number().int().min(1),
@@ -317,6 +461,148 @@ export function updateCreationWizard(
   return {
     ...session,
     creationWizard: wizard,
+  };
+}
+
+export function inferCreationWizardState(
+  draft: BookCreationDraft | undefined,
+  existing?: BookCreationWizardState,
+): BookCreationWizardState | undefined {
+  if (!draft) {
+    return existing;
+  }
+
+  const completedSteps: BookCreationWizardStep[] = [];
+  if (draft.storyBackground || draft.blurb) completedSteps.push("intro");
+  if (draft.worldPremise || draft.settingNotes) completedSteps.push("world");
+  if (draft.novelOutline || draft.conflictCore) completedSteps.push("outline");
+  if (draft.volumeOutline) completedSteps.push("volume");
+  if (draft.protagonist || draft.supportingCast) completedSteps.push("characters");
+  if (draft.characterArc || draft.characterMatrix) completedSteps.push("arc");
+  if (draft.relationshipMap) completedSteps.push("relation");
+  if (draft.readyToCreate || completedSteps.length === BOOK_CREATION_WIZARD_ORDER.length - 1) {
+    completedSteps.push("review");
+  }
+
+  const completed = uniqueWizardSteps([...(existing?.completedSteps ?? []), ...completedSteps]);
+  const currentStep = existing?.currentStep && BOOK_CREATION_WIZARD_ORDER.includes(existing.currentStep)
+    ? existing.currentStep
+    : BOOK_CREATION_WIZARD_ORDER.find((step) => !completed.includes(step)) ?? "review";
+  const stepNotes: Record<string, string> = {
+    ...(existing?.stepNotes ?? {}),
+    intro: draft.nextQuestion ?? existing?.stepNotes?.intro ?? "",
+  };
+
+  return {
+    currentStep,
+    completedSteps: completed,
+    stepNotes,
+    updatedAt: Date.now(),
+  };
+}
+
+export function advanceCreationWizardState(
+  session: InteractionSession,
+  currentStep?: BookCreationWizardStep,
+): BookCreationWizardState {
+  const wizard = session.creationWizard ?? {
+    currentStep: "intro",
+    completedSteps: [],
+    stepNotes: {},
+  };
+  const step = resolveWizardStepOrDefault(currentStep ?? wizard.currentStep);
+  const stepIndex = BOOK_CREATION_WIZARD_ORDER.indexOf(step);
+  const nextStep = BOOK_CREATION_WIZARD_ORDER[stepIndex + 1] ?? "review";
+  return {
+    currentStep: nextStep,
+    completedSteps: uniqueWizardSteps([...(wizard.completedSteps ?? []), step]),
+    stepNotes: wizard.stepNotes ?? {},
+    updatedAt: Date.now(),
+  };
+}
+
+export function retreatCreationWizardState(
+  session: InteractionSession,
+  currentStep?: BookCreationWizardStep,
+): BookCreationWizardState {
+  const wizard = session.creationWizard ?? {
+    currentStep: "intro",
+    completedSteps: [],
+    stepNotes: {},
+  };
+  const step = resolveWizardStepOrDefault(currentStep ?? wizard.currentStep);
+  const stepIndex = BOOK_CREATION_WIZARD_ORDER.indexOf(step);
+  const previousStep = BOOK_CREATION_WIZARD_ORDER[Math.max(0, stepIndex - 1)] ?? "intro";
+  return {
+    currentStep: previousStep,
+    completedSteps: uniqueWizardSteps((wizard.completedSteps ?? []).filter((item) => item !== step)),
+    stepNotes: wizard.stepNotes ?? {},
+    updatedAt: Date.now(),
+  };
+}
+
+export function validateCreationDraftConsistency(
+  draft: BookCreationDraft | undefined,
+): BookCreationConsistencyResult {
+  const missingFields: string[] = [];
+  const warnings: string[] = [];
+
+  if (!draft) {
+    return {
+      readyToCreate: false,
+      missingFields: ["concept", "title", "genre", "platform", "targetChapters", "chapterWordCount"],
+      warnings: ["draft missing"],
+    };
+  }
+
+  const pageChecks = [
+    ["intro", BookCreationIntroPageDraftSchema.safeParse({
+      blurb: draft.blurb,
+      storyBackground: draft.storyBackground,
+    })],
+    ["world", BookCreationWorldPageDraftSchema.safeParse({
+      worldPremise: draft.worldPremise,
+      settingNotes: draft.settingNotes,
+    })],
+    ["outline", BookCreationOutlinePageDraftSchema.safeParse({
+      novelOutline: draft.novelOutline,
+      conflictCore: draft.conflictCore,
+    })],
+    ["volume", BookCreationVolumePageDraftSchema.safeParse({
+      volumeOutline: draft.volumeOutline,
+    })],
+    ["characters", BookCreationCharactersPageDraftSchema.safeParse({
+      protagonist: draft.protagonist,
+      supportingCast: draft.supportingCast,
+      characterMatrix: draft.characterMatrix,
+    })],
+    ["arc", BookCreationArcPageDraftSchema.safeParse({
+      characterArc: draft.characterArc,
+    })],
+    ["relation", BookCreationRelationPageDraftSchema.safeParse({
+      relationshipMap: draft.relationshipMap,
+    })],
+    ["review", BookCreationReviewDraftSchema.safeParse({
+      title: draft.title ?? "",
+      genre: draft.genre ?? "",
+      platform: draft.platform ?? "",
+      language: draft.language,
+      targetChapters: draft.targetChapters ?? 0,
+      chapterWordCount: draft.chapterWordCount ?? 0,
+    })],
+  ] as const;
+
+  for (const [step, result] of pageChecks) {
+    if (!result.success) {
+      missingFields.push(step);
+      warnings.push(...result.error.issues.map((issue) => `${step}:${issue.path.join(".") || "page"}`));
+    }
+  }
+
+  return {
+    readyToCreate: missingFields.length === 0,
+    missingFields,
+    warnings,
   };
 }
 

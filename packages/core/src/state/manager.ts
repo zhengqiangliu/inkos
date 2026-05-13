@@ -22,15 +22,20 @@ export class StateManager {
       : "# Current Focus\n\n## Active Focus\n\n(Describe what the next 1-3 chapters should prioritize.)\n";
   }
 
-  async ensureControlDocuments(bookId: string, authorIntent?: string): Promise<void> {
+  async ensureControlDocuments(
+    bookId: string,
+    authorIntent?: string,
+    foundationBrief?: string,
+  ): Promise<void> {
     const language = await this.resolveControlDocumentLanguage(bookId);
-    await this.ensureControlDocumentsAt(this.bookDir(bookId), language, authorIntent);
+    await this.ensureControlDocumentsAt(this.bookDir(bookId), language, authorIntent, foundationBrief);
   }
 
   async ensureControlDocumentsAt(
     bookDir: string,
     language: "zh" | "en",
     authorIntent?: string,
+    foundationBrief?: string,
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
     const runtimeDir = join(storyDir, "runtime");
@@ -49,6 +54,12 @@ export class StateManager {
       join(storyDir, "current_focus.md"),
       StateManager.defaultCurrentFocus(language),
     );
+
+    if (foundationBrief?.trim()) {
+      const briefText = foundationBrief.trimEnd() + "\n";
+      await this.writeIfMissing(join(storyDir, "foundation_brief.md"), briefText);
+      await this.writeIfMissing(join(storyDir, "brief.md"), briefText);
+    }
   }
 
   async loadControlDocuments(bookId: string): Promise<{

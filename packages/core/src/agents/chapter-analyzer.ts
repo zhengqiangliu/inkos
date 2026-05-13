@@ -12,6 +12,7 @@ import {
 import { filterEmotionalArcs, filterSubplots } from "../utils/context-filter.js";
 import { countChapterLength, resolveLengthCountingMode } from "../utils/length-metrics.js";
 import { retrieveMemorySelection } from "../utils/memory-retrieval.js";
+import { readBrief } from "./planner-context.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -58,6 +59,7 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       this.readFileOrDefault(join(bookDir, "story/story_bible.md"), resolvedLanguage),
       this.readFileOrDefault(join(bookDir, "story/volume_outline.md"), resolvedLanguage),
     ]);
+    const foundationBrief = await readBrief(join(bookDir, "story"));
     const parsedBookRules = await readBookRules(bookDir);
     const bookRulesBody = parsedBookRules?.body ?? "";
     const bookRules = parsedBookRules?.rules;
@@ -117,6 +119,7 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       chapterContent,
       chapterTitle,
       currentState,
+      foundationBrief,
       ledger: genreProfile.numericalSystem ? ledger : "",
       hooks: hooksWorkingSet,
       chapterSummaries,
@@ -434,6 +437,7 @@ ${bookRulesBody ? `## 本书规则\n\n${bookRulesBody}` : ""}
     readonly chapterContent: string;
     readonly chapterTitle?: string;
     readonly currentState: string;
+    readonly foundationBrief: string;
     readonly ledger: string;
     readonly hooks: string;
     readonly chapterSummaries: string;
@@ -449,6 +453,11 @@ ${bookRulesBody ? `## 本书规则\n\n${bookRulesBody}` : ""}
     readonly bibleBlock: string;
     readonly outlineOrControlBlock: string;
   }): string {
+    const foundationBriefBlock = params.foundationBrief?.trim()
+      ? params.language === "en"
+        ? `\n## Foundation Brief\n${params.foundationBrief}\n`
+        : `\n## 基础创作摘要\n${params.foundationBrief}\n`
+      : "";
     if (params.language === "en") {
       const titleLine = params.chapterTitle
         ? `Chapter Title: ${params.chapterTitle}\n`
@@ -465,7 +474,7 @@ ${titleLine}
 ${params.chapterContent}
 
 ## Current State
-${params.currentState}
+${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
 ${params.hooksBlock}${params.volumeSummariesBlock}${params.subplotBlock}${params.emotionalBlock}${params.matrixBlock}${params.summariesBlock}${params.outlineOrControlBlock}${params.bibleBlock}
 
@@ -487,7 +496,7 @@ ${titleLine}
 ${params.chapterContent}
 
 ## 当前状态卡
-${params.currentState}
+${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
 ${params.hooksBlock}${params.volumeSummariesBlock}${params.subplotBlock}${params.emotionalBlock}${params.matrixBlock}${params.summariesBlock}${params.outlineOrControlBlock}${params.bibleBlock}
 

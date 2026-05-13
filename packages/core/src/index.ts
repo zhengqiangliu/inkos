@@ -106,6 +106,7 @@ export {
   bindActiveBook,
   clearCreationDraft,
   clearPendingDecision,
+  inferCreationWizardState,
   updateAutomationMode,
   updateCreationDraft,
   updateCreationWizard,

@@ -12,6 +12,7 @@ import {
 } from "../utils/memory-retrieval.js";
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
 import { buildPlannerHookAgenda } from "../utils/hook-agenda.js";
+import { readBrief } from "./planner-context.js";
 
 export interface PlanChapterInput {
   readonly book: BookConfig;
@@ -55,6 +56,7 @@ export class PlannerAgent extends BaseAgent {
       chapterSummaries,
       bookRulesRaw,
       currentState,
+      brief,
     ] = await Promise.all([
       this.readFileOrDefault(sourcePaths.authorIntent),
       this.readFileOrDefault(sourcePaths.currentFocus),
@@ -63,15 +65,16 @@ export class PlannerAgent extends BaseAgent {
       this.readFileOrDefault(sourcePaths.chapterSummaries),
       this.readFileOrDefault(sourcePaths.bookRules),
       this.readFileOrDefault(sourcePaths.currentState),
+      readBrief(storyDir),
     ]);
 
     const outlineNode = this.findOutlineNode(volumeOutline, input.chapterNumber);
     const matchedOutlineAnchor = this.hasMatchedOutlineAnchor(volumeOutline, input.chapterNumber);
-    const goal = this.deriveGoal(input.externalContext, currentFocus, authorIntent, outlineNode, input.chapterNumber);
+    const goal = this.deriveGoal(input.externalContext, currentFocus, authorIntent, brief, outlineNode, input.chapterNumber);
     const parsedRules = parseBookRules(bookRulesRaw);
-    const mustKeep = this.collectMustKeep(currentState, storyBible);
+    const mustKeep = this.collectMustKeep(currentState, storyBible, brief);
     const mustAvoid = this.collectMustAvoid(currentFocus, parsedRules.rules.prohibitions);
-    const styleEmphasis = this.collectStyleEmphasis(authorIntent, currentFocus);
+    const styleEmphasis = this.collectStyleEmphasis(authorIntent, currentFocus, brief);
     const conflicts = this.collectConflicts(input.externalContext, currentFocus, outlineNode, volumeOutline);
     const planningAnchor = conflicts.length > 0 ? undefined : outlineNode;
     const memorySelection = await retrieveMemorySelection({
@@ -173,6 +176,7 @@ export class PlannerAgent extends BaseAgent {
     externalContext: string | undefined,
     currentFocus: string,
     authorIntent: string,
+    brief: string,
     outlineNode: string | undefined,
     chapterNumber: number,
   ): string {
@@ -186,13 +190,16 @@ export class PlannerAgent extends BaseAgent {
     if (focus) return focus;
     const author = this.extractFirstDirective(authorIntent);
     if (author) return author;
+    const foundation = this.extractFirstDirective(brief);
+    if (foundation) return foundation;
     return `Advance chapter ${chapterNumber} with clear narrative focus.`;
   }
 
-  private collectMustKeep(currentState: string, storyBible: string): string[] {
+  private collectMustKeep(currentState: string, storyBible: string, brief: string): string[] {
     return this.unique([
       ...this.extractListItems(currentState, 2),
       ...this.extractListItems(storyBible, 2),
+      ...this.extractListItems(brief, 2),
     ]).slice(0, 4);
   }
 
@@ -219,10 +226,11 @@ export class PlannerAgent extends BaseAgent {
     return this.unique([...focusAvoids, ...prohibitions]).slice(0, 6);
   }
 
-  private collectStyleEmphasis(authorIntent: string, currentFocus: string): string[] {
+  private collectStyleEmphasis(authorIntent: string, currentFocus: string, brief: string): string[] {
     return this.unique([
       ...this.extractFocusStyleItems(currentFocus),
       ...this.extractListItems(authorIntent, 2),
+      ...this.extractListItems(brief, 2),
     ]).slice(0, 4);
   }
 

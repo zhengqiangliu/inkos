@@ -771,6 +771,28 @@ describe("StateManager", () => {
       expect(runtimeStat.isDirectory()).toBe(true);
     });
 
+    it("writes the foundation brief alongside the legacy brief alias", async () => {
+      await manager.ensureControlDocumentsAt(
+        manager.bookDir("foundation-book"),
+        "zh",
+        "# 作者意图\n\n写成冷硬、克制的商战悬疑。\n",
+        "# 基础摘要\n\n主角先把港口旧账线立住。\n",
+      );
+
+      const storyDir = join(manager.bookDir("foundation-book"), "story");
+      const foundationBrief = await readFile(
+        join(storyDir, "foundation_brief.md"),
+        "utf-8",
+      );
+      const legacyBrief = await readFile(
+        join(storyDir, "brief.md"),
+        "utf-8",
+      );
+
+      expect(foundationBrief).toContain("基础摘要");
+      expect(legacyBrief).toContain("基础摘要");
+    });
+
     it("bootstraps and returns safe defaults for legacy books", async () => {
       const storyDir = join(manager.bookDir("legacy-book"), "story");
       await mkdir(storyDir, { recursive: true });

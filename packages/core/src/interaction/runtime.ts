@@ -6,9 +6,14 @@ import type { PendingDecision, InteractionSession, DraftRound } from "./session.
 import {
   appendInteractionEvent,
   bindActiveBook,
+  advanceCreationWizardState,
   clearCreationDraft,
   clearPendingDecision,
+  inferCreationWizardState,
+  retreatCreationWizardState,
+  validateCreationDraftConsistency,
   updateCreationDraft,
+  updateCreationWizard,
   updateAutomationMode,
 } from "./session.js";
 
@@ -17,9 +22,16 @@ type RuntimeLanguage = "zh" | "en";
 
 export interface InteractionRuntimeTools {
   readonly listBooks: () => Promise<ReadonlyArray<string>>;
+  readonly selectGenre?: (genre: string) => Promise<unknown>;
   readonly developBookDraft?: (
     input: string,
     existingDraft?: InteractionSession["creationDraft"],
+    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review",
+  ) => Promise<unknown>;
+  readonly advanceBookWizard?: (
+    input: string,
+    existingDraft?: InteractionSession["creationDraft"],
+    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review",
   ) => Promise<unknown>;
   readonly createBook?: (input: {
     readonly title: string;
@@ -142,7 +154,12 @@ function renderCreationDraft(
         "# Current Book Draft",
         draft.title ? `- Title: ${draft.title}` : undefined,
         draft.genre ? `- Genre: ${draft.genre}` : undefined,
+        draft.genreAlias ? `- Genre Alias: ${draft.genreAlias}` : undefined,
+        draft.genreSource ? `- Genre Source: ${draft.genreSource}` : undefined,
         draft.platform ? `- Platform: ${draft.platform}` : undefined,
+        draft.language ? `- Language: ${draft.language}` : undefined,
+        typeof draft.targetChapters === "number" ? `- Target Chapters: ${draft.targetChapters}` : undefined,
+        typeof draft.chapterWordCount === "number" ? `- Chapter Word Count: ${draft.chapterWordCount}` : undefined,
         draft.storyBackground ? `- Story Background: ${draft.storyBackground}` : undefined,
         draft.worldPremise ? `- World: ${draft.worldPremise}` : undefined,
         draft.novelOutline ? `- Novel Outline: ${draft.novelOutline}` : undefined,
@@ -159,7 +176,12 @@ function renderCreationDraft(
         "# 当前创作草案",
         draft.title ? `- 书名：${draft.title}` : undefined,
         draft.genre ? `- 题材：${draft.genre}` : undefined,
+        draft.genreAlias ? `- 题材别名：${draft.genreAlias}` : undefined,
+        draft.genreSource ? `- 题材来源：${draft.genreSource}` : undefined,
         draft.platform ? `- 平台：${draft.platform}` : undefined,
+        draft.language ? `- 语言：${draft.language}` : undefined,
+        typeof draft.targetChapters === "number" ? `- 目标章数：${draft.targetChapters}` : undefined,
+        typeof draft.chapterWordCount === "number" ? `- 每章字数：${draft.chapterWordCount}` : undefined,
         draft.storyBackground ? `- 故事背景：${draft.storyBackground}` : undefined,
         draft.worldPremise ? `- 世界观：${draft.worldPremise}` : undefined,
         draft.novelOutline ? `- 小说大纲：${draft.novelOutline}` : undefined,
@@ -173,6 +195,118 @@ function renderCreationDraft(
         draft.nextQuestion ? `- 下一步：${draft.nextQuestion}` : undefined,
       ];
   return lines.filter(Boolean).join("\n");
+}
+
+function buildBookDraftWithParams(
+  session: InteractionSession,
+  request: InteractionRequest,
+  language: RuntimeLanguage,
+): NonNullable<InteractionSession["creationDraft"]> {
+  const existingDraft = session.creationDraft;
+  const resolvedTitle = request.title?.trim()
+    || existingDraft?.title
+    || existingDraft?.concept
+    || localize(language, { zh: "未命名书稿", en: "Untitled draft" });
+  const resolvedPlatform = request.platform?.trim()
+    || existingDraft?.platform
+    || (language === "en" ? "other" : "tomato");
+  const resolvedLanguage = request.language ?? existingDraft?.language ?? (language === "en" ? "en" : "zh");
+  const draftFields = {
+    ...(existingDraft?.draftFields ?? {}),
+    ...(resolvedTitle ? { title: resolvedTitle } : {}),
+    ...(request.genre?.trim() ? { genre: request.genre.trim() } : existingDraft?.genre ? { genre: existingDraft.genre } : {}),
+    ...(resolvedPlatform ? { platform: resolvedPlatform } : {}),
+    ...(resolvedLanguage ? { language: resolvedLanguage } : {}),
+    ...(request.targetChapters !== undefined ? { targetChapters: String(request.targetChapters) } : {}),
+    ...(request.chapterWordCount !== undefined ? { chapterWordCount: String(request.chapterWordCount) } : {}),
+  };
+  const confirmedFields = [...new Set([
+    ...(existingDraft?.confirmedFields ?? []),
+    ...Object.keys(draftFields),
+  ])];
+  const nextDraft = {
+    ...(existingDraft ?? {}),
+    rawConcept: existingDraft?.rawConcept ?? existingDraft?.concept ?? resolvedTitle,
+    concept: existingDraft?.concept ?? resolvedTitle,
+    title: resolvedTitle,
+    platform: resolvedPlatform,
+    language: resolvedLanguage,
+    ...(request.chapterWordCount !== undefined ? { chapterWordCount: request.chapterWordCount } : {}),
+    ...(request.targetChapters !== undefined ? { targetChapters: request.targetChapters } : {}),
+    draftFields,
+    confirmedFields,
+    missingFields: existingDraft?.missingFields ?? [],
+    readyToCreate: false,
+  } as NonNullable<InteractionSession["creationDraft"]>;
+  const consistency = validateCreationDraftConsistency(nextDraft);
+  return {
+    ...nextDraft,
+    missingFields: [...consistency.missingFields],
+    readyToCreate: consistency.readyToCreate,
+  };
+}
+
+function collectDraftFieldSnapshot(draft: NonNullable<InteractionSession["creationDraft"]>): Record<string, string> {
+  const snapshot: Record<string, string> = {
+    ...(draft.draftFields ?? {}),
+  };
+  const fields: Array<[string, string | number | undefined]> = [
+    ["concept", draft.concept],
+    ["rawConcept", draft.rawConcept],
+    ["title", draft.title],
+    ["genre", draft.genre],
+    ["genreAlias", draft.genreAlias],
+    ["genreSource", draft.genreSource],
+    ["mappedGenreId", draft.mappedGenreId],
+    ["platform", draft.platform],
+    ["language", draft.language],
+    ["targetChapters", draft.targetChapters],
+    ["chapterWordCount", draft.chapterWordCount],
+    ["blurb", draft.blurb],
+    ["storyBackground", draft.storyBackground],
+    ["worldPremise", draft.worldPremise],
+    ["settingNotes", draft.settingNotes],
+    ["novelOutline", draft.novelOutline],
+    ["protagonist", draft.protagonist],
+    ["supportingCast", draft.supportingCast],
+    ["characterMatrix", draft.characterMatrix],
+    ["characterArc", draft.characterArc],
+    ["relationshipMap", draft.relationshipMap],
+    ["conflictCore", draft.conflictCore],
+    ["volumeOutline", draft.volumeOutline],
+    ["constraints", draft.constraints],
+    ["authorIntent", draft.authorIntent],
+    ["currentFocus", draft.currentFocus],
+    ["nextQuestion", draft.nextQuestion],
+  ];
+
+  for (const [key, value] of fields) {
+    if (value === undefined || value === null) continue;
+    snapshot[key] = String(value);
+  }
+
+  return snapshot;
+}
+
+function normalizeCreationDraft(
+  draft: NonNullable<InteractionSession["creationDraft"]>,
+  extras: {
+    readonly confirmedFields?: ReadonlyArray<string>;
+  } = {},
+): NonNullable<InteractionSession["creationDraft"]> {
+  const draftFields = collectDraftFieldSnapshot(draft);
+  const confirmedFields = [...new Set([
+    ...(draft.confirmedFields ?? []),
+    ...(extras.confirmedFields ?? []),
+  ])];
+  return {
+    ...draft,
+    rawConcept: draft.rawConcept ?? draft.concept,
+    draftFields,
+    confirmedFields,
+    missingFields: [...(draft.missingFields ?? [])],
+    readyToCreate: Boolean(draft.readyToCreate),
+  };
 }
 
 function buildTaskStartedState(
@@ -199,6 +333,42 @@ function buildTaskStartedState(
         stageLabel: localize(language, {
           zh: "收敛创作草案",
           en: "developing book draft",
+        }),
+      };
+    case "select_genre":
+      return {
+        status: "planning",
+        bookId: request.bookId ?? session.activeBookId,
+        stageLabel: localize(language, {
+          zh: "选择题材",
+          en: "selecting genre",
+        }),
+      };
+    case "set_book_draft_params":
+      return {
+        status: "planning",
+        bookId: request.bookId ?? session.activeBookId,
+        stageLabel: localize(language, {
+          zh: "设置建书硬参数",
+          en: "setting hard book parameters",
+        }),
+      };
+    case "advance_book_wizard":
+      return {
+        status: "planning",
+        bookId: request.bookId ?? session.activeBookId,
+        stageLabel: localize(language, {
+          zh: "推进建书向导",
+          en: "advancing book wizard",
+        }),
+      };
+    case "retreat_book_wizard":
+      return {
+        status: "planning",
+        bookId: request.bookId ?? session.activeBookId,
+        stageLabel: localize(language, {
+          zh: "返回上一页",
+          en: "moving back one step",
         }),
       };
     case "create_book":
@@ -386,7 +556,7 @@ async function handleDraftLifecycleRequest(params: {
           en: "Book-draft ideation requires user input.",
         }));
       }
-      const toolResult = await tools.developBookDraft(request.instruction, session.creationDraft);
+      const toolResult = await tools.developBookDraft(request.instruction, session.creationDraft, session.creationWizard?.currentStep);
       const metadata = extractToolMetadata(toolResult);
       const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
       if (!draft) {
@@ -403,9 +573,12 @@ async function handleDraftLifecycleRequest(params: {
         summary: metadata.details?.draftSummary as string ?? "",
         timestamp: Date.now(),
       };
-      const withDraft = updateCreationDraft(session, draft);
+      const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
+        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+      }));
+      const wizard = inferCreationWizardState(draft, session.creationWizard);
       const withRounds = {
-        ...withDraft,
+        ...updateCreationWizard(withDraft, wizard ?? { currentStep: "intro", completedSteps: [], stepNotes: {}, updatedAt: Date.now() }),
         draftRounds: [...(withDraft.draftRounds ?? []), newRound],
       };
       const nextSession = appendToolEvents(withRounds, metadata.events);
@@ -425,6 +598,168 @@ async function handleDraftLifecycleRequest(params: {
         details: metadata.details,
       };
     }
+    case "select_genre": {
+      if (!request.genre) {
+        throw new Error(localize(language, {
+          zh: "请选择题材。",
+          en: "Genre selection requires a genre.",
+        }));
+      }
+      const genreLabel = request.genreName?.trim() || request.genre.trim();
+      const nextDraft = normalizeCreationDraft({
+        concept: session.creationDraft?.concept ?? genreLabel,
+        ...(session.creationDraft ?? {}),
+        genre: request.genre.trim(),
+        genreAlias: request.genreAlias?.trim() || session.creationDraft?.genreAlias,
+        genreSource: request.genreSource ?? session.creationDraft?.genreSource ?? "builtin",
+        mappedGenreId: request.genre.trim(),
+        nextQuestion: session.creationDraft?.nextQuestion ?? localize(language, {
+          zh: "请继续输入一句话卖点或故事概述。",
+          en: "Please continue with a one-line pitch or story outline.",
+        }),
+        missingFields: session.creationDraft?.missingFields ?? [],
+        readyToCreate: false,
+      }, {
+        confirmedFields: ["genre", "genreAlias", "genreSource", "mappedGenreId"],
+      });
+      const withDraft = updateCreationDraft(session, nextDraft);
+      const wizard = inferCreationWizardState(nextDraft, session.creationWizard);
+      const withWizard = updateCreationWizard(withDraft, wizard ?? {
+        currentStep: "intro",
+        completedSteps: [],
+        stepNotes: {},
+        updatedAt: Date.now(),
+      });
+      const completed = {
+        ...markCompleted(withWizard),
+        currentExecution: markCompleted(withWizard).currentExecution,
+      };
+      return {
+        session: addEvent(completed, "task.completed", "completed", localize(language, {
+          zh: `已选择题材 ${genreLabel}。`,
+          en: `Selected genre ${genreLabel}.`,
+        })),
+        responseText: localize(language, {
+          zh: `已选择题材 ${genreLabel}，接下来可以输入故事概述。`,
+          en: `Selected genre ${genreLabel}. You can now enter a story outline.`,
+        }),
+        details: {
+          genre: request.genre.trim(),
+          genreName: genreLabel,
+        },
+      };
+    }
+    case "set_book_draft_params": {
+      const nextDraft = normalizeCreationDraft(buildBookDraftWithParams(session, request, language), {
+        confirmedFields: ["title", "platform", "language", "targetChapters", "chapterWordCount"],
+      });
+      const withDraft = updateCreationDraft(session, nextDraft);
+      const wizard = inferCreationWizardState(nextDraft, session.creationWizard);
+      const withWizard = wizard ? updateCreationWizard(withDraft, wizard) : withDraft;
+      const completed = {
+        ...markCompleted(withWizard),
+        currentExecution: markCompleted(withWizard).currentExecution,
+      };
+      const summaryParts = [
+        request.title?.trim() ? localize(language, { zh: `书名：${request.title.trim()}`, en: `Title: ${request.title.trim()}` }) : undefined,
+        request.platform?.trim() ? localize(language, { zh: `平台：${request.platform.trim()}`, en: `Platform: ${request.platform.trim()}` }) : undefined,
+        request.targetChapters !== undefined ? localize(language, { zh: `目标章数：${request.targetChapters}`, en: `Target chapters: ${request.targetChapters}` }) : undefined,
+        request.chapterWordCount !== undefined ? localize(language, { zh: `每章字数：${request.chapterWordCount}`, en: `Chapter words: ${request.chapterWordCount}` }) : undefined,
+      ].filter(Boolean).join("，");
+      return {
+        session: addEvent(completed, "task.completed", "completed", localize(language, {
+          zh: "已保存建书硬参数。",
+          en: "Saved hard book parameters.",
+        })),
+        responseText: summaryParts || localize(language, {
+          zh: "已保存建书硬参数。",
+          en: "Saved hard book parameters.",
+        }),
+        details: {
+          creationDraft: nextDraft,
+          fieldsUpdated: ["title", "platform", "language", "targetChapters", "chapterWordCount"].filter((key) => {
+            if (key === "title") return Boolean(request.title?.trim());
+            if (key === "platform") return Boolean(request.platform?.trim());
+            if (key === "language") return Boolean(request.language);
+            if (key === "targetChapters") return request.targetChapters !== undefined;
+            if (key === "chapterWordCount") return request.chapterWordCount !== undefined;
+            return false;
+          }),
+        },
+      };
+    }
+    case "advance_book_wizard": {
+      if (!tools.advanceBookWizard) {
+        throw new Error(localize(language, {
+          zh: "建书向导推进暂未实现。",
+          en: "Book wizard advancement is not implemented yet.",
+        }));
+      }
+      const currentStep = session.creationWizard?.currentStep ?? "intro";
+      const toolResult = await tools.advanceBookWizard(request.instruction ?? "", session.creationDraft, currentStep);
+      const metadata = extractToolMetadata(toolResult);
+      const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
+      if (!draft) {
+        throw new Error(localize(language, {
+          zh: "向导工具没有返回草案数据。",
+          en: "Wizard tool did not return draft data.",
+        }));
+      }
+      const newRound: DraftRound = {
+        roundId: (session.draftRounds?.length ?? 0) + 1,
+        userMessage: request.instruction ?? "",
+        assistantRaw: metadata.details?.draftRaw as string ?? "",
+        fieldsUpdated: (metadata.details?.fieldsUpdated as string[]) ?? [],
+        summary: metadata.details?.draftSummary as string ?? "",
+        timestamp: Date.now(),
+      };
+      const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
+        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+      }));
+      const wizard = advanceCreationWizardState(updateCreationWizard(withDraft, session.creationWizard ?? {
+        currentStep: request.wizardStep ?? currentStep,
+        completedSteps: [],
+        stepNotes: {},
+        updatedAt: Date.now(),
+      }), request.wizardStep ?? currentStep);
+      const nextSession = appendToolEvents({
+        ...updateCreationWizard(withDraft, wizard),
+        draftRounds: [...(withDraft.draftRounds ?? []), newRound],
+      }, metadata.events);
+      const completed = {
+        ...markCompleted(nextSession),
+        currentExecution: metadata.currentExecution ?? markCompleted(nextSession).currentExecution,
+      };
+      return {
+        session: addEvent(completed, "task.completed", "completed", localize(language, {
+          zh: `已完成 ${request.wizardStep ?? currentStep} 页并进入下一步。`,
+          en: `Completed ${request.wizardStep ?? currentStep} and moved to the next step.`,
+        })),
+        responseText: metadata.responseText ?? localize(language, {
+          zh: `已完成 ${request.wizardStep ?? currentStep} 页并进入下一步。`,
+          en: `Completed ${request.wizardStep ?? currentStep} and moved to the next step.`,
+        }),
+        details: metadata.details,
+      };
+    }
+    case "retreat_book_wizard": {
+      const currentStep = session.creationWizard?.currentStep ?? "intro";
+      const wizard = retreatCreationWizardState(session, currentStep);
+      const nextSession = {
+        ...updateCreationWizard(session, wizard),
+        currentExecution: markCompleted(session).currentExecution,
+      };
+      return {
+        session: addEvent(markCompleted(nextSession), "task.completed", "completed", localize(language, {
+          zh: `已返回 ${wizard.currentStep} 页。`,
+          en: `Moved back to ${wizard.currentStep}.`,
+        })),
+        responseText: localize(language, {
+          zh: `已返回 ${wizard.currentStep} 页。`,
+          en: `Moved back to ${wizard.currentStep}.`,
+        }),
+      };
+    }
     case "show_book_draft": {
       if (!session.creationDraft) {
         return {
@@ -435,8 +770,9 @@ async function handleDraftLifecycleRequest(params: {
           }),
         };
       }
+      const wizard = inferCreationWizardState(session.creationDraft, session.creationWizard);
       return {
-        session: markCompleted(session),
+        session: markCompleted(wizard ? updateCreationWizard(session, wizard) : session),
         responseText: renderCreationDraft(session.creationDraft, language),
       };
     }
@@ -448,6 +784,16 @@ async function handleDraftLifecycleRequest(params: {
         }));
       }
       const effectiveDraft = session.creationDraft;
+      const shouldValidateFoundation = request.wizardStep === "review" || Boolean(effectiveDraft);
+      if (shouldValidateFoundation) {
+        const consistency = validateCreationDraftConsistency(effectiveDraft);
+        if (!consistency.readyToCreate) {
+          throw new Error(localize(language, {
+            zh: `基础资料尚未完成：${consistency.missingFields.join("、")}`,
+            en: `Foundation data is incomplete: ${consistency.missingFields.join(", ")}`,
+          }));
+        }
+      }
       const title = request.title ?? effectiveDraft?.title;
       if (!title) {
         throw new Error(localize(language, {

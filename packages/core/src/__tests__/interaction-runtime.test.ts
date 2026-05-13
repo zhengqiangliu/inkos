@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { InteractionSessionSchema } from "../interaction/session.js";
+import { InteractionSessionSchema, validateCreationDraftConsistency } from "../interaction/session.js";
 import { runInteractionRequest } from "../interaction/runtime.js";
 
 function makeTools(overrides: Partial<Parameters<typeof runInteractionRequest>[0]["tools"]> = {}) {
   return {
     listBooks: vi.fn(async () => ["harbor"]),
     developBookDraft: vi.fn(),
+    advanceBookWizard: vi.fn(),
     createBook: vi.fn(),
     exportBook: vi.fn(),
     writeNextChapter: vi.fn(),
@@ -54,15 +55,219 @@ describe("interaction runtime", () => {
       }),
     });
 
-    expect(developBookDraft).toHaveBeenCalledWith("我想写个港风商战悬疑，主角从灰产洗白。", undefined);
+    expect(developBookDraft).toHaveBeenCalledWith("我想写个港风商战悬疑，主角从灰产洗白。", undefined, undefined);
     expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      rawConcept: "港风商战悬疑，主角从灰产洗白。",
       title: "夜港账本",
       genre: "urban",
     }));
     expect(result.responseText).toContain("港风商战悬疑");
   });
 
+  it("selects a genre from the shared genre library and seeds a draft", async () => {
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-genre",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "select_genre",
+        genre: "urban",
+        genreName: "都市",
+        genreAlias: "港风商战悬疑",
+        genreSource: "custom",
+      },
+      tools: makeTools(),
+    });
+
+    expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      concept: "都市",
+      genre: "urban",
+      genreSource: "custom",
+      genreAlias: "港风商战悬疑",
+      mappedGenreId: "urban",
+      nextQuestion: expect.stringContaining("故事概述"),
+    }));
+    expect(result.session.creationWizard?.currentStep).toBe("intro");
+    expect(result.responseText).toContain("都市");
+  });
+
+  it("stores hard book parameters before the final create step", async () => {
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-hard-params",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑",
+          genre: "urban",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "set_book_draft_params",
+        title: "夜港账本",
+        platform: "tomato",
+        language: "zh",
+        targetChapters: 120,
+        chapterWordCount: 2800,
+      },
+      tools: makeTools(),
+    });
+
+    expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      rawConcept: "港风商战悬疑",
+      title: "夜港账本",
+      platform: "tomato",
+      language: "zh",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      confirmedFields: expect.arrayContaining(["title", "platform", "language", "targetChapters", "chapterWordCount"]),
+      draftFields: expect.objectContaining({
+        title: "夜港账本",
+        platform: "tomato",
+        targetChapters: "120",
+        chapterWordCount: "2800",
+      }),
+    }));
+    expect(result.responseText).toContain("夜港账本");
+    expect(result.responseText).toContain("120");
+  });
+
+  it("routes advance_book_wizard through the shared wizard tool and advances to the next step", async () => {
+    const advanceBookWizard = vi.fn(async () => ({
+      __interaction: {
+        responseText: "已生成简介 / 故事背景并进入世界观。",
+        details: {
+          creationDraft: {
+            concept: "港风商战悬疑，主角从灰产洗白。",
+            blurb: "港口账本牵出灰产洗白风暴。",
+            storyBackground: "港城、账本、灰产洗白。",
+            missingFields: [],
+            readyToCreate: false,
+          },
+        },
+      },
+    }));
+
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-wizard",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationWizard: {
+          currentStep: "intro",
+          completedSteps: [],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "advance_book_wizard",
+        instruction: "确认当前简介页，进入世界观。",
+        wizardStep: "intro",
+      },
+      tools: makeTools({
+        advanceBookWizard,
+      }),
+    });
+
+    expect(advanceBookWizard).toHaveBeenCalledWith("确认当前简介页，进入世界观。", undefined, "intro");
+    expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      blurb: "港口账本牵出灰产洗白风暴。",
+      storyBackground: "港城、账本、灰产洗白。",
+    }));
+    expect(result.session.creationWizard?.currentStep).toBe("world");
+    expect(result.session.creationWizard?.completedSteps).toContain("intro");
+  });
+
+  it("routes retreat_book_wizard and moves the wizard back one step without clearing the draft", async () => {
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-retreat",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        creationWizard: {
+          currentStep: "world",
+          completedSteps: ["intro", "world"],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "retreat_book_wizard",
+        wizardStep: "world",
+      },
+      tools: makeTools(),
+    });
+
+    expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      blurb: "港口账本牵出灰产洗白风暴。",
+    }));
+    expect(result.session.creationWizard?.currentStep).toBe("intro");
+    expect(result.session.creationWizard?.completedSteps).toContain("intro");
+  });
+
+  it("rejects incomplete drafts at final create time", async () => {
+    const consistency = validateCreationDraftConsistency({
+      concept: "港风商战悬疑，主角从灰产洗白。",
+      title: "夜港账本",
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      missingFields: [],
+      readyToCreate: false,
+    });
+
+    expect(consistency.readyToCreate).toBe(false);
+    expect(consistency.missingFields.length).toBeGreaterThan(0);
+  });
+
   it("routes create_book through the shared create tool and binds the created book", async () => {
+    const fullDraft = {
+      concept: "港风商战悬疑，主角从灰产洗白。",
+      title: "Night Harbor",
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      blurb: "港口账本牵出灰产洗白风暴。",
+      storyBackground: "港城、账本、灰产洗白。",
+      worldPremise: "港口商战和地下账本交织。",
+      novelOutline: "从查账到洗白，再到反转清算。",
+      volumeOutline: "三卷结构，逐步升级。",
+      protagonist: "林砚",
+      supportingCast: "老账房、码头经理、警方线人",
+      characterMatrix: "主角、对立方、盟友",
+      characterArc: "从自保到主动反击",
+      relationshipMap: "合作、利用、背叛",
+      conflictCore: "洗白与旧债回潮的对撞",
+      readyToCreate: true,
+      missingFields: [],
+    };
+
+    expect(validateCreationDraftConsistency(fullDraft)).toEqual({
+      readyToCreate: true,
+      missingFields: [],
+      warnings: [],
+    });
+
     const createBook = vi.fn(async () => ({
       bookId: "night-harbor",
       title: "Night Harbor",
@@ -76,16 +281,7 @@ describe("interaction runtime", () => {
         sessionId: "session-create",
         projectRoot: "/tmp/project",
         automationMode: "semi",
-        creationDraft: {
-          concept: "港风商战悬疑，主角从灰产洗白。",
-          title: "Night Harbor",
-          genre: "urban",
-          platform: "tomato",
-          targetChapters: 120,
-          chapterWordCount: 2800,
-          readyToCreate: true,
-          missingFields: [],
-        },
+        creationDraft: fullDraft,
         messages: [],
         events: [],
       }),
@@ -97,16 +293,43 @@ describe("interaction runtime", () => {
       }),
     });
 
-    expect(createBook).toHaveBeenCalledWith({
+    expect(createBook).toHaveBeenCalledWith(expect.objectContaining({
       title: "Night Harbor",
       genre: "urban",
       platform: "tomato",
       targetChapters: 120,
       chapterWordCount: 2800,
-    });
+    }));
     expect(result.session.activeBookId).toBe("night-harbor");
     expect(result.session.creationDraft).toBeUndefined();
     expect(result.responseText).toContain("Created Night Harbor.");
+  });
+
+  it("blocks create_book when foundation data is incomplete", async () => {
+    await expect(runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-create-blocked",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          title: "Night Harbor",
+          genre: "urban",
+          platform: "tomato",
+          targetChapters: 120,
+          chapterWordCount: 2800,
+          blurb: "港口账本牵出灰产洗白风暴。",
+          missingFields: ["world"],
+          readyToCreate: false,
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "create_book",
+      },
+      tools: makeTools(),
+    })).rejects.toThrow("基础资料尚未完成");
   });
 
   it("clears the creation draft when discard_book_draft is requested", async () => {

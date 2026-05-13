@@ -7,6 +7,7 @@ import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import { isStructuralAuditIssue } from "../utils/audit-issue-classification.js";
 import { extractChapterTail } from "../utils/chapter-tail.js";
 import { readGenreProfile, readBookLanguage, readBookRules } from "./rules-reader.js";
+import { readBrief } from "./planner-context.js";
 import { countChapterLength } from "../utils/length-metrics.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
 import { filterSummaries } from "../utils/context-filter.js";
@@ -150,6 +151,7 @@ export class ReviserAgent extends BaseAgent {
       this.readFileSafe(join(bookDir, "story/parent_canon.md")),
       this.readFileSafe(join(bookDir, "story/fanfic_canon.md")),
     ]);
+    const foundationBrief = await readBrief(join(bookDir, "story"));
 
     // Load genre profile and book rules
     const genreId = genre ?? "other";
@@ -374,6 +376,11 @@ ${outputFormat}${structuralIssueRequiredBlock ? `\n=== STRUCTURAL_TRUTH_ACTIONS 
     const matrixBlock = characterMatrixWorkingSet !== "(文件不存在)"
       ? `\n## 角色交互矩阵\n${characterMatrixWorkingSet}\n`
       : "";
+    const foundationBriefBlock = foundationBrief.trim()
+      ? isEnglish
+        ? `\n## Foundation Brief\n${foundationBrief}\n`
+        : `\n## 基础创作摘要\n${foundationBrief}\n`
+      : "";
     const summariesBlock = governedMemoryBlocks?.summariesBlock
       ?? (chapterSummariesWorkingSet !== "(文件不存在)"
         ? `\n## 章节摘要\n${chapterSummariesWorkingSet}\n`
@@ -440,7 +447,7 @@ ${previousChapterTail}
 ${issueList}
 ${userBriefBlock}
 ## 当前状态卡
-${currentState}
+${foundationBriefBlock}${currentState}
 ${ledgerBlock}
 ${hookDebtBlock}${hookDebtHardConstraintBlock}${hooksBlock}${volumeSummariesBlock}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}
 ${auditGateBlock}${failedDimensionsBlock}

@@ -6,6 +6,112 @@ export interface NaturalLanguageRoutingContext {
   readonly hasFailed?: boolean;
 }
 
+interface HardParamDraft {
+  title?: string;
+  platform?: string;
+  language?: "zh" | "en";
+  targetChapters?: number;
+  chapterWordCount?: number;
+}
+
+function normalizePlatformValue(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (/^番茄|tomato/.test(normalized)) return "tomato";
+  if (/^起点|qidian/.test(normalized)) return "qidian";
+  if (/^飞卢|feilu/.test(normalized)) return "feilu";
+  if (/^其他|other/.test(normalized)) return "other";
+  return value.trim();
+}
+
+function parsePositiveInteger(value: string): number | undefined {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return Math.trunc(parsed);
+}
+
+function extractHardParams(input: string): HardParamDraft | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  const params: HardParamDraft = {};
+  let matched = false;
+  const trailingFieldPattern = /\s*(?:平台|发布平台|语言|语种|目标章数|总章数|章数|每章字数|字数|单章字数).*$/
+;
+
+  function cleanFieldValue(value: string): string {
+    return value.replace(trailingFieldPattern, "").trim();
+  }
+
+  const titleMatch = trimmed.match(/(?:^|[，,；;\n\s])(?:书名|标题)\s*(?:改成|改为|设为|定为|叫做|叫|是)?\s*[：:=]?\s*([^\n，,；;]+)/);
+  if (titleMatch?.[1]) {
+    params.title = cleanFieldValue(titleMatch[1]!);
+    matched = true;
+  }
+
+  const platformMatch = trimmed.match(/(?:^|[，,；;\n\s])(?:平台|发布平台)\s*[：:=]?\s*([^\n，,；;]+)/);
+  if (platformMatch?.[1]) {
+    params.platform = normalizePlatformValue(cleanFieldValue(platformMatch[1]!));
+    matched = true;
+  }
+
+  const languageMatch = trimmed.match(/(?:^|[，,；;\n\s])(?:语言|语种)\s*[：:=]?\s*(中文|zh|英文|en)/i);
+  if (languageMatch?.[1]) {
+    params.language = /en|英文/i.test(languageMatch[1]) ? "en" : "zh";
+    matched = true;
+  }
+
+  const targetMatch = trimmed.match(/(?:^|[，,；;\n\s])(?:目标章数|总章数|章数)\s*[：:=]?\s*(\d+)/);
+  if (targetMatch?.[1]) {
+    const value = parsePositiveInteger(targetMatch[1]);
+    if (value !== undefined) {
+      params.targetChapters = value;
+      matched = true;
+    }
+  } else {
+    const compactTargetMatch = trimmed.match(/\b(\d+)\s*章\b/);
+    if (compactTargetMatch?.[1]) {
+      const value = parsePositiveInteger(compactTargetMatch[1]);
+      if (value !== undefined) {
+        params.targetChapters = value;
+        matched = true;
+      }
+    }
+  }
+
+  const chapterWordMatch = trimmed.match(/(?:^|[，,；;\n\s])(?:每章字数|字数|单章字数)\s*[：:=]?\s*(\d+)/);
+  if (chapterWordMatch?.[1]) {
+    const value = parsePositiveInteger(chapterWordMatch[1]);
+    if (value !== undefined) {
+      params.chapterWordCount = value;
+      matched = true;
+    }
+  } else {
+    const compactWordMatch = trimmed.match(/(?:每章|单章)?\s*(\d+)\s*字/);
+    if (compactWordMatch?.[1]) {
+      const value = parsePositiveInteger(compactWordMatch[1]);
+      if (value !== undefined) {
+        params.chapterWordCount = value;
+        matched = true;
+      }
+    }
+  }
+
+  if (!matched) {
+    const explicitHardParamWords = /(书名|标题|平台|发布平台|语言|语种|章数|每章|每章字数|总章数)/.test(trimmed);
+    if (!explicitHardParamWords) {
+      return null;
+    }
+  }
+
+  if (Object.keys(params).length === 0) {
+    return null;
+  }
+
+  return params;
+}
+
 export function routeNaturalLanguageIntent(
   input: string,
   context: NaturalLanguageRoutingContext = {},
@@ -54,6 +160,17 @@ export function routeNaturalLanguageIntent(
       intent: "create_book",
       ...(bookId ? { bookId } : {}),
     };
+  }
+
+  if (/^\/params(?:\s+|$)/i.test(trimmed)) {
+    const params = extractHardParams(trimmed.slice("/params".length));
+    if (params) {
+      return {
+        intent: "set_book_draft_params",
+        ...(bookId ? { bookId } : {}),
+        ...params,
+      };
+    }
   }
 
   if (/^\/draft$/i.test(trimmed)) {
@@ -251,6 +368,22 @@ export function routeNaturalLanguageIntent(
       intent: "export_book",
       ...(bookId ? { bookId } : {}),
       format: matchedFormat ?? "txt",
+    };
+  }
+
+  if (/(我想写|我要写|想写|建书|创建一本|创建书|新建一本|新建书)/i.test(trimmed)) {
+    return {
+      intent: "develop_book",
+      instruction: trimmed,
+    };
+  }
+
+  const hardParams = extractHardParams(trimmed);
+  if (hardParams) {
+    return {
+      intent: "set_book_draft_params",
+      ...(bookId ? { bookId } : {}),
+      ...hardParams,
     };
   }
 

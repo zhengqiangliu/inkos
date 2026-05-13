@@ -101,6 +101,30 @@ describe("PlannerAgent", () => {
     await expect(readFile(result.runtimePath, "utf-8")).resolves.toContain("mentor conflict");
   });
 
+  it("falls back to the foundation brief when author intent and focus are empty", async () => {
+    await Promise.all([
+      writeFile(join(storyDir, "author_intent.md"), "# Author Intent\n\n", "utf-8"),
+      writeFile(join(storyDir, "current_focus.md"), "# Current Focus\n\n", "utf-8"),
+      writeFile(join(storyDir, "foundation_brief.md"), "# Foundation Brief\n\nAdvance the harbor ledger conflict.\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n", "utf-8"),
+    ]);
+
+    const planner = new PlannerAgent({
+      client: {} as ConstructorParameters<typeof PlannerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await planner.planChapter({
+      book,
+      bookDir,
+      chapterNumber: 3,
+    });
+
+    expect(result.intent.goal).toContain("harbor ledger conflict");
+  });
+
   it("prefers a matched outline node over ordinary current focus text", async () => {
     await Promise.all([
       writeFile(

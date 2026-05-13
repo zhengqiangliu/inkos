@@ -105,7 +105,22 @@ describe("ChapterAnalyzerAgent", () => {
 
   it("uses English prompts when analyzing imported English chapters", async () => {
     const bookDir = await mkdtemp(join(tmpdir(), "inkos-chapter-analyzer-en-"));
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
     const englishContent = "He looked at the sky and waited.";
+    await writeFile(
+      join(storyDir, "foundation_brief.md"),
+      "# Foundation Brief\n\nThe mentor debt and harbor ledger drive the story.\n",
+      "utf-8",
+    );
+    await writeFile(join(storyDir, "current_state.md"), "# Current State\n", "utf-8");
+    await writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8");
+    await writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8");
+    await writeFile(join(storyDir, "subplot_board.md"), "# Subplot Board\n", "utf-8");
+    await writeFile(join(storyDir, "emotional_arcs.md"), "# Emotional Arcs\n", "utf-8");
+    await writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8");
+    await writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\nCheck Warehouse 9.\n", "utf-8");
+    await writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8");
     const agent = new ChapterAnalyzerAgent({
       client: {
         provider: "openai",
@@ -187,6 +202,7 @@ describe("ChapterAnalyzerAgent", () => {
       expect(messages[1]?.content).toContain("Analyze chapter 1");
       expect(messages[1]?.content).toContain("## Chapter Content");
       expect(messages[1]?.content).toContain("## Current State");
+      expect(messages[1]?.content).toContain("Foundation Brief");
       expect(messages[1]?.content).not.toContain("请分析第1章正文");
     } finally {
       await rm(bookDir, { recursive: true, force: true });

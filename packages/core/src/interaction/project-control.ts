@@ -11,6 +11,34 @@ import {
   resolveSessionActiveBook,
 } from "./project-session-store.js";
 
+function summarizeStructuredRequest(request: InteractionRequest): string {
+  const parts: string[] = [request.intent];
+  if ("instruction" in request && typeof request.instruction === "string" && request.instruction.trim()) {
+    parts.push(request.instruction.trim());
+  } else if ("title" in request && typeof request.title === "string" && request.title.trim()) {
+    parts.push(`title=${request.title.trim()}`);
+  }
+  if ("genre" in request && typeof request.genre === "string" && request.genre.trim()) {
+    parts.push(`genre=${request.genre.trim()}`);
+  }
+  if ("platform" in request && typeof request.platform === "string" && request.platform.trim()) {
+    parts.push(`platform=${request.platform.trim()}`);
+  }
+  if ("targetChapters" in request && typeof request.targetChapters === "number") {
+    parts.push(`targetChapters=${request.targetChapters}`);
+  }
+  if ("chapterWordCount" in request && typeof request.chapterWordCount === "number") {
+    parts.push(`chapterWordCount=${request.chapterWordCount}`);
+  }
+  if ("language" in request && typeof request.language === "string" && request.language.trim()) {
+    parts.push(`language=${request.language.trim()}`);
+  }
+  if ("wizardStep" in request && typeof request.wizardStep === "string" && request.wizardStep.trim()) {
+    parts.push(`step=${request.wizardStep}`);
+  }
+  return parts.join(" | ");
+}
+
 async function processProjectInteractionRequestInternal(params: {
   readonly projectRoot: string;
   readonly request: InteractionRequest;
@@ -25,16 +53,30 @@ async function processProjectInteractionRequestInternal(params: {
   const sessionWithBook = resolvedBookId && session.activeBookId !== resolvedBookId
     ? { ...session, activeBookId: resolvedBookId }
     : session;
+  const userSession = appendInteractionMessage(sessionWithBook, {
+    role: "user",
+    content: summarizeStructuredRequest(localizedRequest),
+    timestamp: Date.now(),
+  });
 
   try {
     const result = await runInteractionRequest({
-      session: sessionWithBook,
+      session: userSession,
       request: localizedRequest,
       tools: params.tools,
     });
-    await persistProjectSession(params.projectRoot, result.session);
+    const responseText = result.responseText?.trim();
+    const assistantSession = responseText
+      ? appendInteractionMessage(result.session, {
+          role: "assistant",
+          content: responseText,
+          timestamp: Date.now(),
+        })
+      : result.session;
+    await persistProjectSession(params.projectRoot, assistantSession);
     return {
       ...result,
+      session: assistantSession,
       request: localizedRequest,
     };
   } catch (error) {
@@ -88,9 +130,18 @@ export async function processProjectInteractionInput(params: {
       request,
       tools: params.tools,
     });
-    await persistProjectSession(params.projectRoot, result.session);
+    const responseText = result.responseText?.trim();
+    const assistantSession = responseText
+      ? appendInteractionMessage(result.session, {
+          role: "assistant",
+          content: responseText,
+          timestamp: Date.now(),
+        })
+      : result.session;
+    await persistProjectSession(params.projectRoot, assistantSession);
     return {
       ...result,
+      session: assistantSession,
       request,
     };
   } catch (error) {

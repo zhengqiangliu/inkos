@@ -10,6 +10,7 @@ import { extractChapterTail } from "../utils/chapter-tail.js";
 import { readFile, readdir } from "node:fs/promises";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
+import { readBrief } from "./planner-context.js";
 import { join } from "node:path";
 
 export interface AuditResult {
@@ -396,6 +397,7 @@ export class ContinuityAuditor extends BaseAgent {
         this.readFileSafe(join(bookDir, "story/fanfic_canon.md")),
         this.readFileSafe(join(bookDir, "story/volume_outline.md")),
       ]);
+    const foundationBrief = await readBrief(join(bookDir, "story"));
     const currentState = options?.truthFileOverrides?.currentState ?? diskCurrentState;
     const ledger = options?.truthFileOverrides?.ledger ?? diskLedger;
     const hooks = options?.truthFileOverrides?.hooks ?? diskHooks;
@@ -575,6 +577,11 @@ ${dimList}
         ? `\n## Style Guide\n${styleGuide}`
         : `\n## 文风指南\n${styleGuide}`
       : "";
+    const foundationBriefBlock = foundationBrief.trim()
+      ? isEnglish
+        ? `\n## Foundation Brief\n${foundationBrief}\n`
+        : `\n## 基础创作摘要\n${foundationBrief}\n`
+      : "";
 
     const prevChapterBlock = previousChapter
       ? isEnglish
@@ -590,7 +597,7 @@ ${dimList}
       ? `Review chapter ${chapterNumber}.
 ${deltaAuditBlock}
 ## Current State Card
-${currentState}
+${foundationBriefBlock}${currentState}
 ${ledgerBlock}
 ${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock || outlineBlock}${prevChapterBlock}${styleGuideBlock}
 
@@ -599,7 +606,7 @@ ${chapterContent}`
       : `请审查第${chapterNumber}章。
 ${deltaAuditBlock}
 ## 当前状态卡
-${currentState}
+${foundationBriefBlock}${currentState}
 ${ledgerBlock}
 ${hooksBlock}${volumeSummariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${reducedControlBlock || outlineBlock}${prevChapterBlock}${styleGuideBlock}
 

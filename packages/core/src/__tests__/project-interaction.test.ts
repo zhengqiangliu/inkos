@@ -238,4 +238,141 @@ describe("project interaction control", () => {
       await rm(ideationRoot, { recursive: true, force: true });
     }
   });
+
+  it("routes hard-parameter editing phrases to the shared draft-parameter intent", async () => {
+    const hardParamRoot = await mkdtemp(join(tmpdir(), "inkos-project-hard-params-"));
+    await writeFile(join(hardParamRoot, "inkos.json"), JSON.stringify({ language: "zh" }), "utf-8");
+    await persistProjectSession(hardParamRoot, {
+      ...createProjectSession(hardParamRoot),
+      creationDraft: {
+        concept: "港风商战悬疑",
+        genre: "urban",
+        missingFields: [],
+        readyToCreate: false,
+      },
+    });
+
+    const tools = {
+      listBooks: vi.fn(async () => ["harbor"]),
+      createBook: vi.fn(async () => ({ ok: true })),
+      exportBook: vi.fn(async () => ({ ok: true })),
+      writeNextChapter: vi.fn(async () => ({ ok: true })),
+      reviseDraft: vi.fn(async () => ({ ok: true })),
+      patchChapterText: vi.fn(async () => ({ ok: true })),
+      renameEntity: vi.fn(async () => ({ ok: true })),
+      updateCurrentFocus: vi.fn(async () => ({ ok: true })),
+      updateAuthorIntent: vi.fn(async () => ({ ok: true })),
+      writeTruthFile: vi.fn(async () => ({ ok: true })),
+    };
+
+    try {
+      const result = await processProjectInteractionInput({
+        projectRoot: hardParamRoot,
+        input: "书名改成夜港账本，平台番茄，目标章数120，每章3000字",
+        tools,
+      });
+
+      expect(result.request.intent).toBe("set_book_draft_params");
+      expect(result.session.creationDraft).toEqual(expect.objectContaining({
+        title: "夜港账本",
+        platform: "tomato",
+        targetChapters: 120,
+        chapterWordCount: 3000,
+      }));
+    } finally {
+      await rm(hardParamRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("routes the /params shortcut into hard-parameter editing", async () => {
+    const paramsRoot = await mkdtemp(join(tmpdir(), "inkos-project-params-shortcut-"));
+    await writeFile(join(paramsRoot, "inkos.json"), JSON.stringify({ language: "zh" }), "utf-8");
+    await persistProjectSession(paramsRoot, {
+      ...createProjectSession(paramsRoot),
+      creationDraft: {
+        concept: "港风商战悬疑",
+        genre: "urban",
+        missingFields: [],
+        readyToCreate: false,
+      },
+    });
+
+    const tools = {
+      listBooks: vi.fn(async () => ["harbor"]),
+      createBook: vi.fn(async () => ({ ok: true })),
+      exportBook: vi.fn(async () => ({ ok: true })),
+      writeNextChapter: vi.fn(async () => ({ ok: true })),
+      reviseDraft: vi.fn(async () => ({ ok: true })),
+      patchChapterText: vi.fn(async () => ({ ok: true })),
+      renameEntity: vi.fn(async () => ({ ok: true })),
+      updateCurrentFocus: vi.fn(async () => ({ ok: true })),
+      updateAuthorIntent: vi.fn(async () => ({ ok: true })),
+      writeTruthFile: vi.fn(async () => ({ ok: true })),
+    };
+
+    try {
+      const result = await processProjectInteractionInput({
+        projectRoot: paramsRoot,
+        input: "/params 书名=夜港账本 平台=番茄 目标章数=120 每章字数=3000",
+        tools,
+      });
+
+      expect(result.request.intent).toBe("set_book_draft_params");
+      expect(result.session.creationDraft).toEqual(expect.objectContaining({
+        title: "夜港账本",
+        platform: "tomato",
+        targetChapters: 120,
+        chapterWordCount: 3000,
+      }));
+    } finally {
+      await rm(paramsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the freeform chat build-book path working", async () => {
+    const chatRoot = await mkdtemp(join(tmpdir(), "inkos-project-chat-"));
+    await writeFile(join(chatRoot, "inkos.json"), JSON.stringify({ language: "zh" }), "utf-8");
+    await persistProjectSession(chatRoot, createProjectSession(chatRoot));
+
+    const tools = {
+      listBooks: vi.fn(async () => []),
+      developBookDraft: vi.fn(async () => ({
+        __interaction: {
+          responseText: "我先按港风商战悬疑收着。",
+          details: {
+            creationDraft: {
+              concept: "港风商战悬疑，主角从灰产洗白。",
+              title: "夜港账本",
+              genre: "urban",
+              missingFields: [],
+              readyToCreate: false,
+            },
+          },
+        },
+      })),
+      advanceBookWizard: vi.fn(),
+      createBook: vi.fn(async () => ({ ok: true })),
+      exportBook: vi.fn(async () => ({ ok: true })),
+      writeNextChapter: vi.fn(async () => ({ ok: true })),
+      reviseDraft: vi.fn(async () => ({ ok: true })),
+      patchChapterText: vi.fn(async () => ({ ok: true })),
+      renameEntity: vi.fn(async () => ({ ok: true })),
+      updateCurrentFocus: vi.fn(async () => ({ ok: true })),
+      updateAuthorIntent: vi.fn(async () => ({ ok: true })),
+      writeTruthFile: vi.fn(async () => ({ ok: true })),
+    };
+
+    try {
+      const result = await processProjectInteractionInput({
+        projectRoot: chatRoot,
+        input: "我想写个港风商战悬疑，主角从灰产洗白。",
+        tools,
+      });
+
+      expect(result.request.intent).toBe("develop_book");
+      expect(tools.developBookDraft).toHaveBeenCalled();
+    } finally {
+      await rm(chatRoot, { recursive: true, force: true });
+    }
+  });
 });

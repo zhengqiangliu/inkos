@@ -93,6 +93,7 @@ export async function loadPlanningSeedMaterials(params: {
     chapterSummaries: join(storyDir, "chapter_summaries.md"),
     bookRules: join(storyDir, "book_rules.md"),
     currentState: join(storyDir, "current_state.md"),
+    foundationBrief: join(storyDir, "foundation_brief.md"),
     brief: join(storyDir, "brief.md"),
   } as const;
 
@@ -109,6 +110,7 @@ export async function loadPlanningSeedMaterials(params: {
     bookRulesRaw,
     currentState,
     previousEndingExcerpt,
+    foundationBrief,
     brief,
   ] = await Promise.all([
     readFileOrDefault(sourcePaths.authorIntent),
@@ -121,6 +123,7 @@ export async function loadPlanningSeedMaterials(params: {
     // seed rows when current_state.md is still just the architect's placeholder.
     readCurrentStateWithFallback(params.bookDir, placeholder),
     readPreviousEndingExcerpt(params.bookDir, params.chapterNumber),
+    readBriefFile(sourcePaths.foundationBrief),
     readBriefFile(sourcePaths.brief),
   ]);
 
@@ -137,7 +140,7 @@ export async function loadPlanningSeedMaterials(params: {
     bookRulesRaw,
     currentState,
     chapterSummariesRaw,
-    brief,
+    brief: foundationBrief.trim() ? foundationBrief : brief,
     recentSummaries: chapterSummaries.slice(0, 4).sort((left, right) => left.chapter - right.chapter),
     previousEndingHook: chapterSummaries[0]?.hookActivity || undefined,
     previousEndingExcerpt,
@@ -173,6 +176,7 @@ export async function gatherPlanningMaterials(params: {
     plannerInputs: [
       join(seed.storyDir, "author_intent.md"),
       join(seed.storyDir, "current_focus.md"),
+      join(seed.storyDir, "foundation_brief.md"),
       join(seed.storyDir, "outline", "story_frame.md"),
       join(seed.storyDir, "outline", "volume_map.md"),
       join(seed.storyDir, "chapter_summaries.md"),

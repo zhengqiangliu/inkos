@@ -978,6 +978,7 @@ describe("WriterAgent", () => {
       writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 4\nForce Mara back toward the ledger trail.\n", "utf-8"),
       writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose lean.\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Mara still hides the ledger fragment.\n", "utf-8"),
+      writeFile(join(storyDir, "foundation_brief.md"), "# Foundation Brief\n\nThe harbor ledger and old debt drive the story.\n", "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), [
         "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
         "| --- | --- | --- | --- | --- | --- | --- |",
@@ -1099,6 +1100,8 @@ describe("WriterAgent", () => {
       expect(creativePrompt).toContain("## English Variance Brief");
       expect(creativePrompt).toContain("High-frequency phrases");
       expect(creativePrompt).toContain("Scene obligation");
+      expect(creativePrompt).toContain("Foundation Brief");
+      expect(creativePrompt).toContain("harbor ledger and old debt");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1115,6 +1118,7 @@ describe("WriterAgent", () => {
       writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 4\nPush Mara back toward the archive ledger.\n", "utf-8"),
       writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose lean.\n", "utf-8"),
       writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Mara still hides the ledger fragment.\n", "utf-8"),
+      writeFile(join(storyDir, "foundation_brief.md"), "# Foundation Brief\n\nThe harbor ledger and old debt drive the story.\n", "utf-8"),
       writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- ledger-fragment\n", "utf-8"),
       writeFile(join(storyDir, "chapter_summaries.md"), "# Chapter Summaries\n", "utf-8"),
     ]);

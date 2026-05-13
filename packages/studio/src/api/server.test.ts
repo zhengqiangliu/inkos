@@ -261,6 +261,7 @@ vi.mock("@actalk/inkos-core", () => {
     listModelsForService: listModelsForServiceMock,
     readVolumeMap: readVolumeMapMock,
     extractChapterLimitFromOutline: extractChapterLimitFromOutlineMock,
+    InteractionRequestSchema: { parse: (value: unknown) => value },
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
   };
 });
@@ -8123,5 +8124,64 @@ describe("createStudioServer daemon lifecycle", () => {
         }),
       }),
     });
+  });
+
+  it("posts structured interaction requests through the shared interaction session endpoint", async () => {
+    processProjectInteractionRequestMock.mockResolvedValueOnce({
+      request: { intent: "advance_book_wizard" },
+      session: {
+        sessionId: "session-4",
+        projectRoot: root,
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        creationWizard: {
+          currentStep: "world",
+          completedSteps: ["intro"],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      },
+      responseText: "已完成简介 / 故事背景并进入下一步。",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/interaction/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: {
+          intent: "advance_book_wizard",
+          instruction: "确认当前简介页，进入世界观。",
+          wizardStep: "intro",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      response: "已完成简介 / 故事背景并进入下一步。",
+      session: expect.objectContaining({
+        creationWizard: expect.objectContaining({
+          currentStep: "world",
+        }),
+      }),
+    });
+    expect(processProjectInteractionRequestMock).toHaveBeenCalledWith(expect.objectContaining({
+      projectRoot: root,
+      activeBookId: undefined,
+      request: expect.objectContaining({
+        intent: "advance_book_wizard",
+        wizardStep: "intro",
+      }),
+    }));
   });
 });

@@ -510,6 +510,7 @@ export interface InitBookOptions {
   readonly externalContext?: string;
   readonly authorIntent?: string;
   readonly currentFocus?: string;
+  readonly foundationBrief?: string;
 }
 
 export class PipelineRunner {
@@ -1268,6 +1269,7 @@ export class PipelineRunner {
         stagingBookDir,
         book.language ?? gp.language,
         options.authorIntent ?? this.config.externalContext,
+        options.foundationBrief ?? options.externalContext ?? this.config.externalContext,
       );
       if (options.currentFocus?.trim()) {
         await writeFile(

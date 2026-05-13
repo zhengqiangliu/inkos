@@ -5,6 +5,7 @@ import type { BookRules } from "../models/book-rules.js";
 import { buildWriterSystemPrompt, type FanficContext } from "./writer-prompts.js";
 import { buildSettlerSystemPrompt, buildSettlerUserPrompt } from "./settler-prompts.js";
 import { buildObserverSystemPrompt, buildObserverUserPrompt } from "./observer-prompts.js";
+import { readBrief } from "./planner-context.js";
 import { parseSettlerDeltaOutput } from "./settler-delta-parser.js";
 import { parseSettlementOutput } from "./settler-parser.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
@@ -183,6 +184,7 @@ export class WriterAgent extends BaseAgent {
       storyBible, volumeOutline, styleGuide, currentState, ledger, hooks,
       chapterSummaries, subplotBoard, emotionalArcs, characterMatrix, styleProfileRaw,
       parentCanon, fanficCanonRaw,
+      foundationBrief,
     ] = await Promise.all([
         this.readFileOrDefault(join(bookDir, "story/story_bible.md")),
         this.readFileOrDefault(join(bookDir, "story/volume_outline.md")),
@@ -197,6 +199,7 @@ export class WriterAgent extends BaseAgent {
         this.readFileOrDefault(join(bookDir, "story/style_profile.json")),
         this.readFileOrDefault(join(bookDir, "story/parent_canon.md")),
         this.readFileOrDefault(join(bookDir, "story/fanfic_canon.md")),
+        readBrief(join(bookDir, "story")),
       ]);
 
     const recentChapters = await this.loadRecentChapters(bookDir, chapterNumber);
@@ -263,16 +266,17 @@ export class WriterAgent extends BaseAgent {
     const creativeUserPrompt = input.chapterIntent && input.contextPackage && input.ruleStack
       ? this.buildGovernedUserPrompt({
           chapterNumber,
-          chapterIntent: input.chapterIntent,
-          contextPackage: input.contextPackage,
-          ruleStack: input.ruleStack,
-          trace: input.trace,
-          lengthSpec: resolvedLengthSpec,
-          language: book.language ?? genreProfile.language,
-          varianceBrief: englishVarianceBrief?.text,
-          selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
-          dialogueQuoteGuideline,
-        })
+        chapterIntent: input.chapterIntent,
+        contextPackage: input.contextPackage,
+        ruleStack: input.ruleStack,
+        trace: input.trace,
+        lengthSpec: resolvedLengthSpec,
+        language: book.language ?? genreProfile.language,
+        varianceBrief: englishVarianceBrief?.text,
+        selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
+        dialogueQuoteGuideline,
+        foundationBrief,
+      })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
           const filteredHooks = filterHooks(hooks);
@@ -295,6 +299,7 @@ export class WriterAgent extends BaseAgent {
             storyBible,
             volumeOutline,
             currentState,
+            foundationBrief,
             ledger: genreProfile.numericalSystem ? ledger : "",
             hooks: povFilteredHooks,
             recentChapters,
@@ -844,6 +849,7 @@ export class WriterAgent extends BaseAgent {
     readonly storyBible: string;
     readonly volumeOutline: string;
     readonly currentState: string;
+    readonly foundationBrief: string;
     readonly ledger: string;
     readonly hooks: string;
     readonly recentChapters: string;
@@ -871,6 +877,11 @@ export class WriterAgent extends BaseAgent {
 
     const summariesBlock = params.chapterSummaries !== "(文件尚未创建)"
       ? `\n## 章节摘要（全部历史章节压缩上下文）\n${params.chapterSummaries}\n`
+      : "";
+    const foundationBriefBlock = params.foundationBrief?.trim()
+      ? params.language === "en"
+        ? `\n## Foundation Brief\n${params.foundationBrief}\n`
+        : `\n## 基础创作摘要\n${params.foundationBrief}\n`
       : "";
 
     const subplotBlock = params.subplotBoard !== "(文件尚未创建)"
@@ -930,7 +941,7 @@ ${previousChapterTailBlock}
 ${hookDebtConstraintBlock}
 
 ## Current State
-${params.currentState}
+${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
 ## Plot Threads
 ${params.hooks}
@@ -962,7 +973,7 @@ ${previousChapterTailBlock}
 ${hookDebtConstraintBlock}
 
 ## 当前状态卡
-${params.currentState}
+${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
 ## 伏笔池
 ${params.hooks}
@@ -999,6 +1010,7 @@ ${lengthRequirementBlock}
     readonly varianceBrief?: string;
     readonly selectedEvidenceBlock?: string;
     readonly dialogueQuoteGuideline?: string;
+    readonly foundationBrief: string;
   }): string {
     const contextSections = params.contextPackage.selectedContext
       .map((entry) => [
@@ -1039,6 +1051,11 @@ ${lengthRequirementBlock}
         ? `\n## Dialogue Quote Convention\n${params.dialogueQuoteGuideline}\n`
         : `\n## 对话引号约定\n${params.dialogueQuoteGuideline}\n`
       : "";
+    const foundationBriefBlock = params.foundationBrief?.trim()
+      ? params.language === "en"
+        ? `\n## Foundation Brief\n${params.foundationBrief}\n`
+        : `\n## 基础创作摘要\n${params.foundationBrief}\n`
+      : "";
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
@@ -1046,6 +1063,7 @@ ${lengthRequirementBlock}
 ## Chapter Intent
 ${params.chapterIntent}
 
+${foundationBriefBlock}
 ## Selected Context
 ${contextSections || "(none)"}
 ${selectedEvidenceBlock}
@@ -1074,6 +1092,7 @@ ${lengthRequirementBlock}
 ## 本章意图
 ${params.chapterIntent}
 
+${foundationBriefBlock}
 ## 已选上下文
 ${contextSections || "(无)"}
 ${selectedEvidenceBlock}

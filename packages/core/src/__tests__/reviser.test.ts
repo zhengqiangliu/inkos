@@ -48,6 +48,11 @@ describe("ReviserAgent", () => {
       }, null, 2),
       "utf-8",
     );
+    await writeFile(
+      join(bookDir, "story", "foundation_brief.md"),
+      "# Foundation Brief\n\nThe mentor debt and harbor ledger drive the story.\n",
+      "utf-8",
+    );
 
     const agent = new ReviserAgent({
       client: {
@@ -89,9 +94,12 @@ describe("ReviserAgent", () => {
         | ReadonlyArray<{ content: string }>
         | undefined;
       const systemPrompt = messages?.[0]?.content ?? "";
+      const userPrompt = messages?.[1]?.content ?? "";
 
       expect(systemPrompt).toContain("MUST be in English");
       expect(systemPrompt).toContain("written entirely in English");
+      expect(userPrompt).toContain("Foundation Brief");
+      expect(userPrompt).toContain("mentor debt and harbor ledger");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

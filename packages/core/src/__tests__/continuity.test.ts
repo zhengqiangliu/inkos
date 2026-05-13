@@ -47,6 +47,7 @@ describe("ContinuityAuditor", () => {
       writeFile(join(storyDir, "character_matrix.md"), "# Character Matrix\n", "utf-8"),
       writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\nReturn to the mentor debt.\n", "utf-8"),
       writeFile(join(storyDir, "style_guide.md"), "# Style Guide\n\n- Keep the prose restrained.\n", "utf-8"),
+      writeFile(join(storyDir, "foundation_brief.md"), "# Foundation Brief\n\nThe mentor debt and harbor ledger drive the story.\n", "utf-8"),
     ]);
 
     const auditor = new ContinuityAuditor({
@@ -81,8 +82,11 @@ describe("ContinuityAuditor", () => {
         | ReadonlyArray<{ content: string }>
         | undefined;
       const systemPrompt = messages?.[0]?.content ?? "";
+      const userPrompt = messages?.[1]?.content ?? "";
 
       expect(systemPrompt).toContain("ALL OUTPUT MUST BE IN ENGLISH");
+      expect(userPrompt).toContain("Foundation Brief");
+      expect(userPrompt).toContain("mentor debt and harbor ledger");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

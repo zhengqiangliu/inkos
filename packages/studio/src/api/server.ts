@@ -13,6 +13,7 @@ import {
   computeAnalytics,
   loadProjectConfig,
   loadProjectSession,
+  processProjectInteractionInput,
   processProjectInteractionRequest,
   readVolumeMap,
   resolveSessionActiveBook,
@@ -40,6 +41,7 @@ import {
   buildExportArtifact,
   GLOBAL_ENV_PATH,
   extractChapterLimitFromOutline,
+  InteractionRequestSchema,
   type AgentContext,
   type ResolvedModel,
   type PipelineConfig,
@@ -6328,6 +6330,39 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         ? { ...session, activeBookId }
         : session,
       activeBookId,
+    });
+  });
+
+  app.post("/api/v1/interaction/session", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as {
+      input?: string;
+      request?: unknown;
+      activeBookId?: string;
+    };
+
+    const pipeline = new PipelineRunner(await buildPipelineConfig());
+    const tools = createInteractionToolsFromDeps(pipeline, state);
+    const activeBookId = body.activeBookId?.trim() || undefined;
+
+    const result = body.request !== undefined
+      ? await processProjectInteractionRequest({
+          projectRoot: root,
+          request: InteractionRequestSchema.parse(body.request),
+          tools,
+          activeBookId,
+        })
+      : await processProjectInteractionInput({
+          projectRoot: root,
+          input: body.input ?? "",
+          tools,
+          activeBookId,
+        });
+
+    return c.json({
+      response: result.responseText,
+      details: result.details,
+      session: result.session,
+      request: result.request,
     });
   });
 

@@ -12,20 +12,23 @@ import type {
   ToolDefinition,
 } from "../index.js";
 import { chatCompletion, chatWithTools } from "../index.js";
+import { readGenreProfile } from "../agents/rules-reader.js";
 import { executeEditTransaction } from "./edit-controller.js";
 import type { InteractionRuntimeTools } from "./runtime.js";
-import type { BookCreationDraft } from "./session.js";
+import type { BookCreationDraft, BookCreationWizardStep } from "./session.js";
+import type { ParsedGenreProfile } from "../models/genre-profile.js";
 import { writeExportArtifact } from "./export-artifact.js";
 
 type PipelineLike = Pick<PipelineRunner, "writeNextChapter" | "reviseDraft"> & {
-  readonly initBook?: (
-    book: BookConfig,
-    options?: {
-      readonly externalContext?: string;
-      readonly authorIntent?: string;
-      readonly currentFocus?: string;
-    },
-  ) => Promise<void>;
+    readonly initBook?: (
+      book: BookConfig,
+      options?: {
+        readonly externalContext?: string;
+        readonly authorIntent?: string;
+        readonly currentFocus?: string;
+        readonly foundationBrief?: string;
+      },
+    ) => Promise<void>;
 };
 type StateLike = Pick<StateManager, "ensureControlDocuments" | "bookDir" | "loadBookConfig" | "loadChapterIndex" | "saveChapterIndex" | "listBooks">;
 type InstrumentablePipelineLike = PipelineLike & {
@@ -33,8 +36,14 @@ type InstrumentablePipelineLike = PipelineLike & {
     logger?: Logger;
     client?: LLMClient;
     model?: string;
+    projectRoot?: string;
   };
 };
+
+interface WizardGenreContext {
+  readonly profile: ParsedGenreProfile["profile"];
+  readonly body: string;
+}
 
 function normalizePlatform(platform?: string): Platform {
   switch (platform) {
@@ -92,6 +101,8 @@ function buildCreationExternalContext(input: {
   readonly conflictCore?: string;
   readonly volumeOutline?: string;
   readonly constraints?: string;
+  readonly authorIntent?: string;
+  readonly currentFocus?: string;
 }): string | undefined {
   const sections = [
     input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
@@ -107,6 +118,8 @@ function buildCreationExternalContext(input: {
     input.volumeOutline ? `## 卷纲方向\n${input.volumeOutline}` : undefined,
     input.blurb ? `## 简介卖点\n${input.blurb}` : undefined,
     input.constraints ? `## 创作约束\n${input.constraints}` : undefined,
+    input.authorIntent ? `## 作者意图\n${input.authorIntent}` : undefined,
+    input.currentFocus ? `## 当前聚焦\n${input.currentFocus}` : undefined,
   ].filter((section): section is string => Boolean(section?.trim()));
 
   if (sections.length === 0) {
@@ -114,6 +127,306 @@ function buildCreationExternalContext(input: {
   }
 
   return sections.join("\n\n");
+}
+
+type WizardMode = "generate" | "modify";
+
+const WIZARD_STEP_FIELDS: Record<BookCreationWizardStep, ReadonlyArray<string>> = {
+  intro: ["blurb", "storyBackground"],
+  world: ["worldPremise", "settingNotes"],
+  outline: ["novelOutline", "conflictCore"],
+  volume: ["volumeOutline"],
+  characters: ["protagonist", "supportingCast", "characterMatrix"],
+  arc: ["characterArc"],
+  relation: ["relationshipMap"],
+  review: ["title", "genre", "platform", "language", "targetChapters", "chapterWordCount"],
+};
+
+const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
+  readonly title: string;
+  readonly framework: ReadonlyArray<string>;
+  readonly constraints: ReadonlyArray<string>;
+}> = {
+  intro: {
+    title: "简介 / 故事背景",
+    framework: ["一句话卖点", "故事背景", "主角处境", "引爆点", "核心悬念"],
+    constraints: [
+      "只补当前页，不要扩写世界观、卷纲、角色矩阵、关系等其他页。",
+      "一句话卖点必须能直接用于书籍简介或封面文案开头。",
+      "背景和引爆点要具体，不要散文式抒情。",
+    ],
+  },
+  world: {
+    title: "世界观",
+    framework: ["时间 / 空间背景", "规则体系", "势力 / 阵营", "资源 / 权力结构", "不可违背的世界规则"],
+    constraints: [
+      "只补世界观页，不要写故事大纲或人物弧光。",
+      "世界规则必须可检查、可执行、可复用。",
+      "势力和资源结构必须服务冲突，不要堆设定名词。",
+    ],
+  },
+  outline: {
+    title: "小说大纲",
+    framework: ["开局", "发展", "转折", "高潮", "结局方向", "主角修行路 / 成长路", "大事件时间线（按章节）", "结构设计", "卡点设计（按章节）"],
+    constraints: [
+      "只补大纲页，不要写卷纲或人物关系页。",
+      "大事件时间线和卡点设计必须按章节或章节段落排列。",
+      "结构设计要说明前中后段的功能分配。",
+    ],
+  },
+  volume: {
+    title: "卷纲规划",
+    framework: ["总卷数", "每卷目标", "每卷主冲突", "每卷收束", "卷末钩子", "卷与主线关系"],
+    constraints: [
+      "只补卷纲页，不要重写全书总大纲。",
+      "每卷必须有明确推进目标和卷末收束点。",
+      "卷纲必须和主线成长同步，不要空转。",
+    ],
+  },
+  characters: {
+    title: "主角 / 配角",
+    framework: ["主角卡", "关键配角卡", "角色矩阵", "人物功能", "出场节点"],
+    constraints: [
+      "只补角色页，不要写完整关系网或结局。",
+      "角色必须有明确剧情功能，避免空名词堆砌。",
+      "主角和关键配角都要有可追踪的动机与作用。",
+    ],
+  },
+  arc: {
+    title: "人物弧光",
+    framework: ["核心弧光", "起点状态", "成长转折", "终点状态"],
+    constraints: [
+      "只补人物弧光页，不要扩写角色矩阵或世界观。",
+      "弧光必须和主线冲突绑定，不能游离。",
+      "起点、转折、终点要形成清晰变化链。",
+    ],
+  },
+  relation: {
+    title: "人物关系",
+    framework: ["关系矩阵", "核心关系线", "关系驱动力", "关系冲突 / 转折", "关系变化方向"],
+    constraints: [
+      "只补人物关系页，不要写大纲或卷纲。",
+      "关系必须能推动剧情，不只是身份表。",
+      "关系变化方向要明确，便于后续章节拆解。",
+    ],
+  },
+  review: {
+    title: "最终确认",
+    framework: ["完整性检查", "一致性检查", "缺口修补", "可创建确认"],
+    constraints: [
+      "只做最终核对，不要再扩写新内容。",
+      "如果还有缺口，明确指出缺口并给出最小修补建议。",
+      "确认通过后才能创建书籍。",
+    ],
+  },
+};
+
+function getWizardStepTemplate(step: BookCreationWizardStep) {
+  return WIZARD_STEP_PROMPTS[step] ?? WIZARD_STEP_PROMPTS.intro;
+}
+
+export function buildWizardPrompt(
+  step: BookCreationWizardStep,
+  mode: WizardMode,
+  userMessage: string,
+  existingDraft?: BookCreationDraft,
+  genreContext?: WizardGenreContext,
+): string {
+  const template = getWizardStepTemplate(step);
+  const allowedFields = WIZARD_STEP_FIELDS[step].join("、");
+  const draftBlock = existingDraft
+    ? ["## 当前草案", JSON.stringify(existingDraft, null, 2)].join("\n")
+    : "## 当前草案\n（空）";
+  const genreBlock = genreContext
+    ? [
+        "## 题材库约束",
+        `- 题材：${genreContext.profile.name} (${genreContext.profile.id})`,
+        `- 章节类型：${genreContext.profile.chapterTypes.join("、") || "无"}`,
+        `- 节奏规则：${genreContext.profile.pacingRule || "无"}`,
+        `- 数值体系：${genreContext.profile.numericalSystem ? "有" : "无"}`,
+        `- 战力体系：${genreContext.profile.powerScaling ? "有" : "无"}`,
+        `- 时代考据：${genreContext.profile.eraResearch ? "需要" : "不需要"}`,
+        `- 疲劳词：${genreContext.profile.fatigueWords.slice(0, 12).join("、") || "无"}`,
+        `- 读者爽点：${genreContext.profile.satisfactionTypes.join("、") || "无"}`,
+        "",
+        "## 题材规则正文",
+        genreContext.body.trim() || "（无）",
+      ].join("\n")
+    : "";
+
+  return [
+    `当前步骤：${template.title}`,
+    `模式：${mode === "generate" ? "生成当前页" : "只修改当前页"}`,
+    "",
+    ...(genreBlock ? [genreBlock, ""] : []),
+    "内容框架必须包含：",
+    ...template.framework.map((item, index) => `${index + 1}. ${item}`),
+    "",
+    "约束：",
+    ...template.constraints.map((item, index) => `${index + 1}. ${item}`),
+    `4. 只允许更新以下字段：${allowedFields}。其他字段必须保持草案原值。`,
+    "5. 多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。",
+    "",
+    draftBlock,
+    "",
+    "## 用户输入",
+    userMessage.trim(),
+  ].join("\n");
+}
+
+function parseToolCallArguments(toolCall: { arguments: string } | undefined): Record<string, unknown> {
+  if (!toolCall) return {};
+  try {
+    const parsed = JSON.parse(toolCall.arguments);
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function applyWizardStepDraft(
+  step: BookCreationWizardStep,
+  existingDraft: BookCreationDraft | undefined,
+  concept: string,
+  fields: Readonly<Record<string, unknown>>,
+): BookCreationDraft {
+  const draft: BookCreationDraft = {
+    concept,
+    missingFields: [],
+    readyToCreate: false,
+    ...(existingDraft ?? {}),
+  };
+  const allowedFields = new Set(WIZARD_STEP_FIELDS[step]);
+
+  for (const [key, value] of Object.entries(fields)) {
+    if (!allowedFields.has(key) || value === undefined || value === null || value === "") {
+      continue;
+    }
+    const text = typeof value === "string" ? value : String(value);
+    switch (key) {
+      case "blurb":
+        draft.blurb = text;
+        break;
+      case "storyBackground":
+        draft.storyBackground = text;
+        break;
+      case "worldPremise":
+        draft.worldPremise = text;
+        break;
+      case "settingNotes":
+        draft.settingNotes = text;
+        break;
+      case "novelOutline":
+        draft.novelOutline = text;
+        break;
+      case "conflictCore":
+        draft.conflictCore = text;
+        break;
+      case "volumeOutline":
+        draft.volumeOutline = text;
+        break;
+      case "protagonist":
+        draft.protagonist = text;
+        break;
+      case "supportingCast":
+        draft.supportingCast = text;
+        break;
+      case "characterMatrix":
+        draft.characterMatrix = text;
+        break;
+      case "characterArc":
+        draft.characterArc = text;
+        break;
+      case "relationshipMap":
+        draft.relationshipMap = text;
+        break;
+      case "title":
+        draft.title = text;
+        break;
+      case "genre":
+        draft.genre = text;
+        break;
+      case "platform":
+        draft.platform = text;
+        break;
+      case "language":
+        if (text === "zh" || text === "en") draft.language = text;
+        break;
+      case "targetChapters": {
+        const n = Number(text);
+        if (Number.isFinite(n) && n > 0) draft.targetChapters = Math.trunc(n);
+        break;
+      }
+      case "chapterWordCount": {
+        const n = Number(text);
+        if (Number.isFinite(n) && n > 0) draft.chapterWordCount = Math.trunc(n);
+        break;
+      }
+    }
+  }
+
+  return draft;
+}
+
+async function runWizardDraftTool(params: {
+  readonly pipeline: InstrumentablePipelineLike;
+  readonly step: BookCreationWizardStep;
+  readonly mode: WizardMode;
+  readonly input: string;
+  readonly existingDraft?: BookCreationDraft;
+}): Promise<{
+  readonly draft: BookCreationDraft;
+  readonly responseText: string;
+  readonly fieldsUpdated: ReadonlyArray<string>;
+  readonly draftRaw: string;
+}> {
+  const { pipeline, step, mode, input, existingDraft } = params;
+  const concept = input.trim() || existingDraft?.concept || getWizardStepTemplate(step).title;
+  const projectRoot = pipeline.config?.projectRoot;
+  const genreContext = existingDraft?.genre && projectRoot
+    ? await readGenreProfile(projectRoot, existingDraft.genre).catch(() => null)
+    : null;
+
+  if (!pipeline.config?.client || !pipeline.config?.model) {
+    return {
+      draft: applyWizardStepDraft(step, existingDraft, concept, {}),
+      responseText: "请先配置 LLM 模型，然后再继续建书向导。",
+      fieldsUpdated: [],
+      draftRaw: "",
+    };
+  }
+
+  const result = await chatWithTools(
+    pipeline.config.client,
+    pipeline.config.model,
+    [
+      {
+        role: "system",
+        content: [
+          "你是 InkOS 的建书向导助手。",
+          "你只能处理当前步骤，并且只能更新当前页允许的字段。",
+          "不要改写其他页面内容。",
+          "如果信息不足，可以给出合理默认值，但必须保持当前页框架完整。",
+          "题材库约束优先于通用表达，必须遵守题材规则和禁忌。",
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: buildWizardPrompt(step, mode, input, existingDraft, genreContext ?? undefined),
+      },
+    ],
+    [CREATE_BOOK_TOOL],
+    { temperature: 0.35 },
+  );
+
+  const toolArgs = parseToolCallArguments(result.toolCalls[0]);
+  const draft = applyWizardStepDraft(step, existingDraft, concept, toolArgs);
+  return {
+    draft,
+    responseText: result.content?.trim() || "已更新当前页内容。",
+    fieldsUpdated: Object.keys(toolArgs).filter((key) => WIZARD_STEP_FIELDS[step].includes(key)),
+    draftRaw: result.content?.trim() || "",
+  };
 }
 
 export function buildChapterFileLookup(files: ReadonlyArray<string>): ReadonlyMap<number, string> {
@@ -393,6 +706,9 @@ function applyFieldsToDraft(
       case "blurb":
         draft.blurb = value;
         break;
+      case "brief":
+        draft.blurb = value;
+        break;
       case "storyBackground":
         draft.storyBackground = value;
         break;
@@ -443,6 +759,69 @@ function applyFieldsToDraft(
   return draft;
 }
 
+function buildLegacyDraftUserContent(input: string, existingDraft?: BookCreationDraft): string {
+  if (!existingDraft) return input;
+  return [
+    `当前草案参数：${JSON.stringify(existingDraft, null, 2)}`,
+    "",
+    `用户输入：${input}`,
+  ].join("\n");
+}
+
+async function runLegacyDraftTool(params: {
+  readonly pipeline: InstrumentablePipelineLike;
+  readonly input: string;
+  readonly existingDraft?: BookCreationDraft;
+}): Promise<{
+  readonly draft: BookCreationDraft;
+  readonly responseText: string;
+  readonly toolCall?: { name: string; arguments: Record<string, unknown> };
+}> {
+  const { pipeline, input, existingDraft } = params;
+  const concept = existingDraft?.concept ?? input;
+
+  if (!pipeline.config?.client || !pipeline.config?.model) {
+    return {
+      draft: applyFieldsToDraft(existingDraft, {}, concept),
+      responseText: "请先配置 LLM 模型，然后再创建书籍。",
+    };
+  }
+
+  const result = await chatWithTools(
+    pipeline.config.client,
+    pipeline.config.model,
+    [
+      { role: "system", content: BOOK_DRAFT_SYSTEM_PROMPT },
+      { role: "user", content: buildLegacyDraftUserContent(input, existingDraft) },
+    ],
+    [CREATE_BOOK_TOOL],
+    { temperature: 0.4 },
+  );
+
+  const toolCall = result.toolCalls[0];
+  const parsedArgs = parseToolCallArguments(toolCall);
+  const normalizedArgs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsedArgs)) {
+    if (value === undefined || value === null) continue;
+    normalizedArgs[key] = typeof value === "string" ? value : String(value);
+  }
+
+  const draft = applyFieldsToDraft(existingDraft, normalizedArgs, concept);
+  return {
+    draft: {
+      ...draft,
+      readyToCreate: Boolean(draft.title && draft.genre && draft.platform),
+    },
+    responseText: result.content?.trim() || "已生成建书参数，请确认或修改。",
+    toolCall: toolCall
+      ? {
+          name: toolCall.name,
+          arguments: parsedArgs,
+        }
+      : undefined,
+  };
+}
+
 function formatDraftForUserMessage(
   existingDraft: BookCreationDraft | undefined,
   userMessage: string,
@@ -484,85 +863,36 @@ export function createInteractionToolsFromDeps(
   return {
     listBooks: () => state.listBooks(),
     developBookDraft: async (input, existingDraft) => {
-      const concept = existingDraft?.concept ?? input;
-
-      if (!instrumentedPipeline.config?.client || !instrumentedPipeline.config?.model) {
-        // Fallback: no LLM configured
-        return {
-          __interaction: {
-            responseText: "请先配置 LLM 模型，然后再创建书籍。",
-            details: {
-              creationDraft: {
-                concept,
-                missingFields: ["title", "genre", "targetChapters"],
-                readyToCreate: false,
-              },
-            },
-          },
-        };
-      }
-
-      // Build messages - include existing draft context if present
-      const userContent = existingDraft
-        ? `当前草案参数：${JSON.stringify(existingDraft, null, 2)}\n\n用户输入：${input}`
-        : input;
-
-      const result = await chatWithTools(
-        instrumentedPipeline.config.client,
-        instrumentedPipeline.config.model,
-        [
-          { role: "system", content: BOOK_DRAFT_SYSTEM_PROMPT },
-          { role: "user", content: userContent },
-        ],
-        [CREATE_BOOK_TOOL],
-        { temperature: 0.4 },
-      );
-
-      // Extract tool call if present
-      const toolCall = result.toolCalls[0];
-      let parsedArgs: Record<string, unknown> = {};
-      if (toolCall) {
-        try {
-          parsedArgs = JSON.parse(toolCall.arguments);
-        } catch {
-          // If parsing fails, use empty args
-        }
-      }
-
-      // Build a draft from tool call arguments
-      const draft: BookCreationDraft = {
-        concept,
-        title: (parsedArgs.title as string) ?? existingDraft?.title,
-        genre: (parsedArgs.genre as string) ?? existingDraft?.genre,
-        platform: (parsedArgs.platform as string) ?? existingDraft?.platform,
-        language: (parsedArgs.language as "zh" | "en") ?? existingDraft?.language,
-        targetChapters: (parsedArgs.targetChapters as number) ?? existingDraft?.targetChapters,
-        chapterWordCount: (parsedArgs.chapterWordCount as number) ?? existingDraft?.chapterWordCount,
-        blurb: (parsedArgs.brief as string) ?? existingDraft?.blurb,
-        storyBackground: (parsedArgs.storyBackground as string) ?? existingDraft?.storyBackground,
-        worldPremise: (parsedArgs.worldPremise as string) ?? existingDraft?.worldPremise,
-        settingNotes: (parsedArgs.settingNotes as string) ?? existingDraft?.settingNotes,
-        novelOutline: (parsedArgs.novelOutline as string) ?? existingDraft?.novelOutline,
-        protagonist: (parsedArgs.protagonist as string) ?? existingDraft?.protagonist,
-        supportingCast: (parsedArgs.supportingCast as string) ?? existingDraft?.supportingCast,
-        characterMatrix: (parsedArgs.characterMatrix as string) ?? existingDraft?.characterMatrix,
-        characterArc: (parsedArgs.characterArc as string) ?? existingDraft?.characterArc,
-        relationshipMap: (parsedArgs.relationshipMap as string) ?? existingDraft?.relationshipMap,
-        conflictCore: (parsedArgs.conflictCore as string) ?? existingDraft?.conflictCore,
-        volumeOutline: (parsedArgs.volumeOutline as string) ?? existingDraft?.volumeOutline,
-        constraints: (parsedArgs.constraints as string) ?? existingDraft?.constraints,
-        authorIntent: (parsedArgs.authorIntent as string) ?? existingDraft?.authorIntent,
-        currentFocus: (parsedArgs.currentFocus as string) ?? existingDraft?.currentFocus,
-        missingFields: [],
-        readyToCreate: Boolean(parsedArgs.title && parsedArgs.genre && parsedArgs.platform),
-      };
-
+      const result = await runLegacyDraftTool({
+        pipeline: instrumentedPipeline,
+        input,
+        existingDraft,
+      });
       return {
         __interaction: {
-          responseText: result.content || "已生成建书参数，请确认或修改。",
+          responseText: result.responseText,
           details: {
-            creationDraft: draft,
-            toolCall: toolCall ? { name: toolCall.name, arguments: parsedArgs } : undefined,
+            creationDraft: result.draft,
+            toolCall: result.toolCall,
+          },
+        },
+      };
+    },
+    advanceBookWizard: async (input, existingDraft, wizardStep = "intro") => {
+      const result = await runWizardDraftTool({
+        pipeline: instrumentedPipeline,
+        step: wizardStep,
+        mode: "generate",
+        input,
+        existingDraft,
+      });
+      return {
+        __interaction: {
+          responseText: result.responseText,
+          details: {
+            creationDraft: result.draft,
+            fieldsUpdated: result.fieldsUpdated,
+            draftRaw: result.draftRaw,
           },
         },
       };
@@ -572,8 +902,10 @@ export function createInteractionToolsFromDeps(
       if (!pipeline.initBook) {
         throw new Error("Pipeline does not support shared book creation.");
       }
+      const foundationBrief = buildCreationExternalContext(input);
       await pipeline.initBook(book, {
-        externalContext: buildCreationExternalContext(input),
+        externalContext: foundationBrief,
+        foundationBrief,
         authorIntent: input.authorIntent,
         currentFocus: input.currentFocus,
       });

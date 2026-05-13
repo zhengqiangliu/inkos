@@ -221,6 +221,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   const currentIndex = Math.max(0, readStepIndex(currentStep));
   const currentStepMeta = WIZARD_STEPS[currentIndex] ?? WIZARD_STEPS[0]!;
   const nextStepMeta = WIZARD_STEPS[currentIndex + 1];
+  const canGoBack = currentIndex > 0;
   const canCreate = currentStep === "review" && Boolean(draft?.readyToCreate || (draft?.title && draft?.genre && draft?.targetChapters && draft?.chapterWordCount));
 
   const runAgentInstruction = async (instruction: string): Promise<AgentResponse> => {
@@ -237,6 +238,26 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
     setError(null);
     try {
       const instruction = input.trim() || `确认当前${currentStepMeta.title}，自动生成下一步 ${nextStepMeta.title}。`;
+      const data = await runAgentInstruction(instruction);
+      setInput("");
+      setStatus(data.response ?? null);
+      setDraft(data.session?.creationDraft ?? draft);
+      setWizard(data.session?.creationWizard ?? wizard);
+      await refreshDraft();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleBack = async () => {
+    if (!canGoBack) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const previousStep = WIZARD_STEPS[currentIndex - 1];
+      const instruction = input.trim() || `返回上一步，回到 ${previousStep?.title ?? "上一页"}。`;
       const data = await runAgentInstruction(instruction);
       setInput("");
       setStatus(data.response ?? null);
@@ -291,7 +312,7 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
   return (
     <div className="flex flex-1 min-w-0 overflow-hidden">
       <main className="flex-1 min-w-0 overflow-y-auto px-6 py-6 lg:px-8">
-        <div className="mx-auto max-w-5xl space-y-6">
+        <div className="mx-auto max-w-4xl space-y-6">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <button onClick={nav.toDashboard} className={c.link}>{t("bread.books")}</button>
             <span className="text-border">/</span>
@@ -300,119 +321,85 @@ export function BookCreate({ nav, theme, t }: { nav: Nav; theme: Theme; t: TFunc
 
           <div className="space-y-2">
             <h1 className="font-serif text-3xl">{t("create.title")}</h1>
-            <p className="text-sm leading-7 text-muted-foreground">
-              按步骤创建基础资料。左侧向导负责成稿，右侧聊天负责补充和修改。
+          <p className="text-sm leading-7 text-muted-foreground">
+              单面板流程：每次只处理一个阶段，用上一步 / 下一步切换，减少来回滚动。
             </p>
           </div>
 
           {error && <div className={`rounded-md border ${c.error} px-4 py-3`}>{error}</div>}
           {status && <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">{status}</div>}
 
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
-            <section className="space-y-4">
-              <div className="rounded-2xl border border-border/60 bg-card/70 p-5 space-y-4">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">向导进度</div>
-                    <div className="text-sm text-muted-foreground">当前：{currentStepMeta.title}</div>
-                  </div>
-                  <div className="text-xs text-muted-foreground">{currentIndex + 1} / {WIZARD_STEPS.length}</div>
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {WIZARD_STEPS.map((step, index) => {
-                    const active = step.id === currentStep;
-                    const done = Boolean(wizard?.completedSteps.includes(step.id));
-                    return (
-                      <div key={step.id} className={`rounded-xl border px-4 py-3 ${active ? "border-primary bg-primary/5" : done ? "border-emerald-500/30 bg-emerald-500/5" : "border-border/50 bg-background/60"}`}>
-                        <div className="text-xs font-semibold">{step.title}</div>
-                        <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{step.subtitle}</div>
-                        <div className="mt-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground/70">{index + 1}</div>
-                      </div>
-                    );
-                  })}
-                </div>
+          <div className="rounded-2xl border border-border/60 bg-card/70 p-5 space-y-5">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">向导进度</div>
+                <div className="text-sm text-muted-foreground">当前：{currentStepMeta.title}</div>
               </div>
+              <div className="text-xs text-muted-foreground">{currentIndex + 1} / {WIZARD_STEPS.length}</div>
+            </div>
 
-              <div className="rounded-2xl border border-border/60 bg-card/70 p-5 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">{currentStepMeta.title}</div>
-                    <div className="text-xs text-muted-foreground">{currentStepMeta.subtitle}</div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {WIZARD_STEPS.map((step, index) => {
+                const active = step.id === currentStep;
+                const done = Boolean(wizard?.completedSteps.includes(step.id));
+                return (
+                  <div key={step.id} className={`rounded-xl border px-4 py-3 ${active ? "border-primary bg-primary/5" : done ? "border-emerald-500/30 bg-emerald-500/5" : "border-border/50 bg-background/60"}`}>
+                    <div className="text-xs font-semibold">{step.title}</div>
+                    <div className="mt-1 text-[11px] leading-5 text-muted-foreground">{step.subtitle}</div>
+                    <div className="mt-2 text-[10px] uppercase tracking-[0.16em] text-muted-foreground/70">{index + 1}</div>
                   </div>
-                  {loadingDraft ? <div className="text-xs text-muted-foreground">读取中…</div> : null}
-                </div>
+                );
+              })}
+            </div>
 
-                <textarea
-                  value={input}
-                  onChange={(event) => setInput(event.target.value)}
-                  rows={10}
-                  className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 focus:outline-none`}
-                  placeholder="输入当前页的补充要求，或直接确认进入下一步。"
-                />
-
-                <div className="flex flex-wrap gap-3">
-                  <button
-                    onClick={handleAdvance}
-                    disabled={submitting || creating || !nextStepMeta}
-                    className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}
-                  >
-                    {nextStepMeta ? (submitting ? "处理中…" : `确认并进入 ${nextStepMeta.title}`) : "已到最后一步"}
-                  </button>
-                  <button
-                    onClick={handleCreate}
-                    disabled={!canCreate || submitting || creating}
-                    className="rounded-md border border-border bg-secondary px-4 py-3 text-sm font-medium text-secondary-foreground disabled:opacity-50"
-                  >
-                    {creating ? "创建中…" : "最终创建书籍"}
-                  </button>
-                  <button
-                    onClick={handleDiscard}
-                    disabled={submitting || creating}
-                    className="rounded-md border border-border px-4 py-3 text-sm font-medium text-muted-foreground disabled:opacity-50"
-                  >
-                    丢弃草案
-                  </button>
-                </div>
-              </div>
-            </section>
-
-            <aside className="w-full max-w-[420px] xl:sticky xl:top-6 self-start">
-              <div className="rounded-2xl border border-border/60 bg-card/70 p-4 space-y-4">
+            <div className="rounded-2xl border border-border/60 bg-background/50 p-4 space-y-4">
+              <div className="flex items-center justify-between">
                 <div>
-                  <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">右侧聊天</div>
-                  <div className="text-xs text-muted-foreground">固定宽度聊天面板，用于补充、追问和修改当前页内容。</div>
+                  <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">{currentStepMeta.title}</div>
+                  <div className="text-xs text-muted-foreground">{currentStepMeta.subtitle}</div>
                 </div>
-                <div className="rounded-xl border border-border/40 bg-background/70 p-4 space-y-3">
-                  <div className="rounded-lg border border-dashed border-border/60 px-3 py-4 text-sm text-muted-foreground leading-7">
-                    这里后续接入会话式补充输入、当前页 AI 修改与历史记录。
-                  </div>
-                  <textarea
-                    value={input}
-                    onChange={(event) => setInput(event.target.value)}
-                    rows={8}
-                    className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 focus:outline-none`}
-                    placeholder="例如：把人物关系页改成双男主互相利用再互相背叛。"
-                  />
-                  <div className="flex flex-wrap gap-3">
-                    <button
-                      onClick={handleAdvance}
-                      disabled={submitting || creating || !nextStepMeta}
-                      className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}
-                    >
-                      {nextStepMeta ? (submitting ? "处理中…" : `确认并进入 ${nextStepMeta.title}`) : "已到最后一步"}
-                    </button>
-                    <button
-                      onClick={handleCreate}
-                      disabled={!canCreate || submitting || creating}
-                      className="rounded-md border border-border bg-secondary px-4 py-3 text-sm font-medium text-secondary-foreground disabled:opacity-50"
-                    >
-                      {creating ? "创建中…" : "最终创建书籍"}
-                    </button>
-                  </div>
-                </div>
+                {loadingDraft ? <div className="text-xs text-muted-foreground">读取中…</div> : null}
               </div>
-            </aside>
+
+              <textarea
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                rows={10}
+                className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 focus:outline-none`}
+                placeholder="输入当前页的补充要求，或直接用上一步 / 下一步切换。"
+              />
+
+              <div className="flex flex-wrap gap-3">
+                <button
+                  onClick={handleBack}
+                  disabled={!canGoBack || submitting || creating}
+                  className="rounded-md border border-border px-4 py-3 text-sm font-medium text-muted-foreground disabled:opacity-50"
+                >
+                  上一步
+                </button>
+                <button
+                  onClick={handleAdvance}
+                  disabled={submitting || creating || !nextStepMeta}
+                  className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}
+                >
+                  {nextStepMeta ? (submitting ? "处理中…" : `下一步：${nextStepMeta.title}`) : "已到最后一步"}
+                </button>
+                <button
+                  onClick={handleCreate}
+                  disabled={!canCreate || submitting || creating}
+                  className="rounded-md border border-border bg-secondary px-4 py-3 text-sm font-medium text-secondary-foreground disabled:opacity-50"
+                >
+                  {creating ? "创建中…" : "最终创建书籍"}
+                </button>
+                <button
+                  onClick={handleDiscard}
+                  disabled={submitting || creating}
+                  className="rounded-md border border-border px-4 py-3 text-sm font-medium text-muted-foreground disabled:opacity-50"
+                >
+                  丢弃草案
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </main>
