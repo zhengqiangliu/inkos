@@ -111,7 +111,9 @@ function isTimeoutLikeError(error: unknown): boolean {
   return message.includes("timeout")
     || message.includes("timed out")
     || message.includes("请求超时")
-    || message.includes("后台可能仍在执行");
+    || message.includes("超时")
+    || message.includes("璇锋眰瓒呮椂")
+    || message.includes("鍚庡彴鍙兘浠嶅湪鎵ц");
 }
 
 async function pollAgentRunningStatus(args: {
@@ -241,7 +243,7 @@ function mapExplicitWriteFailure(error: unknown): string | null {
       ? `第${degraded.degradedChapterNumbers.join("、")}章`
       : "目标章节";
     const recoveryText = degraded.attempted
-      ? `已自动尝试修复${degraded.attemptedChapterNumber ? `（第${degraded.attemptedChapterNumber}章）` : ""}但仍未恢复。`
+      ? `已尝试自动修复${degraded.attemptedChapterNumber ? `(第${degraded.attemptedChapterNumber}章)` : ""}，但仍未恢复。`
       : "未执行自动修复。";
     return withErrorGuidance(
       `写作降级：正文已落盘，但${chapterText}状态降级。${recoveryText}${degraded.suggestion ? ` ${degraded.suggestion}` : ""}`,
@@ -470,10 +472,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   createDraftSession: (bookId) => {
-    // 前端生成 sessionId（与后端 createBookSession 同格式），暂不持久化到磁盘，
-    // 也暂不写入 sessionIdsByBook——侧边栏看不到这条 draft。
-    // 发送第一条消息时 sendMessage 会调 POST /sessions { sessionId, bookId } 落盘
-    // 并把 id 追加进 sessionIdsByBook，那一刻侧边栏才出现该会话（带着 title）。
+    // 鍓嶇鐢熸垚 sessionId锛堜笌鍚庣 createBookSession 鍚屾牸寮忥級锛屾殏涓嶆寔涔呭寲鍒扮鐩橈紝
+    // 涔熸殏涓嶅啓鍏?sessionIdsByBook鈥斺€斾晶杈规爮鐪嬩笉鍒拌繖鏉?draft銆?
+    // 鍙戦€佺涓€鏉℃秷鎭椂 sendMessage 浼氳皟 POST /sessions { sessionId, bookId } 钀界洏
+    // 骞舵妸 id 杩藉姞杩?sessionIdsByBook锛岄偅涓€鍒讳晶杈规爮鎵嶅嚭鐜拌浼氳瘽锛堝甫鐫€ title锛夈€?
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     set((state) => {
       const runtime = createSessionRuntime({
@@ -515,7 +517,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   deleteSession: async (sessionId) => {
     const session = get().sessions[sessionId];
     session?.stream?.close();
-    // 草稿会话还没写到磁盘，跳过 DELETE 请求避免后端返回 404
+    // 鑽夌浼氳瘽杩樻病鍐欏埌纾佺洏锛岃烦杩?DELETE 璇锋眰閬垮厤鍚庣杩斿洖 404
     if (session && !session.isDraft) {
       try {
         await fetchJson(`/sessions/${sessionId}`, { method: "DELETE" });
@@ -548,8 +550,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   loadSessionDetail: async (sessionId) => {
-    // 草稿会话：磁盘上还没有文件，直接跳过远端拉取。
-    // 本地已有消息：不拉取远端，避免流式中或未持久化的消息被覆盖。
+    // 鑽夌浼氳瘽锛氱鐩樹笂杩樻病鏈夋枃浠讹紝鐩存帴璺宠繃杩滅鎷夊彇銆?
+    // 鏈湴宸叉湁娑堟伅锛氫笉鎷夊彇杩滅锛岄伩鍏嶆祦寮忎腑鎴栨湭鎸佷箙鍖栫殑娑堟伅琚鐩栥€?
     const existing = get().sessions[sessionId];
     if (existing?.isDraft) return;
     if (existing && existing.messages.length > 0) return;
@@ -563,7 +565,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
 
       set((state) => {
         const runtime = state.sessions[detailSessionId];
-        // set 执行到这里可能已有本地消息写入（比如并发 sendMessage），再查一次。
+        // set 鎵ц鍒拌繖閲屽彲鑳藉凡鏈夋湰鍦版秷鎭啓鍏ワ紙姣斿骞跺彂 sendMessage锛夛紝鍐嶆煡涓€娆°€?
         if (runtime && runtime.messages.length > 0) return {};
         const nextBookId = detail.bookId ?? runtime?.bookId ?? null;
         return {
@@ -633,21 +635,21 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     }
   },
 
-  sendMessage: async (sessionId, text, activeBookId) => {
+  sendMessage: async (sessionId, text, activeBookId, options) => {
     const trimmed = text.trim();
     const session = get().sessions[sessionId];
-    if (!trimmed || !session || session.isStreaming) return;
+    if (!trimmed || !session || session.isStreaming) return null;
     const expectsPersistedWrite = Boolean(activeBookId && isExplicitWriteNextCommand(trimmed));
 
     if (!get().selectedModel) {
       get().addUserMessage(sessionId, trimmed);
-      get().addErrorMessage(sessionId, "请先选择一个模型");
-      return;
+      get().addErrorMessage(sessionId, "请选择一个模型。");
+      return null;
     }
 
-    // 草稿会话：第一条消息发送时才真正把 session 文件写到磁盘。
-    // 后端 POST /sessions 支持接受客户端传入的 sessionId，所以 id 保持一致，
-    // 前端 store 里的 runtime 不用 remount，只需要把 isDraft 翻成 false。
+    // 鑽夌浼氳瘽锛氱涓€鏉℃秷鎭彂閫佹椂鎵嶇湡姝ｆ妸 session 鏂囦欢鍐欏埌纾佺洏銆?
+    // 鍚庣 POST /sessions 鏀寔鎺ュ彈瀹㈡埛绔紶鍏ョ殑 sessionId锛屾墍浠?id 淇濇寔涓€鑷达紝
+    // 鍓嶇 store 閲岀殑 runtime 涓嶇敤 remount锛屽彧闇€瑕佹妸 isDraft 缈绘垚 false銆?
     if (session.isDraft) {
       try {
         await fetchJson<SessionResponse>("/sessions", {
@@ -655,8 +657,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, bookId: session.bookId }),
         });
-        // 落盘成功：把 isDraft 翻成 false，同时把 sessionId 追加进 sessionIdsByBook
-        // 让侧边栏现在才看到这条会话。
+        // 钀界洏鎴愬姛锛氭妸 isDraft 缈绘垚 false锛屽悓鏃舵妸 sessionId 杩藉姞杩?sessionIdsByBook
+        // 璁╀晶杈规爮鐜板湪鎵嶇湅鍒拌繖鏉′細璇濄€?
         set((state) => ({
           sessions: updateSession(state.sessions, sessionId, () => ({ isDraft: false })),
           sessionIdsByBook: {
@@ -669,11 +671,17 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         }));
       } catch (err) {
         get().addErrorMessage(sessionId, err instanceof Error ? err.message : String(err));
-        return;
+        return null;
       }
     }
 
-    const instruction = activeBookId ? trimmed : `/new ${trimmed}`;
+    const instruction = options?.skipAutoNewPrefix
+      ? trimmed
+      : activeBookId
+        ? trimmed
+        : trimmed.startsWith("/")
+          ? trimmed
+          : `/new ${trimmed}`;
     const streamTs = Date.now() + 1;
     const runId = buildAgentRunId();
 
@@ -716,11 +724,13 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           runId,
           model: get().selectedModel ?? undefined,
           service: get().selectedService ?? undefined,
+          ...(options?.quickMode !== undefined ? { quickMode: options.quickMode } : {}),
+          ...(options?.preferFastWriterModel !== undefined ? { preferFastWriterModel: options.preferFastWriterModel } : {}),
         }),
       });
 
       if (get().sessions[sessionId]?.currentRunId !== runId) {
-        return;
+        return data;
       }
       const persistedWrite = (data.details as {
         effects?: { writeNext?: { persisted?: boolean } };
@@ -737,7 +747,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         } else {
           get().addErrorMessage(sessionId, writeError);
         }
-        return;
+        return data;
       }
 
       const finalContent = data.details?.draftRaw || data.response || "";
@@ -782,7 +792,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         }
       } else {
         const emptyMessage = withErrorGuidance(
-          "模型未返回文本内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。",
+          "模型未返回正文内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。",
         );
         if (hasStream) {
           get().replaceStreamWithError(sessionId, streamTs, emptyMessage);
@@ -790,14 +800,15 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           get().addErrorMessage(sessionId, emptyMessage);
         }
       }
+      return data;
     } catch (error) {
       if (get().sessions[sessionId]?.currentRunId !== runId) {
-        return;
+        return null;
       }
       if (isTimeoutLikeError(error)) {
         const stillRunning = await pollAgentRunningStatus({ sessionId, runId });
         if (stillRunning && get().sessions[sessionId]?.currentRunId === runId) {
-          return;
+          return null;
         }
       }
       const mappedWriteError = expectsPersistedWrite ? mapExplicitWriteFailure(error) : null;
@@ -812,6 +823,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       } else {
         get().addErrorMessage(sessionId, errorMessage);
       }
+      return null;
     } finally {
       const shouldWaitForTerminal = get().sessions[sessionId]?.currentRunId === runId;
       if (shouldWaitForTerminal) {

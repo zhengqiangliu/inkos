@@ -2,6 +2,7 @@ import { useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
+import { ChevronLeft } from "lucide-react";
 
 interface AnalyticsData {
   readonly bookId: string;
@@ -37,7 +38,17 @@ export function Analytics({ bookId, nav, theme, t }: { bookId: string; nav: Nav;
         <span className={c.subtle}>{t("analytics.title")}</span>
       </div>
 
-      <h1 className="text-2xl font-semibold">{t("analytics.title")}</h1>
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold">{t("analytics.title")}</h1>
+        <button
+          type="button"
+          onClick={() => nav.toBook(bookId)}
+          className={`inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-sm ${c.btnSecondary}`}
+        >
+          <ChevronLeft size={14} />
+          返回小说详情
+        </button>
+      </div>
 
       <div className="grid grid-cols-3 gap-4">
         <StatCard label={t("analytics.totalChapters")} value={data.totalChapters.toString()} c={c} />

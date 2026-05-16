@@ -136,6 +136,7 @@ export interface AgentResponse {
   readonly runId?: string;
   readonly response?: string;
   readonly error?: string | { code?: string; message?: string };
+  readonly quickMode?: boolean;
   readonly details?: {
     readonly draftRaw?: string;
     readonly toolCall?: ToolCall;
@@ -164,6 +165,8 @@ export interface SessionResponse {
     readonly bookId?: string | null;
     readonly title?: string | null;
     readonly activeBookId?: string;
+    readonly creationDraft?: unknown;
+    readonly creationWizard?: unknown;
     readonly messages?: ReadonlyArray<SessionMessage>;
   };
   readonly activeBookId?: string;
@@ -243,7 +246,16 @@ export interface MessageActions {
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   loadSessionDetail: (sessionId: string) => Promise<void>;
-  sendMessage: (sessionId: string, text: string, activeBookId?: string) => Promise<void>;
+  sendMessage: (
+    sessionId: string,
+    text: string,
+    activeBookId?: string,
+    options?: {
+      readonly quickMode?: boolean;
+      readonly preferFastWriterModel?: boolean;
+      readonly skipAutoNewPrefix?: boolean;
+    },
+  ) => Promise<AgentResponse | null>;
   stopMessage: (sessionId: string) => Promise<void>;
   setSelectedModel: (model: string, service: string) => void;
 }

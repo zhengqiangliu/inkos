@@ -71,6 +71,7 @@ const pipelineConfigs: unknown[] = [];
 const processProjectInteractionInputMock = vi.fn();
 const processProjectInteractionRequestMock = vi.fn();
 const createInteractionToolsFromDepsMock = vi.fn(() => ({}));
+const createDesignAgentMock = vi.fn();
 const loadProjectSessionMock = vi.fn();
 const resolveSessionActiveBookMock = vi.fn();
 const runAgentSessionMock = vi.fn();
@@ -225,11 +226,37 @@ vi.mock("@actalk/inkos-core", () => {
     auditChapter = auditChapterMock;
   }
 
+  class MockChapterDesignAgent {
+    constructor(_config: unknown) {}
+
+    async analyzeAndDesignChapter(input: { chapterNumber: number }): Promise<unknown> {
+      return {
+        chapterNumber: input.chapterNumber,
+        chapterName: `回填第${input.chapterNumber}章`,
+        highlight: `亮点${input.chapterNumber}`,
+        coreConflict: `冲突${input.chapterNumber}`,
+        plotAndConflict: `剧情${input.chapterNumber}`,
+        emotionalTone: "紧张",
+        endingHook: `钩子${input.chapterNumber}`,
+        status: "planned",
+        source: "auto",
+        version: 1,
+        needsReview: true,
+        anchorRefs: { worldRefs: [], characterRefs: [], emotionRefs: [], hookRefs: [] },
+        driftFlags: [],
+        lockedFields: [],
+        createdAt: "2026-04-07T00:00:00.000Z",
+        updatedAt: "2026-04-07T00:00:00.000Z",
+      };
+    }
+  }
+
   return {
     StateManager: MockStateManager,
     PipelineRunner: MockPipelineRunner,
     Scheduler: MockScheduler,
     ContinuityAuditor: MockContinuityAuditor,
+    ChapterDesignAgent: MockChapterDesignAgent,
     createLLMClient: createLLMClientMock,
     createLogger: vi.fn(() => logger),
     computeAnalytics: computeAnalyticsMock,
@@ -238,6 +265,7 @@ vi.mock("@actalk/inkos-core", () => {
     processProjectInteractionInput: processProjectInteractionInputMock,
     processProjectInteractionRequest: processProjectInteractionRequestMock,
     createInteractionToolsFromDeps: createInteractionToolsFromDepsMock,
+    createDesignAgent: createDesignAgentMock,
     loadProjectSession: loadProjectSessionMock,
     resolveSessionActiveBook: resolveSessionActiveBookMock,
     runAgentSession: runAgentSessionMock,
@@ -2811,6 +2839,101 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     expect(rollbackToChapterMock).toHaveBeenCalledWith("demo-book", 2);
     expect(saveChapterIndexMock).not.toHaveBeenCalled();
+  });
+
+  it("backfills existing planned chapters from chapter content instead of skipping them", async () => {
+    loadBookConfigMock.mockResolvedValue({
+      id: "demo-book",
+      title: "Demo Book",
+      genre: "urban",
+      platform: "qidian",
+      language: "zh",
+      targetChapters: 20,
+      chapterWordCount: 3000,
+      status: "outlining",
+      createdAt: "2026-04-07T00:00:00.000Z",
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    });
+    createDesignAgentMock.mockResolvedValue({
+      analyzeAndDesignChapter: vi.fn(async ({ chapterNumber }: { chapterNumber: number }) => ({
+        chapterNumber,
+        chapterName: `回填第${chapterNumber}章`,
+        highlight: `亮点${chapterNumber}`,
+        coreConflict: `冲突${chapterNumber}`,
+        plotAndConflict: `剧情${chapterNumber}`,
+        emotionalTone: "紧张",
+        endingHook: `钩子${chapterNumber}`,
+        status: "planned",
+        source: "auto",
+        version: 1,
+        needsReview: true,
+        anchorRefs: { worldRefs: [], characterRefs: [], emotionRefs: [], hookRefs: [] },
+        driftFlags: [],
+        lockedFields: [],
+        createdAt: "2026-04-07T00:00:00.000Z",
+        updatedAt: "2026-04-07T00:00:00.000Z",
+      })),
+    });
+
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "outline", "volume_map.md"),
+      "# 卷纲\n\n总章数 10 章",
+      "utf-8",
+    );
+    await writeFile(join(bookDir, "story", "state", "chapter-plans.json"), JSON.stringify({
+      plans: [
+        {
+          chapterNumber: 3,
+          chapterName: "旧分章",
+          highlight: "旧高光",
+          coreConflict: "旧冲突",
+          plotAndConflict: "旧剧情",
+          emotionalTone: "平静",
+          endingHook: "旧钩子",
+          status: "planned",
+          source: "auto",
+          version: 1,
+          needsReview: false,
+          anchorRefs: { worldRefs: [], characterRefs: [], emotionRefs: [], hookRefs: [] },
+          driftFlags: [],
+          lockedFields: [],
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ],
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    }, null, 2), "utf-8");
+    await writeFile(
+      join(bookDir, "chapters", "0003_demo.md"),
+      "# 第3章\n\n这一章已经写完。",
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/backfill-from-chapter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 3, endChapter: 3 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      successChapters: [3],
+    });
+
+    const saved = JSON.parse(await readFile(join(bookDir, "story", "state", "chapter-plans.json"), "utf-8")) as { plans: Array<{ chapterNumber: number; status: string; source: string; version: number }> };
+    expect(saved.plans.find((plan) => plan.chapterNumber === 3)).toMatchObject({
+      status: "backfilled",
+      source: "inferred_from_text",
+      version: 2,
+    });
   });
 
   it("routes create requests through the shared structured interaction runtime", async () => {

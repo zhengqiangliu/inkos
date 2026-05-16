@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+﻿import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   InteractionEvent,
@@ -130,6 +130,7 @@ function buildCreationExternalContext(input: {
 }
 
 type WizardMode = "generate" | "modify";
+type IntroRevisionMode = "revise" | "polish";
 
 const WIZARD_STEP_FIELDS: Record<BookCreationWizardStep, ReadonlyArray<string>> = {
   intro: ["blurb", "storyBackground"],
@@ -220,6 +221,14 @@ const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
     ],
   },
 };
+
+const INTRO_REVISION_SYSTEM_PROMPT = [
+  "你是 InkOS 的简介 / 故事背景专用修订助手。",
+  "你只处理简介页，不要把内容扩写到世界观、角色矩阵、卷纲或章节大纲。",
+  "如果用户要求按题材生成，要优先遵守题材约束。",
+  "如果用户要求修改或润色，要在保留原意的基础上优化表达和钩子。",
+  "必须输出结构化字段，至少返回 blurb 或 storyBackground 之一。",
+].join(" ");
 
 function getWizardStepTemplate(step: BookCreationWizardStep) {
   return WIZARD_STEP_PROMPTS[step] ?? WIZARD_STEP_PROMPTS.intro;
@@ -415,7 +424,7 @@ async function runWizardDraftTool(params: {
         content: buildWizardPrompt(step, mode, input, existingDraft, genreContext ?? undefined),
       },
     ],
-    [CREATE_BOOK_TOOL],
+    [SAVE_BOOK_WIZARD_STEP_TOOL],
     { temperature: 0.35 },
   );
 
@@ -425,6 +434,78 @@ async function runWizardDraftTool(params: {
     draft,
     responseText: result.content?.trim() || "已更新当前页内容。",
     fieldsUpdated: Object.keys(toolArgs).filter((key) => WIZARD_STEP_FIELDS[step].includes(key)),
+    draftRaw: result.content?.trim() || "",
+  };
+}
+
+async function runIntroRevisionTool(params: {
+  readonly pipeline: InstrumentablePipelineLike;
+  readonly input: string;
+  readonly existingDraft?: BookCreationDraft;
+  readonly revisionKind?: IntroRevisionMode;
+  readonly themeGenre?: string;
+}): Promise<{
+  readonly draft: BookCreationDraft;
+  readonly responseText: string;
+  readonly fieldsUpdated: ReadonlyArray<string>;
+  readonly draftRaw: string;
+}> {
+  const { pipeline, input, existingDraft, revisionKind = "revise", themeGenre } = params;
+  const concept = existingDraft?.concept ?? input;
+  const projectRoot = pipeline.config?.projectRoot;
+  const genreContext = themeGenre && projectRoot
+    ? await readGenreProfile(projectRoot, themeGenre).catch(() => null)
+    : existingDraft?.genre && projectRoot
+      ? await readGenreProfile(projectRoot, existingDraft.genre).catch(() => null)
+      : null;
+
+  if (!pipeline.config?.client || !pipeline.config?.model) {
+    return {
+      draft: applyFieldsToDraft(existingDraft, {}, concept),
+      responseText: "请先配置 LLM 模型，然后再修改简介。",
+      fieldsUpdated: [],
+      draftRaw: "",
+    };
+  }
+
+  const result = await chatWithTools(
+    pipeline.config.client,
+    pipeline.config.model,
+    [
+      { role: "system", content: INTRO_REVISION_SYSTEM_PROMPT },
+      { role: "user", content: buildIntroRevisionPrompt({
+        mode: revisionKind,
+        userMessage: input,
+        existingDraft,
+        genreContext,
+      }) },
+    ],
+    [SAVE_BOOK_WIZARD_STEP_TOOL],
+    { temperature: revisionKind === "polish" ? 0.25 : 0.35 },
+  );
+
+  const toolArgs = parseToolCallArguments(result.toolCalls[0]);
+  const normalizedArgs: Record<string, string> = {};
+  for (const [key, value] of Object.entries(toolArgs)) {
+    if (value === undefined || value === null) continue;
+    normalizedArgs[key] = typeof value === "string" ? value : String(value);
+  }
+
+  const draft = applyFieldsToDraft(existingDraft, normalizedArgs, concept);
+  if (themeGenre?.trim()) {
+    draft.genre = themeGenre.trim();
+    draft.mappedGenreId = draft.mappedGenreId ?? themeGenre.trim();
+    draft.genreAlias = draft.genreAlias ?? themeGenre.trim();
+    draft.genreSource = draft.genreSource ?? "builtin";
+  }
+
+  return {
+    draft: {
+      ...draft,
+      readyToCreate: Boolean(draft.title && draft.genre && draft.platform),
+    },
+    responseText: result.content?.trim() || (revisionKind === "polish" ? "已润色简介与故事背景。" : "已修改简介与故事背景。"),
+    fieldsUpdated: Object.keys(normalizedArgs).filter((key) => ["blurb", "storyBackground", "genre", "genreAlias", "genreSource", "mappedGenreId"].includes(key)),
     draftRaw: result.content?.trim() || "",
   };
 }
@@ -652,15 +733,21 @@ const CREATE_BOOK_TOOL: ToolDefinition = {
   },
 };
 
+const SAVE_BOOK_WIZARD_STEP_TOOL: ToolDefinition = {
+  name: "save_book_wizard_step",
+  description: "保存当前向导页草案，只更新当前页允许的字段，不创建书籍。",
+  parameters: CREATE_BOOK_TOOL.parameters,
+};
+
 const BOOK_DRAFT_SYSTEM_PROMPT = [
-  "你是 InkOS 的建书助手。用户会描述想写的书，你需要调用 create_book 工具来生成建书参数。",
+  "你是 InkOS 的建书助手。用户会描述想写的书，你需要调用 save_book_wizard_step 工具来保存当前页草案。",
   "",
   "规则：",
   "1. 从用户描述中推断所有字段，大胆预填合理默认值。",
-  "2. brief 字段要详细——它会传给 Architect 智能体生成完整的世界观、主角、冲突等 foundation 文件。把用户提到的所有创意要素都写进 brief。",
-  "3. storyBackground、worldPremise、novelOutline、volumeOutline、characterArc、relationshipMap 都必须按固定内容框架填充，不要自由散写。",
-  "4. 如果用户后续要求修改某些字段，重新调用 create_book 工具，只更新被提到的字段，其余保持不变。",
-  "5. 不要只回复文字讨论——必须调用 create_book 工具输出结构化参数。",
+  "2. brief 字段要详细，但只用于当前页草案，不要越权补齐其他页面。",
+  "3. storyBackground、worldPremise、novelOutline、volumeOutline、characterArc、relationshipMap 都必须按当前页允许的框架填充，不要自由散写。",
+  "4. 如果用户后续要求修改某些字段，重新调用 save_book_wizard_step 工具，只更新被提到的字段，其余保持不变。",
+  "5. 不要只回复文字讨论——必须调用 save_book_wizard_step 工具输出结构化参数。",
 ].join("\n");
 
 /** Map directive field keys to BookCreationDraft property names. */
@@ -768,16 +855,62 @@ function buildLegacyDraftUserContent(input: string, existingDraft?: BookCreation
   ].join("\n");
 }
 
+function buildIntroRevisionPrompt(params: {
+  readonly mode: IntroRevisionMode;
+  readonly userMessage: string;
+  readonly existingDraft?: BookCreationDraft;
+  readonly genreContext?: WizardGenreContext | null;
+}): string {
+  const { mode, userMessage, existingDraft, genreContext } = params;
+  const draftBlock = existingDraft
+    ? ["## 当前草案", JSON.stringify(existingDraft, null, 2)].join("\n")
+    : "## 当前草案\n（空）";
+  const genreBlock = genreContext
+    ? [
+        "## 题材库约束",
+        `- 题材：${genreContext.profile.name} (${genreContext.profile.id})`,
+        `- 章节类型：${genreContext.profile.chapterTypes.join("、") || "无"}`,
+        `- 节奏规则：${genreContext.profile.pacingRule || "无"}`,
+        `- 数值体系：${genreContext.profile.numericalSystem ? "有" : "无"}`,
+        `- 战力体系：${genreContext.profile.powerScaling ? "有" : "无"}`,
+        `- 时代考据：${genreContext.profile.eraResearch ? "需要" : "不需要"}`,
+        `- 疲劳词：${genreContext.profile.fatigueWords.slice(0, 12).join("、") || "无"}`,
+        `- 读者爽点：${genreContext.profile.satisfactionTypes.join("、") || "无"}`,
+        "",
+        "## 题材规则正文",
+        genreContext.body.trim() || "（无）",
+      ].join("\n")
+    : "";
+
+  return [
+    `模式：${mode === "polish" ? "润色" : "修改"}`,
+    "目标页：简介 / 故事背景",
+    "",
+    ...(genreBlock ? [genreBlock, ""] : []),
+    draftBlock,
+    "",
+    "## 用户输入",
+    userMessage.trim(),
+    "",
+    "约束：",
+    "1. 只更新 blurb、storyBackground、genre、genreAlias、genreSource、mappedGenreId 这些字段。",
+    "2. 至少返回 blurb 或 storyBackground 之一。",
+    "3. 如果已有题材，必须保留并强化题材一致性。",
+    "4. 润色模式优先保留原信息结构，修改模式允许重写表达。",
+  ].join("\n");
+}
+
 async function runLegacyDraftTool(params: {
   readonly pipeline: InstrumentablePipelineLike;
   readonly input: string;
   readonly existingDraft?: BookCreationDraft;
+  readonly themeGenre?: string;
 }): Promise<{
   readonly draft: BookCreationDraft;
   readonly responseText: string;
   readonly toolCall?: { name: string; arguments: Record<string, unknown> };
 }> {
-  const { pipeline, input, existingDraft } = params;
+  const { pipeline, input, existingDraft, themeGenre } = params;
   const concept = existingDraft?.concept ?? input;
 
   if (!pipeline.config?.client || !pipeline.config?.model) {
@@ -792,9 +925,12 @@ async function runLegacyDraftTool(params: {
     pipeline.config.model,
     [
       { role: "system", content: BOOK_DRAFT_SYSTEM_PROMPT },
-      { role: "user", content: buildLegacyDraftUserContent(input, existingDraft) },
+      { role: "user", content: [
+        themeGenre ? `## 题材\n${themeGenre}` : undefined,
+        buildLegacyDraftUserContent(input, existingDraft),
+      ].filter((item): item is string => Boolean(item)).join("\n\n") },
     ],
-    [CREATE_BOOK_TOOL],
+    [SAVE_BOOK_WIZARD_STEP_TOOL],
     { temperature: 0.4 },
   );
 
@@ -807,6 +943,12 @@ async function runLegacyDraftTool(params: {
   }
 
   const draft = applyFieldsToDraft(existingDraft, normalizedArgs, concept);
+  if (themeGenre?.trim()) {
+    draft.genre = themeGenre.trim();
+    draft.mappedGenreId = draft.mappedGenreId ?? themeGenre.trim();
+    draft.genreAlias = draft.genreAlias ?? themeGenre.trim();
+    draft.genreSource = draft.genreSource ?? "builtin";
+  }
   return {
     draft: {
       ...draft,
@@ -862,9 +1004,47 @@ export function createInteractionToolsFromDeps(
 
   return {
     listBooks: () => state.listBooks(),
-    developBookDraft: async (input, existingDraft) => {
+    developBookDraft: async (input, existingDraft, wizardStep, themeGenre) => {
       const result = await runLegacyDraftTool({
         pipeline: instrumentedPipeline,
+        input,
+        existingDraft,
+        themeGenre,
+      });
+      return {
+        __interaction: {
+          responseText: result.responseText,
+          details: {
+            creationDraft: result.draft,
+            toolCall: result.toolCall,
+          },
+        },
+      };
+    },
+    reviseBookIntro: async (input, existingDraft, revisionKind = "revise", themeGenre) => {
+      const result = await runIntroRevisionTool({
+        pipeline: instrumentedPipeline,
+        input,
+        existingDraft,
+        revisionKind,
+        themeGenre,
+      });
+      return {
+        __interaction: {
+          responseText: result.responseText,
+          details: {
+            creationDraft: result.draft,
+            fieldsUpdated: result.fieldsUpdated,
+            draftRaw: result.draftRaw,
+          },
+        },
+      };
+    },
+    saveBookWizardStep: async (input, existingDraft, wizardStep = "intro") => {
+      const result = await runWizardDraftTool({
+        pipeline: instrumentedPipeline,
+        step: wizardStep,
+        mode: "modify",
         input,
         existingDraft,
       });
@@ -873,7 +1053,8 @@ export function createInteractionToolsFromDeps(
           responseText: result.responseText,
           details: {
             creationDraft: result.draft,
-            toolCall: result.toolCall,
+            fieldsUpdated: result.fieldsUpdated,
+            draftRaw: result.draftRaw,
           },
         },
       };
@@ -1053,3 +1234,4 @@ export function createInteractionToolsFromDeps(
     },
   };
 }
+

@@ -35,6 +35,18 @@ describe("hash route", () => {
       expect(parseHash("#/services/openai")).toEqual({ page: "service-detail", serviceId: "openai" });
     });
 
+    it("parses analytics route", () => {
+      expect(parseHash("#/analytics/demo-book")).toEqual({ page: "analytics", bookId: "demo-book" });
+    });
+
+    it("parses truth route", () => {
+      expect(parseHash("#/truth/demo-book")).toEqual({ page: "truth", bookId: "demo-book" });
+    });
+
+    it("parses chapter route", () => {
+      expect(parseHash("#/chapter/demo-book/12")).toEqual({ page: "chapter", bookId: "demo-book", chapterNumber: 12 });
+    });
+
     it("decodes encoded serviceId", () => {
       expect(parseHash("#/services/%E8%87%AA%E5%AE%9A%E4%B9%89")).toEqual({ page: "service-detail", serviceId: "自定义" });
     });
@@ -69,6 +81,18 @@ describe("hash route", () => {
 
     it("service-detail -> #/services/{id}", () => {
       expect(routeToHash({ page: "service-detail", serviceId: "openai" })).toBe("#/services/openai");
+    });
+
+    it("analytics -> #/analytics/{id}", () => {
+      expect(routeToHash({ page: "analytics", bookId: "demo-book" })).toBe("#/analytics/demo-book");
+    });
+
+    it("truth -> #/truth/{id}", () => {
+      expect(routeToHash({ page: "truth", bookId: "demo-book" })).toBe("#/truth/demo-book");
+    });
+
+    it("chapter -> #/chapter/{id}/{num}", () => {
+      expect(routeToHash({ page: "chapter", bookId: "demo-book", chapterNumber: 12 })).toBe("#/chapter/demo-book/12");
     });
 
     it("encodes Chinese serviceId", () => {

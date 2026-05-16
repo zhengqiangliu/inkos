@@ -55,7 +55,12 @@ describe("interaction runtime", () => {
       }),
     });
 
-    expect(developBookDraft).toHaveBeenCalledWith("我想写个港风商战悬疑，主角从灰产洗白。", undefined, undefined);
+    expect(developBookDraft).toHaveBeenCalledWith(
+      "我想写个港风商战悬疑，主角从灰产洗白。",
+      undefined,
+      undefined,
+      undefined,
+    );
     expect(result.session.creationDraft).toEqual(expect.objectContaining({
       rawConcept: "港风商战悬疑，主角从灰产洗白。",
       title: "夜港账本",

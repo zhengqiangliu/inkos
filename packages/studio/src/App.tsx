@@ -3,7 +3,6 @@ import { useHashRoute } from "./hooks/use-hash-route";
 import type { HashRoute } from "./hooks/use-hash-route";
 import { Sidebar } from "./components/Sidebar";
 import { Dashboard } from "./pages/Dashboard";
-import { ChatPage } from "./pages/ChatPage";
 import { ChapterReader } from "./pages/ChapterReader";
 import { Analytics } from "./pages/Analytics";
 import { ServiceListPage } from "./pages/ServiceListPage";
@@ -18,7 +17,7 @@ import { RadarView } from "./pages/RadarView";
 import { DoctorView } from "./pages/DoctorView";
 import { LanguageSelector } from "./pages/LanguageSelector";
 import { BookCreate } from "./pages/BookCreate";
-import { BookSidebar, BookSidebarToggle } from "./components/chat/BookSidebar";
+import { BookDetail } from "./pages/BookDetail";
 import { useSSE } from "./hooks/use-sse";
 import { useSessionEvents } from "./hooks/use-session-events";
 import { useTheme } from "./hooks/use-theme";
@@ -42,6 +41,7 @@ export function App() {
   const { data: project, refetch: refetchProject } = useApi<{ language: string; languageExplicit: boolean }>("/project");
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
   const [ready, setReady] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const isDark = theme === "dark";
 
@@ -64,6 +64,10 @@ export function App() {
     if (!bookId || typeof window === "undefined") return;
     window.localStorage.setItem("inkos:last-active-book-id", bookId);
   }, [route]);
+
+  useEffect(() => {
+    setSidebarCollapsed(route.page !== "dashboard");
+  }, [route.page]);
 
   useSessionEvents(sse, route, setRoute);
 
@@ -117,7 +121,14 @@ export function App() {
   return (
     <div className="h-screen bg-background text-foreground flex overflow-hidden font-sans">
       {/* Left Sidebar */}
-      <Sidebar nav={nav} activePage={activePage} sse={sse} t={t} />
+      <Sidebar
+        nav={nav}
+        activePage={activePage}
+        sse={sse}
+        t={t}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
+      />
 
       {/* Center Content */}
       <div className="flex-1 flex flex-col min-w-0 bg-background/30 backdrop-blur-sm">
@@ -176,8 +187,8 @@ export function App() {
           {(route.page === "book" || route.page === "book-create") && (
             <div className="absolute inset-0 flex min-w-0">
               {route.page === "book" ? (
-                <ChatPage
-                  activeBookId={route.bookId}
+                <BookDetail
+                  bookId={route.bookId}
                   nav={nav}
                   theme={theme}
                   t={t}
@@ -185,12 +196,6 @@ export function App() {
                 />
               ) : (
                 <BookCreate nav={nav} theme={theme} t={t} />
-              )}
-              {route.page === "book" && (
-                <>
-                  <BookSidebar bookId={route.bookId} theme={theme} t={t} sse={sse} />
-                  <BookSidebarToggle bookId={route.bookId} theme={theme} t={t} sse={sse} />
-                </>
               )}
             </div>
           )}

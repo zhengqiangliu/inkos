@@ -1245,7 +1245,17 @@ export function ChaptersSection({
                 key={`${ch.number}-${ch.title ?? ""}`}
                 className="py-1 text-xs text-muted-foreground rounded px-1 -mx-1 hover:bg-secondary/50 transition-colors">
                 <div className="flex items-start gap-2">
-                  <span className={cn("text-[10px] shrink-0 mt-0.5", meta.color)}>{meta.symbol}</span>
+                  <span
+                    className={cn(
+                      "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold",
+                      meta.badge,
+                      meta.color,
+                    )}
+                    title={statusLabel(ch.status, t)}
+                    aria-label={statusLabel(ch.status, t)}
+                  >
+                    {meta.symbol}
+                  </span>
                   <button
                     type="button"
                     onClick={() => handleOpenChapterEditor(ch)}
@@ -1292,6 +1302,7 @@ export function ChaptersSection({
                         disabled={rewriting}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
                         title={t("book.rewrite")}
+                        aria-label={t("book.rewrite")}
                       >
                         {rewriting ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
                       </button>
@@ -1300,7 +1311,8 @@ export function ChaptersSection({
                         onClick={() => handleRepair(ch.number)}
                         disabled={repairingChapters.includes(ch.number) || ch.status !== "state-degraded"}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-orange-600 hover:bg-orange-500/10 transition-colors disabled:opacity-50"
-                        title="修复落库/索引"
+                        title="修复"
+                        aria-label="修复"
                       >
                         {repairingChapters.includes(ch.number) ? <Loader2 size={12} className="animate-spin" /> : <Wrench size={12} />}
                       </button>
@@ -1309,7 +1321,8 @@ export function ChaptersSection({
                         onClick={() => handleApprove(ch.number)}
                         disabled={approving || ch.status !== "ready-for-review"}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-emerald-600 hover:bg-emerald-500/10 transition-colors disabled:opacity-50"
-                        title={t("book.approve")}
+                        title="通过"
+                        aria-label="通过"
                       >
                         {approving ? <Loader2 size={12} className="animate-spin" /> : <Check size={12} />}
                       </button>
@@ -1317,7 +1330,8 @@ export function ChaptersSection({
                         type="button"
                         onClick={() => handleEditChapter(ch)}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
-                        title={t("common.edit")}
+                        title="修订"
+                        aria-label="修订"
                       >
                         <Pencil size={12} />
                       </button>
@@ -1327,6 +1341,7 @@ export function ChaptersSection({
                         disabled={deleting}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
                         title={t("common.delete")}
+                        aria-label={t("common.delete")}
                       >
                         {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
                       </button>
@@ -1335,7 +1350,8 @@ export function ChaptersSection({
                         onClick={() => handleAudit(ch.number)}
                         disabled={auditing}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors disabled:opacity-50"
-                        title={t("book.audit")}
+                        title="审计"
+                        aria-label="审计"
                       >
                         {auditing ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
                       </button>

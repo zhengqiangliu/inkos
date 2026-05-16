@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+﻿import { describe, expect, it } from "vitest";
 import {
   buildChatActionLabels,
   buildChatGuide,
@@ -13,6 +13,13 @@ import {
   resolveGenreMapping,
   resolveDraftInstruction,
   parsePositiveIntegerInput,
+  parseIntroCandidateResponse,
+  rankIntroCandidates,
+  buildStepFocusCard,
+  buildStepActionSections,
+  buildStepRecommendedAction,
+  buildStepShortcuts,
+  resolveInitialGenreSelection,
   shouldSubmitChatOnKeyDown,
   waitForBookReady,
 } from "./BookCreate";
@@ -109,6 +116,27 @@ describe("resolveDraftInstruction", () => {
   it("forces the first ideation turn through /new so an active book does not hijack the flow", () => {
     expect(resolveDraftInstruction("我想写个港风商战悬疑", false)).toBe("/new 我想写个港风商战悬疑");
     expect(resolveDraftInstruction("把世界观改成近未来港口城", true)).toBe("把世界观改成近未来港口城");
+  });
+});
+
+describe("resolveInitialGenreSelection", () => {
+  it("prefers the draft genre, then the project language, then the first available genre", () => {
+    const genres = [
+      { id: "urban", name: "都市", language: "zh" },
+      { id: "fantasy", name: "Fantasy", language: "en" },
+    ];
+
+    expect(resolveInitialGenreSelection("", genres, "fantasy", "zh")).toBe("fantasy");
+    expect(resolveInitialGenreSelection("", genres, undefined, "en")).toBe("fantasy");
+    expect(resolveInitialGenreSelection("", genres, undefined, "zh")).toBe("urban");
+  });
+});
+
+describe("buildChatGuide", () => {
+  it("keeps intro guidance focused on the seed inputs", () => {
+    const intro = buildChatGuide("intro", "zh");
+    expect(intro.placeholder).toContain("题材");
+    expect(intro.examples.some((item) => item.includes("候选"))).toBe(true);
   });
 });
 
@@ -245,6 +273,197 @@ describe("resolveGenreMapping", () => {
 
     expect(suggestion?.genre.id).toBe("urban");
     expect(suggestion?.matchedBy).toBe("keyword");
+  });
+});
+
+describe("parseIntroCandidateResponse", () => {
+  it("parses candidate JSON from fenced model output", () => {
+    expect(parseIntroCandidateResponse(`\`\`\`json
+[
+  {
+    "title": "候选 A",
+    "blurb": "一句话卖点 A",
+    "storyBackground": "故事背景 A",
+    "hook": "引爆点 A",
+    "style": "都市悬疑",
+    "reason": "适合快速抓人"
+  }
+]
+\`\`\``)).toEqual([
+      {
+        title: "候选 A",
+        blurb: "一句话卖点 A",
+        storyBackground: "故事背景 A",
+        hook: "引爆点 A",
+        style: "都市悬疑",
+        reason: "适合快速抓人",
+      },
+    ]);
+  });
+
+  it("parses multiple text-block candidates when the model does not emit strict JSON", () => {
+    expect(parseIntroCandidateResponse(`
+候选 1
+title: 夜港账本
+blurb: 港口账本牵出灰产链。
+storyBackground: 港城、账本、洗白、反转。
+style: 都市商战
+reason: 适合快节奏抓人
+
+候选 2
+title: 雾港来信
+blurb: 一封旧信撬开失踪案。
+storyBackground: 雾港、旧案、家族秘密。
+style: 都市悬疑
+reason: 适合强悬念开局
+    `)).toEqual([
+      {
+        title: "夜港账本",
+        blurb: "港口账本牵出灰产链。",
+        storyBackground: "港城、账本、洗白、反转。",
+        style: "都市商战",
+        reason: "适合快节奏抓人",
+      },
+      {
+        title: "雾港来信",
+        blurb: "一封旧信撬开失踪案。",
+        storyBackground: "雾港、旧案、家族秘密。",
+        style: "都市悬疑",
+        reason: "适合强悬念开局",
+      },
+    ]);
+  });
+});
+
+describe("rankIntroCandidates", () => {
+  it("prefers candidates matching the selected style preset", () => {
+    const ranked = rankIntroCandidates([
+      {
+        title: "仙门秘闻",
+        blurb: "少年踏入仙门，意外卷入旧约。",
+        storyBackground: "仙门、灵气、宗门博弈。",
+      },
+      {
+        title: "夜港账本",
+        blurb: "一份账本掀翻港城灰产链。",
+        storyBackground: "都市、商战、灰产、反转。",
+        style: "都市商战",
+      },
+    ], "urban");
+
+    expect(ranked[0]?.title).toBe("夜港账本");
+  });
+});
+
+describe("buildStepFocusCard", () => {
+  it("surfaces intro focus and missing fields", () => {
+    const focus = buildStepFocusCard("intro", {
+      concept: "港风商战悬疑",
+      blurb: "港口账本牵出灰产风暴。",
+      missingFields: [],
+      readyToCreate: false,
+    }, "zh");
+
+    expect(focus.title).toContain("简介");
+    expect(focus.highlights.some((line) => line.includes("一句话卖点"))).toBe(true);
+    expect(focus.missing).toContain("故事背景");
+  });
+
+  it("surfaces review gaps when creation fields are missing", () => {
+    const focus = buildStepFocusCard("review", {
+      concept: "港风商战悬疑",
+      title: "夜港账本",
+      genre: "urban",
+      readyToCreate: false,
+      missingFields: ["targetChapters"],
+    }, "zh");
+
+    expect(focus.missing).toContain("目标章数");
+  });
+});
+
+describe("buildStepShortcuts", () => {
+  it("includes page-specific actions for intro", () => {
+    const shortcuts = buildStepShortcuts("intro", {
+      title: "当前焦点：简介 / 故事背景",
+      description: "说一句话卖点、故事背景和主角处境，让系统把当前页拆清楚。",
+      highlights: [],
+      missing: ["故事背景"],
+    }, "世界观", "zh");
+
+    expect(shortcuts[0]?.label).toBe("生成卖点候选");
+    expect(shortcuts[0]?.kind).toBe("generate");
+    expect(shortcuts.some((item) => item.label === "按风格重抽")).toBe(true);
+    expect(shortcuts[0]?.value).toContain("候选池");
+  });
+
+  it("adds stronger structural hints for world and review pages", () => {
+    const worldShortcuts = buildStepShortcuts("world", {
+      title: "当前焦点：世界观",
+      description: "定义规则、势力和边界。",
+      highlights: [],
+      missing: ["世界观"],
+    }, "小说大纲", "zh");
+    const reviewShortcuts = buildStepShortcuts("review", {
+      title: "当前焦点：最终确认",
+      description: "这里只做核对和补缺口，确认无误后才创建书籍。",
+      highlights: ["书名：夜港账本"],
+      missing: ["目标章数"],
+    }, undefined, "zh");
+
+    expect(worldShortcuts[0]?.value).toContain("规则、势力、资源、边界");
+    expect(reviewShortcuts[0]?.value).toContain("书名、题材、章数、字数");
+  });
+});
+
+describe("buildStepActionSections", () => {
+  it("groups actions into explicit workbench sections", () => {
+    const sections = buildStepActionSections("review", {
+      title: "当前焦点：最终确认",
+      description: "这里只做核对和补缺口，确认无误后才创建书籍。",
+      highlights: ["书名：夜港账本"],
+      missing: ["目标章数"],
+    }, undefined, "zh");
+
+    expect(sections.map((section) => section.title)).toEqual(["修订", "定稿"]);
+    expect(sections[0]?.items.some((item) => item.kind === "revise")).toBe(true);
+    expect(sections[1]?.items.some((item) => item.kind === "create")).toBe(true);
+  });
+});
+
+describe("buildStepRecommendedAction", () => {
+  it("prefers candidate generation on intro when no candidates exist", () => {
+    const action = buildStepRecommendedAction({
+      step: "intro",
+      focusCard: {
+        title: "当前焦点：简介 / 故事背景",
+        description: "先把卖点和故事起点定住。",
+        highlights: [],
+        missing: ["故事背景"],
+      },
+      language: "zh",
+      hasIntroCandidates: false,
+    });
+
+    expect(action.shortcut.kind).toBe("generate");
+    expect(action.shortcut.label).toContain("候选");
+  });
+
+  it("prefers create on review when the draft is ready", () => {
+    const action = buildStepRecommendedAction({
+      step: "review",
+      focusCard: {
+        title: "当前焦点：最终确认",
+        description: "这里只做核对和补缺口，确认无误后才创建书籍。",
+        highlights: ["书名：夜港账本"],
+        missing: [],
+      },
+      language: "zh",
+      canCreate: true,
+    });
+
+    expect(action.shortcut.kind).toBe("create");
+    expect(action.reason).toContain("创建");
   });
 });
 

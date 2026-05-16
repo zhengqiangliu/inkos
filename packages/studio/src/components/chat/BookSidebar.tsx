@@ -148,7 +148,7 @@ function QuickFileLinks({
   );
 }
 
-function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFunction }) {
+export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFunction }) {
   const artifactFile = useChatStore((s) => s.artifactFile);
   const artifactChapter = useChatStore((s) => s.artifactChapter);
   const artifactChapterMeta = useChatStore((s) => s.artifactChapterMeta);
@@ -611,11 +611,35 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
         ) : content === null ? (
           <p className="text-xs text-muted-foreground/50 italic px-4 py-3">{t("sidebar.fileNotFound")}</p>
         ) : editing ? (
-          <textarea
-            value={editContent}
-            onChange={(e) => setEditContent(e.target.value)}
-            className="w-full h-full min-h-[300px] bg-transparent text-sm leading-7 px-4 py-3 resize-none outline-none border-0 font-mono"
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="shrink-0 border-b border-border/20 bg-card/35 px-4 py-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground/75">
+                  章节正文
+                </span>
+                <span className="text-[10px] text-muted-foreground/60">编辑中</span>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <textarea
+                value={editContent}
+                onChange={(e) => setEditContent(e.target.value)}
+                className="w-full min-h-full bg-transparent text-sm leading-7 px-4 py-3 resize-none outline-none border-0 font-mono"
+              />
+            </div>
+            {isChapter && content !== null && !loading && (
+              <div className="shrink-0">
+                <ChapterRevisionSection
+                  bookId={bookId}
+                  chapterNumber={artifactChapter!}
+                  selectedText={selectedText}
+                  selectionModeActive={selectionModeActive}
+                  onToggleSelectionMode={handleToggleSelectionMode}
+                  onRevisionComplete={handleRevisionComplete}
+                />
+              </div>
+            )}
+          </div>
         ) : isChapter ? (
           <div className="flex h-full min-h-0 flex-col">
             <div className="shrink-0 border-b border-border/20 bg-card/35 px-4 py-2.5">
@@ -623,43 +647,23 @@ function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFun
                 <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground/75">
                   章节正文
                 </span>
-                <span className="text-[10px] text-muted-foreground/60">
-                  阅读区
-                </span>
+                <span className="text-[10px] text-muted-foreground/60">阅读区</span>
               </div>
             </div>
-            <div ref={contentContainerRef} className="flex-1 px-4 py-4 text-sm leading-7">
-              <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
-            </div>
-            <div className="shrink-0 border-t border-border/20 bg-secondary/20 px-4 py-2.5">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground/75">
-                  AI 修订区
-                </span>
-                <span className="text-[10px] text-muted-foreground/60">
-                  选中后自动切换
-                </span>
+            <div ref={contentContainerRef} className="flex-1 overflow-y-auto px-4 py-4 text-sm leading-7">
+              <div className="mx-auto w-full max-w-none">
+                <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
               </div>
             </div>
           </div>
         ) : (
           <div ref={contentContainerRef} className="px-4 py-3 text-sm leading-7">
-            <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
+            <div className="mx-auto w-full max-w-none">
+              <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
+            </div>
           </div>
         )}
       </div>
-      {isChapter && content !== null && !loading && (
-        <div data-revision-section>
-          <ChapterRevisionSection
-            bookId={bookId}
-            chapterNumber={artifactChapter!}
-            selectedText={selectedText}
-            selectionModeActive={selectionModeActive}
-            onToggleSelectionMode={handleToggleSelectionMode}
-            onRevisionComplete={handleRevisionComplete}
-          />
-        </div>
-      )}
       {fullscreen && content !== null && (
         <ChapterFullscreenModal
           title={label}
@@ -828,7 +832,7 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
 
   const renderTabPanel = () => {
     if (activeTab === "chapter-design") {
-      return <ChapterPlansSection bookId={bookId} />;
+      return <p className="text-xs text-muted-foreground px-1">??</p>;
     }
     if (activeTab === "execution") {
       return panelExecutions.length > 0 ? (
@@ -1055,7 +1059,7 @@ export function BookSidebarToggle({ bookId, theme, t, sse }: BookSidebarProps) {
         <div className="fixed inset-0 z-40 lg:hidden" onClick={() => setOpen(false)}>
           <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" />
           <aside
-            className="absolute right-0 top-0 h-full w-[420px] max-w-[85vw] border-l border-border/30 overflow-y-auto shadow-2xl"
+            className="absolute right-0 top-0 h-full w-[480px] max-w-[85vw] border-l border-border/30 overflow-y-auto overflow-x-hidden shadow-2xl"
             style={{
               background: "linear-gradient(180deg, color-mix(in oklch, var(--background) 88%, var(--card) 12%) 0%, color-mix(in oklch, var(--background) 76%, black 24%) 100%)",
             }}

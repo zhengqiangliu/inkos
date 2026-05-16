@@ -12,6 +12,7 @@ interface HardParamDraft {
   language?: "zh" | "en";
   targetChapters?: number;
   chapterWordCount?: number;
+  genre?: string;
 }
 
 function normalizePlatformValue(value: string): string {
@@ -171,6 +172,17 @@ export function routeNaturalLanguageIntent(
         ...params,
       };
     }
+  }
+
+  const candidateCommand = trimmed.match(/^\/candidate\s+(\d+)(?:\s+(select|revise|create))?(?:\s+([\s\S]+))?$/i);
+  if (candidateCommand) {
+    return {
+      intent: "select_intro_candidate",
+      ...(bookId ? { bookId } : {}),
+      candidateIndex: parseInt(candidateCommand[1]!, 10),
+      candidateAction: (candidateCommand[2]?.toLowerCase() as "select" | "revise" | "create" | undefined) ?? "select",
+      ...(candidateCommand[3]?.trim() ? { instruction: candidateCommand[3].trim() } : {}),
+    };
   }
 
   if (/^\/draft$/i.test(trimmed)) {

@@ -2311,7 +2311,7 @@ export class PipelineRunner {
     );
     inputPrepMs += this.elapsedMs(inputPrepStartedAt);
     const quickMode = options?.quickMode ?? this.config.defaultWriteNextQuickMode ?? false;
-    const skipStateValidation = options?.skipStateValidation ?? quickMode;
+    let skipStateValidation = options?.skipStateValidation ?? quickMode;
     const deferMemorySync = options?.deferMemorySync ?? quickMode;
     const deferSnapshotSync = options?.deferSnapshotSync ?? quickMode;
     if (quickMode) {
@@ -2533,6 +2533,9 @@ export class PipelineRunner {
       : nonStructuralContentChange
         ? "non-structural-content"
         : null;
+    if (skipTruthRebuildReason) {
+      skipStateValidation = true;
+    }
     if (skipTruthRebuildReason) {
       this.logInfo(stageLanguage, {
         zh: `第${chapterNumber}章跳过真相重建：reason=${skipTruthRebuildReason}，wordCount=${finalWordCount}。`,

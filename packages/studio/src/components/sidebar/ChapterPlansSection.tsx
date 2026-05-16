@@ -102,14 +102,21 @@ const STATUS_CLASS: Record<string, string> = {
   used: "bg-muted/40 text-muted-foreground",
 };
 
-export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
+interface ChapterPlansSectionProps {
+  readonly bookId: string;
+  readonly onSelectChapter?: (chapterNumber: number) => void;
+  readonly selectedChapter?: number | null;
+}
+
+export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: selectedChapterProp = null }: ChapterPlansSectionProps) {
   const [plans, setPlans] = useState<ReadonlyArray<ChapterPlan>>([]);
   const [nextChapter, setNextChapter] = useState(1);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "missing" | "backfilled" | "drift">("all");
-  const [selectedChapter, setSelectedChapter] = useState<number | null>(null);
+  const [selectedChapter, setSelectedChapter] = useState<number | null>(selectedChapterProp);
+  const [editingChapter, setEditingChapter] = useState<number | null>(null);
   const [historyChapter, setHistoryChapter] = useState<number | null>(null);
   const [expandedChapters, setExpandedChapters] = useState<Set<number>>(new Set());
   const [actionSummary, setActionSummary] = useState<{
@@ -160,6 +167,11 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
   useEffect(() => {
     void refetch();
   }, [refetch]);
+
+  useEffect(() => {
+    if (selectedChapterProp === selectedChapter) return;
+    setSelectedChapter(selectedChapterProp);
+  }, [selectedChapterProp, selectedChapter]);
 
   const runAction = useCallback(async (label: string, runner: () => Promise<ChapterPlanBatchActionResponse | void>) => {
     setRunning(label);
@@ -344,11 +356,12 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
   }, []);
 
   const openEditModal = useCallback((plan: ChapterPlan) => {
-    setSelectedChapter(plan.chapterNumber);
-  }, []);
+    setEditingChapter(plan.chapterNumber);
+    onSelectChapter?.(plan.chapterNumber);
+  }, [onSelectChapter]);
 
   const closeModal = useCallback(() => {
-    setSelectedChapter(null);
+    setEditingChapter(null);
   }, []);
 
   const parseCsv = useCallback((value: string): string[] => (
@@ -365,57 +378,59 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
       actions={running ? <span className="text-[10px] text-primary">{running}</span> : null}
       className="flex min-h-0 flex-1 flex-col"
     >
-      <div className="flex flex-wrap gap-1.5">
-        {[
-          { key: "all", label: "全部" },
-          { key: "missing", label: `缺失(${missingChapters.length})` },
-          { key: "backfilled", label: "待确认" },
-          { key: "drift", label: "漂移" },
-        ].map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            onClick={() => setFilter(item.key as "all" | "missing" | "backfilled" | "drift")}
-            className={`rounded-md px-2 py-1 text-[11px] ${
-              filter === item.key
-                ? "bg-primary/15 text-primary"
-                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
+      <div className="rounded-lg border border-border/30 bg-secondary/15 p-2.5 space-y-2">
+        <div className="flex flex-wrap gap-1.5">
+          {[
+            { key: "all", label: "全部" },
+            { key: "missing", label: `缺失(${missingChapters.length})` },
+            { key: "backfilled", label: "待确认" },
+            { key: "drift", label: "漂移" },
+          ].map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => setFilter(item.key as "all" | "missing" | "backfilled" | "drift")}
+              className={`rounded-md px-2 py-1 text-[11px] ${
+                filter === item.key
+                  ? "bg-primary/15 text-primary"
+                  : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
 
-      <div className="flex flex-wrap gap-1.5">
-        <button
-          type="button"
-          onClick={handleGenerateClick}
-          className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
-        >
-          生成章节
-        </button>
-        <button
-          type="button"
-          onClick={handleFillMissing}
-          className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
-        >
-          补全缺失
-        </button>
-        <button
-          type="button"
-          onClick={handleBackfill}
-          className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
-        >
-          回填已写章节
-        </button>
-        <button
-          type="button"
-          onClick={handleCleanupOverflow}
-          className="rounded-md border border-amber-500/30 px-2 py-1 text-[11px] text-amber-500 hover:bg-amber-500/10"
-        >
-          清理超纲
-        </button>
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={handleGenerateClick}
+            className="rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] text-primary hover:bg-primary/20"
+          >
+            生成
+          </button>
+          <button
+            type="button"
+            onClick={handleFillMissing}
+            className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
+          >
+            补全
+          </button>
+          <button
+            type="button"
+            onClick={handleBackfill}
+            className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
+          >
+            回填
+          </button>
+          <button
+            type="button"
+            onClick={handleCleanupOverflow}
+            className="rounded-md border border-amber-500/30 px-2 py-1 text-[11px] text-amber-500 hover:bg-amber-500/10"
+          >
+            清理
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -453,11 +468,11 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
       ) : displayRows.length === 0 ? (
         <p className="text-xs text-muted-foreground">暂无章节设计</p>
       ) : (
-        <div className="space-y-1 overflow-y-auto">
+        <div className="space-y-1 overflow-y-auto pr-1">
           {displayRows.map((row) => {
             if (row.kind === "missing") {
               return (
-                <div key={`missing-${row.chapterNumber}`} className="rounded-lg border border-destructive/20 px-3 py-2">
+                <div key={`missing-${row.chapterNumber}`} className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2">
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] font-medium text-foreground">第{row.chapterNumber}章</span>
                     <span className="rounded-full bg-destructive/10 px-1.5 py-0.5 text-[10px] text-destructive">missing</span>
@@ -468,39 +483,42 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
             }
             const plan = row.plan;
             const isExpanded = expandedChapters.has(plan.chapterNumber);
+            const isSelected = selectedChapter === plan.chapterNumber;
             return (
               <div
                 key={`${plan.chapterNumber}-${plan.version}`}
-                className={`relative rounded-lg border ${isExpanded ? "border-primary/40" : "border-border/20"}`}
+                className={`relative rounded-lg border bg-card/40 ${isSelected ? "border-primary/50 ring-1 ring-primary/20" : isExpanded ? "border-primary/40" : "border-border/20"}`}
               >
-                {/* Header - always visible */}
-                <div
-                  className="flex items-center gap-2 px-3 py-2 cursor-pointer"
-                  onClick={() => toggleExpand(plan.chapterNumber)}
-                >
-                  <span className="text-[11px] font-medium text-foreground">第{plan.chapterNumber}章</span>
-                  <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${STATUS_CLASS[plan.status] ?? "bg-muted/40 text-muted-foreground"}`}>
-                    {plan.status}
-                  </span>
-                  <span className="rounded-full bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    v{plan.version}
-                  </span>
-                  {(plan.driftFlags?.length ?? 0) > 0 && (
-                    <span className="rounded-full bg-orange-500/10 px-1.5 py-0.5 text-[10px] text-orange-500">
-                      drift
-                    </span>
-                  )}
-                  {plan.lockedFields?.length ? (
-                    <Lock size={10} className="text-violet-400" />
-                  ) : null}
-                  <span className="ml-auto text-[10px] text-muted-foreground">
-                    {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                  </span>
-                </div>
-
-                {/* Chapter name - always visible */}
-                <div className="px-3 pb-1">
-                  <p className="text-xs font-medium text-foreground">{plan.chapterName || "（未命名）"}</p>
+                <div className="flex items-start gap-2 px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-medium text-foreground">第{plan.chapterNumber}章</span>
+                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${STATUS_CLASS[plan.status] ?? "bg-muted/40 text-muted-foreground"}`}>
+                        {plan.status}
+                      </span>
+                      <span className="rounded-full bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        v{plan.version}
+                      </span>
+                      {plan.lockedFields?.length ? <Lock size={10} className="text-violet-400" /> : null}
+                    </div>
+                    <p className="mt-1 text-xs font-medium text-foreground">{plan.chapterName || "（未命名）"}</p>
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    <button
+                      type="button"
+                      onClick={() => toggleExpand(plan.chapterNumber)}
+                      className="rounded-md border border-border/30 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary/40 hover:text-foreground"
+                    >
+                      {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openEditModal(plan)}
+                      className="rounded-md border border-primary/20 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10"
+                    >
+                      选中
+                    </button>
+                  </div>
                 </div>
 
                 {/* Expanded floating panel */}
@@ -592,15 +610,15 @@ export function ChapterPlansSection({ bookId }: { readonly bookId: string }) {
       )}
 
       {/* Edit Modal */}
-      {selectedChapter !== null && (
+      {editingChapter !== null && (
         <EditPlanModal
           bookId={bookId}
-          chapterNumber={selectedChapter}
-          plan={plans.find((p) => p.chapterNumber === selectedChapter) ?? null}
+          chapterNumber={editingChapter}
+          plan={plans.find((p) => p.chapterNumber === editingChapter) ?? null}
           onClose={closeModal}
           onSave={async (updated) => {
-            await runAction(`保存第${selectedChapter}章`, async () => {
-              await fetchJson(`/books/${bookId}/chapter-plans/${selectedChapter}`, {
+            await runAction(`保存第${editingChapter}章`, async () => {
+              await fetchJson(`/books/${bookId}/chapter-plans/${editingChapter}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({

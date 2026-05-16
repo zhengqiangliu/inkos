@@ -5594,18 +5594,37 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
     "style_guide.md", "parent_canon.md", "fanfic_canon.md", "book_rules.md",
   ];
+  const TRUTH_FILE_PATHS = new Set([
+    "author_intent.md",
+    "current_focus.md",
+    "story/author_intent.md",
+    "story/current_focus.md",
+    "story_bible.md",
+    "volume_outline.md",
+    "current_state.md",
+    "particle_ledger.md",
+    "pending_hooks.md",
+    "chapter_summaries.md",
+    "subplot_board.md",
+    "emotional_arcs.md",
+    "character_matrix.md",
+    "style_guide.md",
+    "parent_canon.md",
+    "fanfic_canon.md",
+    "book_rules.md",
+  ]);
 
   app.get("/api/v1/books/:id/truth/:file", async (c) => {
     const id = c.req.param("id");
     const file = c.req.param("file");
 
-    if (!TRUTH_FILES.includes(file)) {
+    if (!TRUTH_FILES.includes(file) && !TRUTH_FILE_PATHS.has(file)) {
       return c.json({ error: "Invalid truth file" }, 400);
     }
 
     const bookDir = state.bookDir(id);
     try {
-      const content = await readFile(join(bookDir, "story", file), "utf-8");
+      const content = await readFile(file.startsWith("story/") ? join(bookDir, file) : join(bookDir, "story", file), "utf-8");
       return c.json({ file, content });
     } catch {
       return c.json({ file, content: null });
@@ -10899,7 +10918,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.put("/api/v1/books/:id/truth/:file", async (c) => {
     const id = c.req.param("id");
     const file = c.req.param("file");
-    if (!TRUTH_FILES.includes(file)) {
+    if (!TRUTH_FILES.includes(file) && !TRUTH_FILE_PATHS.has(file)) {
       return c.json({ error: "Invalid truth file" }, 400);
     }
     const { content } = await c.req.json<{ content: string }>();
@@ -12047,22 +12066,22 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       existingPlans = loadPlansJson(raw).plans;
     } catch { /* ignore */ }
 
-    // List chapter files that lack plans
+    // List chapter files that have content and are within the requested range.
     const chaptersDir = join(bookDir, "chapters");
     let chapterFiles: string[] = [];
     try { chapterFiles = await readdir(chaptersDir); } catch { /* ignore */ }
 
-    const plannedNumbers = new Set(existingPlans.map((p: any) => p.chapterNumber));
+    const existingPlanMap = new Map(existingPlans.map((p: any) => [p.chapterNumber, p]));
     const toBackfill = chapterFiles
       .map((f) => parseChapterFileNumber(f))
-      .filter((n): n is number => n !== null && n >= startChapter && n <= effectiveEndChapter && !plannedNumbers.has(n))
+      .filter((n): n is number => n !== null && n >= startChapter && n <= effectiveEndChapter)
       .sort((a, b) => a - b);
 
     if (toBackfill.length === 0) {
       return c.json({ ok: true, successChapters: [] });
     }
 
-    // Backfill each chapter one at a time (needs to read content)
+    // Backfill each chapter one at a time (needs to read content).
     const agent = await createDesignAgent();
     const allPlans: any[] = [];
     const failedChapters: Array<{ chapterNumber: number; reasonCode?: string; reason: string }> = [];
@@ -12088,7 +12107,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           outlineChapterLimit: chapterLimit,
           language: book.language,
         });
-        allPlans.push(plan);
+        allPlans.push({
+          ...plan,
+          status: "backfilled",
+          source: "inferred_from_text",
+          needsReview: true,
+          updatedAt: new Date().toISOString(),
+        });
       } catch (e) {
         failedChapters.push({ chapterNumber: ch, reasonCode: "CHAPTER_PLAN_AGENT_FAILED", reason: String(e) });
       }
@@ -12098,8 +12123,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const merged = [...existingPlans];
     for (const plan of allPlans) {
       const idx = merged.findIndex((p: any) => p.chapterNumber === plan.chapterNumber);
-      if (idx >= 0) merged[idx] = plan;
-      else merged.push(plan);
+      const base = idx >= 0 ? merged[idx] : existingPlanMap.get(plan.chapterNumber) ?? null;
+      const nextPlan = base
+        ? {
+            ...base,
+            ...plan,
+            chapterNumber: plan.chapterNumber,
+            status: "backfilled",
+            source: plan.source ?? base.source ?? "inferred_from_text",
+            version: (base.version ?? 0) + 1,
+            updatedAt: new Date().toISOString(),
+          }
+        : plan;
+      if (idx >= 0) merged[idx] = nextPlan;
+      else merged.push(nextPlan);
     }
     merged.sort((a: any, b: any) => a.chapterNumber - b.chapterNumber);
     await writeFile(plansPath, JSON.stringify({ plans: merged, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
