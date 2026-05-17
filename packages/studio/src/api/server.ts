@@ -5587,32 +5587,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   // --- Truth files ---
 
-  const TRUTH_FILES = [
-    "author_intent.md", "current_focus.md",
-    "story_bible.md", "volume_outline.md", "current_state.md",
-    "particle_ledger.md", "pending_hooks.md", "chapter_summaries.md",
-    "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
-    "style_guide.md", "parent_canon.md", "fanfic_canon.md", "book_rules.md",
-  ];
-  const TRUTH_FILE_PATHS = new Set([
-    "author_intent.md",
-    "current_focus.md",
-    "story/author_intent.md",
-    "story/current_focus.md",
-    "story_bible.md",
-    "volume_outline.md",
-    "current_state.md",
-    "particle_ledger.md",
-    "pending_hooks.md",
-    "chapter_summaries.md",
-    "subplot_board.md",
-    "emotional_arcs.md",
-    "character_matrix.md",
-    "style_guide.md",
-    "parent_canon.md",
-    "fanfic_canon.md",
-    "book_rules.md",
-  ]);
+  const TRUTH_FILES = [\n    "brief.md",\n    "author_intent.md", "current_focus.md",\n    "story_bible.md", "novel_outline.md", "volume_outline.md", "current_state.md",\n    "particle_ledger.md", "pending_hooks.md", "chapter_summaries.md",\n    "subplot_board.md", "emotional_arcs.md", "character_matrix.md",\n    "character_arc.md", "relationship_map.md",\n    "style_guide.md", "parent_canon.md", "fanfic_canon.md", "book_rules.md",\n  ];
+  const TRUTH_FILE_PATHS = new Set([\n    "brief.md",\n    "author_intent.md",\n    "current_focus.md",\n    "story/author_intent.md",\n    "story/current_focus.md",\n    "story_bible.md",\n    "novel_outline.md",\n    "volume_outline.md",\n    "current_state.md",\n    "particle_ledger.md",\n    "pending_hooks.md",\n    "chapter_summaries.md",\n    "subplot_board.md",\n    "emotional_arcs.md",\n    "character_matrix.md",\n    "character_arc.md",\n    "relationship_map.md",\n    "style_guide.md",\n    "parent_canon.md",\n    "fanfic_canon.md",\n    "book_rules.md",\n  ]);
 
   app.get("/api/v1/books/:id/truth/:file", async (c) => {
     const id = c.req.param("id");
@@ -6250,13 +6226,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const storyDir = join(bookDir, "story");
     try {
       const files = await readdir(storyDir);
-      const mdFiles = files.filter((f) => f.endsWith(".md") || f.endsWith(".json"));
-      const result = await Promise.all(
-        mdFiles.map(async (f) => {
-          const content = await readFile(join(storyDir, f), "utf-8");
-          return { name: f, size: content.length, preview: content.slice(0, 200) };
-        }),
-      );
+      const mdFiles = files.filter((f) => f.endsWith(".md"));
+      const result = await Promise.all(\n        mdFiles\n          .filter((f) => TRUTH_FILES.includes(f) || TRUTH_FILE_PATHS.has(f))\n          .map(async (f) => {\n            const content = await readFile(join(storyDir, f), "utf-8");\n            return { name: f, size: content.length, preview: content.slice(0, 200) };\n          }),\n      );
       return c.json({ files: result });
     } catch {
       return c.json({ files: [] });

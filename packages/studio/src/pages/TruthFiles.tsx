@@ -11,6 +11,28 @@ interface TruthFile {
   readonly preview: string;
 }
 
+const FILE_LABELS: Record<string, { title: string; subtitle: string }> = {
+  "brief.md": { title: "简介 / 故事背景", subtitle: "brief.md" },
+  "author_intent.md": { title: "长期作者意图", subtitle: "author_intent.md" },
+  "current_focus.md": { title: "当前阶段关注点", subtitle: "current_focus.md" },
+  "story_bible.md": { title: "世界观设定", subtitle: "story_bible.md" },
+  "novel_outline.md": { title: "小说大纲", subtitle: "novel_outline.md" },
+  "volume_outline.md": { title: "卷纲规划", subtitle: "volume_outline.md" },
+  "character_matrix.md": { title: "角色矩阵", subtitle: "character_matrix.md" },
+  "character_arc.md": { title: "人物弧光", subtitle: "character_arc.md" },
+  "relationship_map.md": { title: "人物关系", subtitle: "relationship_map.md" },
+  "book_rules.md": { title: "叙事规则", subtitle: "book_rules.md" },
+  "current_state.md": { title: "状态卡 / 世界状态", subtitle: "current_state.md" },
+  "particle_ledger.md": { title: "资源账本", subtitle: "particle_ledger.md" },
+  "pending_hooks.md": { title: "未闭合伏笔", subtitle: "pending_hooks.md" },
+  "chapter_summaries.md": { title: "各章摘要", subtitle: "chapter_summaries.md" },
+  "subplot_board.md": { title: "支线进度板", subtitle: "subplot_board.md" },
+  "emotional_arcs.md": { title: "情感弧线", subtitle: "emotional_arcs.md" },
+};
+
+function truthFileLabel(name: string): { title: string; subtitle: string } {
+  return FILE_LABELS[name] ?? { title: name, subtitle: name };
+}
 interface Nav {
   toBook: (id: string) => void;
   toDashboard: () => void;
