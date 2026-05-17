@@ -2936,6 +2936,50 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("backfills missing chapter plans when endChapter is omitted", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "outline", "volume_map.md"),
+      "# 卷纲\n\n总章数 10 章",
+      "utf-8",
+    );
+    await writeFile(
+      join(bookDir, "story", "state", "chapter-plans.json"),
+      JSON.stringify({ plans: [], updatedAt: "2026-04-07T00:00:00.000Z" }, null, 2),
+      "utf-8",
+    );
+    await writeFile(
+      join(bookDir, "chapters", "0004_demo.md"),
+      "# 第4章\n\n这一章已经写完。",
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/backfill-from-chapter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 4 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      successChapters: [4],
+    });
+
+    const saved = JSON.parse(await readFile(join(bookDir, "story", "state", "chapter-plans.json"), "utf-8")) as { plans: Array<{ chapterNumber: number; status: string; source: string; version: number }> };
+    expect(saved.plans.find((plan) => plan.chapterNumber === 4)).toMatchObject({
+      status: "backfilled",
+      source: "inferred_from_text",
+      version: 1,
+    });
+  });
+
   it("routes create requests through the shared structured interaction runtime", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);

@@ -5,6 +5,7 @@ import {
   buildChapterRevisionInstruction,
   getChapterRevisionDisplayMeta,
 } from "./chapter-revision-utils";
+import { resolveChapterRevisionContent } from "./chapter-revision-response";
 
 interface ChapterRevisionSectionProps {
   readonly bookId: string;
@@ -21,7 +22,7 @@ export function ChapterRevisionSection({
   selectedText,
   selectionModeActive,
   onToggleSelectionMode,
-  onRevisionComplete: _onRevisionComplete,
+  onRevisionComplete,
 }: ChapterRevisionSectionProps) {
   const hasSelection = selectedText.trim().length > 0;
   const modeMeta = getChapterRevisionDisplayMeta(selectedText, selectionModeActive);
@@ -53,12 +54,14 @@ export function ChapterRevisionSection({
         brief,
         mode: modeMeta.mode,
       });
-      await sendMessage(sessionId, instruction, bookId);
+      const response = await sendMessage(sessionId, instruction, bookId);
+      const revisedContent = resolveChapterRevisionContent(response);
+      onRevisionComplete(revisedContent);
     } finally {
       setSending(false);
       setBrief("");
     }
-  }, [activeSessionId, bookId, chapterNumber, brief, createDraftSession, modeMeta.mode, selectedText, sendMessage, sending]);
+  }, [activeSessionId, bookId, chapterNumber, brief, createDraftSession, modeMeta.mode, onRevisionComplete, selectedText, sendMessage, sending]);
 
   const canRevise = brief.trim().length > 0 && !sending;
 

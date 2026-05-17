@@ -3,6 +3,7 @@ import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
 import { useApi } from "../hooks/use-api";
+import { dispatchWriteNextInstruction } from "../utils/write-next";
 import { chatSelectors, useChatStore } from "../store/chat";
 import { useServiceStore } from "../store/service";
 import {
@@ -253,6 +254,10 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
 
   const handleQuickAction = (command: string) => {
     if (!activeSessionId) return;
+    if (/^(写下一章|write next(?: chapter)?|next chapter)$/i.test(command.trim())) {
+      void dispatchWriteNextInstruction(activeBookId ?? "", undefined, activeSessionId);
+      return;
+    }
     void sendMessage(activeSessionId, command, activeBookId);
   };
 
@@ -391,6 +396,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
             onAction={handleQuickAction}
             disabled={loading || stopping || !activeSessionId}
             isZh={isZh}
+            onWriteNext={activeBookId ? () => { void dispatchWriteNextInstruction(activeBookId, undefined, activeSessionId); } : undefined}
           />
         </div>
       )}

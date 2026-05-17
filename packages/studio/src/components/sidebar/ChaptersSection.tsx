@@ -9,7 +9,8 @@ import { cn } from "../../lib/utils";
 import { estimateAuditScoreFromIssueTexts, scoreBadgeClass } from "../../utils/audit-score";
 import { describeChapterAutoReview } from "../../utils/auto-review-display";
 import { resolveBookAgentInstruction } from "../../utils/agent-instruction";
-import { Check, Loader2, Pencil, RotateCcw, ShieldCheck, Trash2, Wrench } from "lucide-react";
+import { dispatchWriteNextInstruction } from "../../utils/write-next";
+import { Check, Loader2, Pencil, RotateCcw, ShieldCheck, Trash2, Wrench, Zap } from "lucide-react";
 
 interface ChapterMeta {
   number: number;
@@ -1193,23 +1194,37 @@ export function ChaptersSection({
       title={t("sidebar.chapters")}
       className={className}
       contentClassName={cn("min-h-0", listClassName)}
-      actions={impactedChapters.length > 0
-        ? (
+      actions={(
+        <div className="flex items-center gap-1">
           <button
             type="button"
-            className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 hover:bg-amber-500/20 transition-colors disabled:opacity-60"
-            disabled={auditingImpacted}
-            title={`批量审计待复核章节（${impactedChapters.length}）`}
+            className="inline-flex items-center rounded-full border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/15 transition-colors"
+            title={t("book.writeNext")}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              void handleAuditImpacted();
+              void dispatchWriteNextInstruction(bookId);
             }}
           >
-            {auditingImpacted ? "审计中..." : `复核 ${impactedChapters.length}`}
+            <Zap size={12} />
           </button>
-        )
-        : undefined}
+          {impactedChapters.length > 0 && (
+            <button
+              type="button"
+              className="inline-flex items-center rounded-full border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 hover:bg-amber-500/20 transition-colors disabled:opacity-60"
+              disabled={auditingImpacted}
+              title={`批量审计待复核章节（${impactedChapters.length}）`}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void handleAuditImpacted();
+              }}
+            >
+              {auditingImpacted ? "审计中..." : `复核 ${impactedChapters.length}`}
+            </button>
+          )}
+        </div>
+      )}
     >
       {visibleChapters.length === 0 ? (
         <p className="text-xs text-muted-foreground/50 italic">

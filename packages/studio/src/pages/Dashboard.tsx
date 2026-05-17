@@ -1,4 +1,4 @@
-import { fetchJson, useApi } from "../hooks/use-api";
+﻿import { fetchJson, useApi } from "../hooks/use-api";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useServiceStore } from "../store/service";
 import type { SSEMessage } from "../hooks/use-sse";
@@ -7,6 +7,7 @@ import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { deriveActiveBookIds, shouldRefetchBookCollections } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { dispatchWriteNextInstruction } from "../utils/write-next";
 import {
   Plus,
   BookOpen,
@@ -39,23 +40,6 @@ interface Nav {
   toAnalytics: (id: string) => void;
   toBookCreate: () => void;
   toServices: () => void;
-}
-
-const BOOK_DETAIL_AGENT_SESSION_KEY_PREFIX = "inkos:book-detail:agent-session:";
-
-function getBookDetailAgentSessionKey(bookId: string): string {
-  return `${BOOK_DETAIL_AGENT_SESSION_KEY_PREFIX}${bookId}`;
-}
-
-function readBookDetailSessionId(bookId: string): string | null {
-  if (typeof localStorage === "undefined") return null;
-  const value = localStorage.getItem(getBookDetailAgentSessionKey(bookId))?.trim() ?? "";
-  return value || null;
-}
-
-function writeBookDetailSessionId(bookId: string, sessionId: string): void {
-  if (typeof localStorage === "undefined") return;
-  localStorage.setItem(getBookDetailAgentSessionKey(bookId), sessionId);
 }
 
 function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
@@ -186,48 +170,6 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
     }
   }, [data?.books, selectedBookId]);
 
-  const ensureAgentSessionId = async (bookId: string): Promise<string> => {
-    const existing = readBookDetailSessionId(bookId);
-    if (existing) return existing;
-    const created = await fetchJson<{ session?: { sessionId?: string } }>("/sessions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bookId }),
-    });
-    const sessionId = created.session?.sessionId?.trim();
-    if (!sessionId) throw new Error("无法创建会话");
-    writeBookDetailSessionId(bookId, sessionId);
-    return sessionId;
-  };
-
-  const dispatchWriteNextInstruction = async (bookId: string, language?: string): Promise<void> => {
-    const instruction = language === "en" ? "write next chapter" : "写下一章";
-    const send = async (sessionId: string): Promise<void> => {
-      await fetchJson("/agent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          instruction,
-          activeBookId: bookId,
-          sessionId,
-        }),
-      });
-    };
-
-    let sessionId = await ensureAgentSessionId(bookId);
-    try {
-      await send(sessionId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/SESSION_NOT_FOUND|Session not found/i.test(message)) {
-        writeBookDetailSessionId(bookId, "");
-        sessionId = await ensureAgentSessionId(bookId);
-        await send(sessionId);
-        return;
-      }
-      throw error;
-    }
-  };
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center py-32 space-y-4">
@@ -270,14 +212,14 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
       {!hasServices && (
         <div className="rounded-lg border border-border/60 bg-card px-5 py-4 mb-8 flex items-center justify-between gap-4">
           <div>
-            <div className="text-sm font-medium">还没有配置 AI 模型</div>
-            <div className="text-xs text-muted-foreground mt-0.5">配好一个服务商才能开始创作</div>
+            <div className="text-sm font-medium">杩樻病鏈夐厤缃?AI 妯″瀷</div>
+            <div className="text-xs text-muted-foreground mt-0.5">閰嶅ソ涓€涓湇鍔″晢鎵嶈兘寮€濮嬪垱浣?</div>
           </div>
           <button
             onClick={nav.toServices}
             className="px-4 py-2 text-xs rounded-lg bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors shrink-0"
           >
-            去配置
+            鍘婚厤缃?
           </button>
         </div>
       )}
@@ -345,7 +287,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                     </button>
                     {isSelected && (
                       <span className="shrink-0 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-primary">
-                        当前创作中
+                        褰撳墠鍒涗綔涓?
                       </span>
                     )}
                   </div>
@@ -494,3 +436,5 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
     </div>
   );
 }
+
+

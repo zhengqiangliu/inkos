@@ -4,6 +4,7 @@ import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { Pencil, Save, X } from "lucide-react";
+import { getArtifactLabel } from "../utils/book-artifacts";
 
 interface TruthFile {
   readonly name: string;
@@ -11,28 +12,6 @@ interface TruthFile {
   readonly preview: string;
 }
 
-const FILE_LABELS: Record<string, { title: string; subtitle: string }> = {
-  "brief.md": { title: "简介 / 故事背景", subtitle: "brief.md" },
-  "author_intent.md": { title: "长期作者意图", subtitle: "author_intent.md" },
-  "current_focus.md": { title: "当前阶段关注点", subtitle: "current_focus.md" },
-  "story_bible.md": { title: "世界观设定", subtitle: "story_bible.md" },
-  "novel_outline.md": { title: "小说大纲", subtitle: "novel_outline.md" },
-  "volume_outline.md": { title: "卷纲规划", subtitle: "volume_outline.md" },
-  "character_matrix.md": { title: "角色矩阵", subtitle: "character_matrix.md" },
-  "character_arc.md": { title: "人物弧光", subtitle: "character_arc.md" },
-  "relationship_map.md": { title: "人物关系", subtitle: "relationship_map.md" },
-  "book_rules.md": { title: "叙事规则", subtitle: "book_rules.md" },
-  "current_state.md": { title: "状态卡 / 世界状态", subtitle: "current_state.md" },
-  "particle_ledger.md": { title: "资源账本", subtitle: "particle_ledger.md" },
-  "pending_hooks.md": { title: "未闭合伏笔", subtitle: "pending_hooks.md" },
-  "chapter_summaries.md": { title: "各章摘要", subtitle: "chapter_summaries.md" },
-  "subplot_board.md": { title: "支线进度板", subtitle: "subplot_board.md" },
-  "emotional_arcs.md": { title: "情感弧线", subtitle: "emotional_arcs.md" },
-};
-
-function truthFileLabel(name: string): { title: string; subtitle: string } {
-  return FILE_LABELS[name] ?? { title: name, subtitle: name };
-}
 interface Nav {
   toBook: (id: string) => void;
   toDashboard: () => void;
@@ -54,9 +33,7 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
     setEditMode(true);
   };
 
-  const cancelEdit = () => {
-    setEditMode(false);
-  };
+  const cancelEdit = () => setEditMode(false);
 
   const handleSaveEdit = async () => {
     if (!selected) return;
@@ -89,55 +66,47 @@ export function TruthFiles({ bookId, nav, theme, t }: { bookId: string; nav: Nav
       <h1 className="font-serif text-3xl">{t("truth.title")}</h1>
 
       <div className="grid grid-cols-[240px_1fr] gap-6">
-        {/* File list */}
         <div className={`border ${c.cardStatic} rounded-lg overflow-hidden`}>
-          {data?.files.map((f) => (
-            <button
-              key={f.name}
-              onClick={() => { setSelected(f.name); setEditMode(false); }}
-              className={`w-full text-left px-3 py-2.5 text-sm border-b border-border/40 transition-colors ${
-                selected === f.name
-                  ? "bg-primary/10 text-primary"
-                  : "hover:bg-muted/30 text-muted-foreground"
-              }`}
-            >
-              <div className="font-mono text-sm truncate">{f.name}</div>
-              <div className="text-xs text-muted-foreground mt-0.5">{f.size.toLocaleString()} {t("truth.chars")}</div>
-            </button>
-          ))}
+          {data?.files.map((f) => {
+            const label = getArtifactLabel(f.name);
+            return (
+              <button
+                key={f.name}
+                onClick={() => { setSelected(f.name); setEditMode(false); }}
+                className={`w-full text-left px-3 py-2.5 text-sm border-b border-border/40 transition-colors ${
+                  selected === f.name
+                    ? "bg-primary/10 text-primary"
+                    : "hover:bg-muted/30 text-muted-foreground"
+                }`}
+              >
+                <div className="font-medium text-sm truncate">{label.title}</div>
+                <div className="text-[11px] text-muted-foreground truncate mt-0.5">{label.subtitle}</div>
+                <div className="text-xs text-muted-foreground mt-0.5">{f.size.toLocaleString()} {t("truth.chars")}</div>
+              </button>
+            );
+          })}
           {(!data?.files || data.files.length === 0) && (
             <div className="px-3 py-4 text-sm text-muted-foreground text-center">{t("truth.empty")}</div>
           )}
         </div>
 
-        {/* Content viewer */}
         <div className={`border ${c.cardStatic} rounded-lg p-5 min-h-[400px] flex flex-col`}>
           {selected && fileData?.content != null ? (
             <>
               <div className="flex items-center justify-end gap-2 mb-3">
                 {editMode ? (
                   <>
-                    <button
-                      onClick={cancelEdit}
-                      className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md ${c.btnSecondary}`}
-                    >
+                    <button onClick={cancelEdit} className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md ${c.btnSecondary}`}>
                       <X size={14} />
                       Cancel
                     </button>
-                    <button
-                      onClick={handleSaveEdit}
-                      disabled={savingEdit}
-                      className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md ${c.btnPrimary} disabled:opacity-50`}
-                    >
+                    <button onClick={handleSaveEdit} disabled={savingEdit} className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md ${c.btnPrimary} disabled:opacity-50`}>
                       <Save size={14} />
                       {savingEdit ? t("truth.saving") : t("truth.save")}
                     </button>
                   </>
                 ) : (
-                  <button
-                    onClick={startEdit}
-                    className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md ${c.btnSecondary}`}
-                  >
+                  <button onClick={startEdit} className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs rounded-md ${c.btnSecondary}`}>
                     <Pencil size={14} />
                     Edit
                   </button>

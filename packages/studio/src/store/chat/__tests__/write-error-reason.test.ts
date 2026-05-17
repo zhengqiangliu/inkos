@@ -178,7 +178,7 @@ describe("chat explicit write command failure reasons", () => {
 
     const assistantMessages = store.getState().sessions.s1?.messages.filter((msg) => msg.role === "assistant") ?? [];
     expect(assistantMessages).toHaveLength(1);
-    expect(assistantMessages[0]?.content).toContain("章节正文未落盘");
+    expect(assistantMessages[0]?.content).toContain("章节正文未落库");
     expect(assistantMessages[0]?.content).toContain("17");
   });
 
@@ -230,7 +230,7 @@ describe("chat explicit write command failure reasons", () => {
 
     const assistantMessages = store.getState().sessions.s1?.messages.filter((msg) => msg.role === "assistant") ?? [];
     expect(assistantMessages).toHaveLength(1);
-    expect(assistantMessages[0]?.content).toContain("正文已落盘");
+    expect(assistantMessages[0]?.content).toContain("正文已落库");
     expect(assistantMessages[0]?.content).toContain("状态降级");
     expect(assistantMessages[0]?.content).toContain("第23章");
   });

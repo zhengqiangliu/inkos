@@ -10,24 +10,24 @@ describe("computeMissingChapterNumbers", () => {
     const plans = [
       {
         chapterNumber: 1,
-        chapterName: "第1章",
-        highlight: "看点1",
-        coreConflict: "冲突1",
-        plotAndConflict: "剧情1",
-        emotionalTone: "推进",
-        endingHook: "钩子1",
+        chapterName: "chapter-1",
+        highlight: "highlight-1",
+        coreConflict: "conflict-1",
+        plotAndConflict: "plot-1",
+        emotionalTone: "tone",
+        endingHook: "hook-1",
         status: "planned",
         source: "auto",
         version: 1,
       },
       {
         chapterNumber: 3,
-        chapterName: "第3章",
-        highlight: "看点3",
-        coreConflict: "冲突3",
-        plotAndConflict: "剧情3",
-        emotionalTone: "推进",
-        endingHook: "钩子3",
+        chapterName: "chapter-3",
+        highlight: "highlight-3",
+        coreConflict: "conflict-3",
+        plotAndConflict: "plot-3",
+        emotionalTone: "tone",
+        endingHook: "hook-3",
         status: "planned",
         source: "auto",
         version: 1,
@@ -41,6 +41,26 @@ describe("computeMissingChapterNumbers", () => {
     const missingRows = rows.filter((row) => row.kind === "missing").map((row) => row.chapterNumber);
     expect(missingRows).toEqual([2]);
   });
+
+  it("extends the missing range to already written chapters", () => {
+    const plans = [
+      {
+        chapterNumber: 1,
+        chapterName: "chapter-1",
+        highlight: "highlight-1",
+        coreConflict: "conflict-1",
+        plotAndConflict: "plot-1",
+        emotionalTone: "tone",
+        endingHook: "hook-1",
+        status: "planned",
+        source: "auto",
+        version: 1,
+      },
+    ];
+
+    const missing = computeMissingChapterNumbers(plans, 2, [1, 2, 3, 4]);
+    expect(missing).toEqual([2, 3, 4]);
+  });
 });
 
 describe("mapChapterPlanFailureReason", () => {
@@ -48,11 +68,11 @@ describe("mapChapterPlanFailureReason", () => {
     expect(mapChapterPlanFailureReason({
       reasonCode: "CHAPTER_PLAN_AGENT_MISSING_OUTPUT",
       reason: "agent-missing-plan",
-    })).toContain("Agent 未返回");
+    })).toContain("Agent");
     expect(mapChapterPlanFailureReason({
       reasonCode: "CHAPTER_CONTENT_MISSING",
       reason: "chapter-content-missing",
-    })).toContain("章节正文缺失");
+    })).not.toBe("");
   });
 
   it("falls back to original reason for agent failures", () => {

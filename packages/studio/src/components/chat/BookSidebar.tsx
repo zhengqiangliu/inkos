@@ -169,7 +169,9 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
   const [openingStrict, setOpeningStrict] = useState(true);
   const [openingMaxCharacters, setOpeningMaxCharacters] = useState(5);
   const [selectionModeActive, setSelectionModeActive] = useState(false);
+  const [editorSelectedText, setEditorSelectedText] = useState("");
   const contentContainerRef = useRef<HTMLDivElement | null>(null);
+  const editorTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const { selectedText, isSelecting, selectionRect, persistedRange, clearSelection } = useTextSelection(contentContainerRef);
   useHighlightApi(persistedRange);
   const [fullscreen, setFullscreen] = useState(false);
@@ -259,6 +261,7 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
   const handleEdit = useCallback(() => {
     setSelectionModeActive(false);
     clearSelection();
+    setEditorSelectedText("");
     setEditContent(content ?? "");
     setEditing(true);
   }, [clearSelection, content]);
@@ -267,12 +270,47 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
     setEditing(false);
     setSelectionModeActive((prev) => !prev);
     clearSelection();
+    setEditorSelectedText("");
   }, [clearSelection]);
 
   const handleDismissSelectionMode = useCallback(() => {
     setSelectionModeActive(false);
     clearSelection();
+    setEditorSelectedText("");
   }, [clearSelection]);
+
+  const syncEditorSelection = useCallback(() => {
+    const el = editorTextareaRef.current;
+    if (!el) return;
+    const start = Math.min(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+    const end = Math.max(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+    setEditorSelectedText(el.value.slice(start, end));
+  }, []);
+
+  useEffect(() => {
+    if (!editing) {
+      setEditorSelectedText("");
+      return;
+    }
+    syncEditorSelection();
+    const el = editorTextareaRef.current;
+    if (!el) return;
+    const onSelectionChange = () => {
+      if (document.activeElement === el) syncEditorSelection();
+    };
+    el.addEventListener("select", syncEditorSelection);
+    el.addEventListener("mouseup", syncEditorSelection);
+    el.addEventListener("keyup", syncEditorSelection);
+    el.addEventListener("touchend", syncEditorSelection);
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => {
+      el.removeEventListener("select", syncEditorSelection);
+      el.removeEventListener("mouseup", syncEditorSelection);
+      el.removeEventListener("keyup", syncEditorSelection);
+      el.removeEventListener("touchend", syncEditorSelection);
+      document.removeEventListener("selectionchange", onSelectionChange);
+    };
+  }, [editing, syncEditorSelection]);
 
   const handleSave = useCallback(async () => {
     setSaving(true);
@@ -611,8 +649,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
         ) : content === null ? (
           <p className="text-xs text-muted-foreground/50 italic px-4 py-3">{t("sidebar.fileNotFound")}</p>
         ) : editing ? (
-          <div className="flex h-full min-h-0 flex-col">
-            <div className="shrink-0 border-b border-border/20 bg-card/35 px-4 py-2.5">
+          <div className="flex h-full min-h-0 flex-col px-4 py-3">
+            <div className="shrink-0 pb-3">
               <div className="flex items-center justify-between gap-3">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-muted-foreground/75">
                   章节正文
@@ -620,11 +658,16 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
                 <span className="text-[10px] text-muted-foreground/60">编辑中</span>
               </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="min-h-0 flex-1">
               <textarea
+                ref={editorTextareaRef}
                 value={editContent}
                 onChange={(e) => setEditContent(e.target.value)}
-                className="w-full min-h-full bg-transparent text-sm leading-7 px-4 py-3 resize-none outline-none border-0 font-mono"
+                onSelect={syncEditorSelection}
+                onMouseUp={syncEditorSelection}
+                onKeyUp={syncEditorSelection}
+                onBlur={syncEditorSelection}
+                className="w-full min-h-[56vh] resize-y border-0 bg-transparent px-0 py-0 font-mono text-sm leading-7 outline-none"
               />
             </div>
             {isChapter && content !== null && !loading && (
@@ -632,8 +675,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
                 <ChapterRevisionSection
                   bookId={bookId}
                   chapterNumber={artifactChapter!}
-                  selectedText={selectedText}
-                  selectionModeActive={selectionModeActive}
+                  selectedText={editorSelectedText}
+                  selectionModeActive={selectionModeActive || editorSelectedText.trim().length > 0}
                   onToggleSelectionMode={handleToggleSelectionMode}
                   onRevisionComplete={handleRevisionComplete}
                 />
@@ -666,6 +709,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
       </div>
       {fullscreen && content !== null && (
         <ChapterFullscreenModal
+          bookId={bookId}
+          chapterNumber={artifactChapter}
           title={label}
           content={content}
           editContent={editContent}
@@ -674,13 +719,13 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
           onClose={() => setFullscreen(false)}
         />
       )}
-      {isChapter && (selectionModeActive || (isSelecting && selectedText)) && (
+      {isChapter && (((editing && (selectionModeActive || editorSelectedText.trim().length > 0))) || (!editing && (selectionModeActive || (isSelecting && selectedText)))) && (
         <ChapterSelectionToolbar
           bookId={bookId}
           chapterNumber={artifactChapter!}
-          selectedText={selectedText}
-          selectionRect={selectionRect}
-          selectionModeActive={selectionModeActive}
+          selectedText={editing ? editorSelectedText : selectedText}
+          selectionRect={editing ? null : selectionRect}
+          selectionModeActive={editing ? (selectionModeActive || editorSelectedText.trim().length > 0) : selectionModeActive}
           onDismiss={handleDismissSelectionMode}
         />
       )}

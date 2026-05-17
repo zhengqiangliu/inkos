@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJson } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
 import { X, Sparkles, ChevronDown, ChevronUp, RotateCcw, Check, Lock, History } from "lucide-react";
@@ -50,6 +50,39 @@ interface ChapterPlanBatchActionResponse {
   }>;
 }
 
+export function combineChapterPlanBatchActionResponses(
+  responses: ReadonlyArray<ChapterPlanBatchActionResponse | null | undefined>,
+): ChapterPlanBatchActionResponse {
+  const successChapters = new Set<number>();
+  const removedChapters = new Set<number>();
+  const failedChapters: Array<{ chapterNumber: number; reasonCode?: string; reason?: string }> = [];
+  let ok = true;
+  let partial = false;
+
+  for (const response of responses) {
+    if (!response) continue;
+    if (response.ok === false) ok = false;
+    if (response.partial) partial = true;
+    for (const chapterNumber of response.successChapters ?? []) successChapters.add(Number(chapterNumber));
+    for (const chapterNumber of response.removedChapters ?? []) removedChapters.add(Number(chapterNumber));
+    for (const item of response.failedChapters ?? []) {
+      failedChapters.push({
+        chapterNumber: Number(item.chapterNumber),
+        ...(typeof item.reasonCode === "string" ? { reasonCode: item.reasonCode } : {}),
+        ...(typeof item.reason === "string" ? { reason: item.reason } : {}),
+      });
+    }
+  }
+
+  return {
+    ok,
+    partial: partial || failedChapters.length > 0,
+    ...(successChapters.size > 0 ? { successChapters: [...successChapters].sort((a, b) => a - b) } : {}),
+    ...(removedChapters.size > 0 ? { removedChapters: [...removedChapters].sort((a, b) => a - b) } : {}),
+    ...(failedChapters.length > 0 ? { failedChapters } : {}),
+  };
+}
+
 type ChapterPlanRow =
   | { kind: "plan"; chapterNumber: number; plan: ChapterPlan }
   | { kind: "missing"; chapterNumber: number; plan: null };
@@ -57,9 +90,13 @@ type ChapterPlanRow =
 export function computeMissingChapterNumbers(
   plans: ReadonlyArray<ChapterPlan>,
   nextChapter: number,
+  knownChapterNumbers: ReadonlyArray<number> = [],
 ): number[] {
   const latestChapterPlanned = plans.reduce((max, item) => Math.max(max, item.chapterNumber), 0);
-  const coverageEnd = Math.max(1, nextChapter - 1, latestChapterPlanned);
+  const latestKnownChapter = knownChapterNumbers.reduce((max, chapterNumber) => {
+    return Number.isFinite(chapterNumber) ? Math.max(max, Math.trunc(chapterNumber)) : max;
+  }, 0);
+  const coverageEnd = Math.max(1, nextChapter - 1, latestChapterPlanned, latestKnownChapter);
   const existing = new Set(plans.map((plan) => plan.chapterNumber));
   const missing: number[] = [];
   for (let chapter = 1; chapter <= coverageEnd; chapter += 1) {
@@ -106,9 +143,15 @@ interface ChapterPlansSectionProps {
   readonly bookId: string;
   readonly onSelectChapter?: (chapterNumber: number) => void;
   readonly selectedChapter?: number | null;
+  readonly chapterNumbers?: ReadonlyArray<number>;
 }
 
-export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: selectedChapterProp = null }: ChapterPlansSectionProps) {
+export function ChapterPlansSection({
+  bookId,
+  onSelectChapter,
+  selectedChapter: selectedChapterProp = null,
+  chapterNumbers = [],
+}: ChapterPlansSectionProps) {
   const [plans, setPlans] = useState<ReadonlyArray<ChapterPlan>>([]);
   const [nextChapter, setNextChapter] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -118,7 +161,7 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
   const [selectedChapter, setSelectedChapter] = useState<number | null>(selectedChapterProp);
   const [editingChapter, setEditingChapter] = useState<number | null>(null);
   const [historyChapter, setHistoryChapter] = useState<number | null>(null);
-  const [expandedChapters, setExpandedChapters] = useState<Set<number>>(new Set());
+  const [hoveredChapter, setHoveredChapter] = useState<number | null>(null);
   const [actionSummary, setActionSummary] = useState<{
     label: string;
     partial: boolean;
@@ -173,6 +216,11 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
     setSelectedChapter(selectedChapterProp);
   }, [selectedChapterProp, selectedChapter]);
 
+  useEffect(() => {
+    if (selectedChapterProp === null) return;
+    setHoveredChapter(selectedChapterProp);
+  }, [selectedChapterProp]);
+
   const runAction = useCallback(async (label: string, runner: () => Promise<ChapterPlanBatchActionResponse | void>) => {
     setRunning(label);
     setError(null);
@@ -206,8 +254,8 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
   }, [refetch]);
 
   const missingChapters = useMemo(() => {
-    return computeMissingChapterNumbers(plans, nextChapter);
-  }, [plans, nextChapter]);
+    return computeMissingChapterNumbers(plans, nextChapter, chapterNumbers);
+  }, [chapterNumbers, plans, nextChapter]);
 
   const latestChapterPlanned = useMemo(
     () => plans.reduce((max, item) => Math.max(max, item.chapterNumber), 0),
@@ -217,6 +265,7 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
     () => Math.max(1, nextChapter - 1, latestChapterPlanned),
     [nextChapter, latestChapterPlanned],
   );
+  const recoveryEndChapter = 10000;
 
   const displayRows = useMemo(() => {
     return buildChapterPlanRows(plans, missingChapters, filter);
@@ -279,24 +328,30 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
   }, []);
 
   const handleFillMissing = useCallback(() => {
-    void runAction("补全缺失", async () => {
-      return await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/fill-missing`, {
+    void runAction("一键补全", async () => {
+      const backfillResponse = await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/backfill-from-chapter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startChapter: 1, endChapter: Math.max(coverageEnd, 200) }),
+        body: JSON.stringify({ startChapter: 1, endChapter: recoveryEndChapter }),
       });
+      const fillResponse = await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/fill-missing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startChapter: 1, endChapter: recoveryEndChapter }),
+      });
+      return combineChapterPlanBatchActionResponses([backfillResponse, fillResponse]);
     });
-  }, [bookId, coverageEnd, runAction]);
+  }, [bookId, recoveryEndChapter, runAction]);
 
   const handleBackfill = useCallback(() => {
-    void runAction("回填分章", async () => {
+    void runAction("正文回填", async () => {
       return await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/backfill-from-chapter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startChapter: 1, endChapter: coverageEnd }),
+        body: JSON.stringify({ startChapter: 1, endChapter: recoveryEndChapter }),
       });
     });
-  }, [bookId, coverageEnd, runAction]);
+  }, [bookId, recoveryEndChapter, runAction]);
 
   const handleCleanupOverflow = useCallback(() => {
     void runAction("清理超纲分章", async () => {
@@ -343,21 +398,10 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
     });
   }, [bookId, runAction]);
 
-  const toggleExpand = useCallback((chapterNumber: number) => {
-    setExpandedChapters((prev) => {
-      const next = new Set(prev);
-      if (next.has(chapterNumber)) {
-        next.delete(chapterNumber);
-      } else {
-        next.add(chapterNumber);
-      }
-      return next;
-    });
-  }, []);
-
   const openEditModal = useCallback((plan: ChapterPlan) => {
-    setEditingChapter(plan.chapterNumber);
     onSelectChapter?.(plan.chapterNumber);
+    setSelectedChapter(plan.chapterNumber);
+    setHoveredChapter(plan.chapterNumber);
   }, [onSelectChapter]);
 
   const closeModal = useCallback(() => {
@@ -413,24 +457,29 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
             type="button"
             onClick={handleFillMissing}
             className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
+            title="先回填已有章节正文，再生成仍缺的分章设计"
           >
-            补全
+            一键补全
           </button>
           <button
             type="button"
             onClick={handleBackfill}
             className="rounded-md border border-border/40 px-2 py-1 text-[11px] text-foreground hover:bg-secondary/50"
+            title="只根据已有章节正文推回分章设计"
           >
-            回填
+            正文回填
           </button>
           <button
             type="button"
             onClick={handleCleanupOverflow}
             className="rounded-md border border-amber-500/30 px-2 py-1 text-[11px] text-amber-500 hover:bg-amber-500/10"
-          >
+            >
             清理
           </button>
         </div>
+        <p className="text-[10px] leading-4 text-muted-foreground">
+          一键补全 = 先回填已有正文，再补齐剩余缺失；正文回填 = 只处理已经写完的章节。
+        </p>
       </div>
 
       {error && (
@@ -482,12 +531,21 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
               );
             }
             const plan = row.plan;
-            const isExpanded = expandedChapters.has(plan.chapterNumber);
             const isSelected = selectedChapter === plan.chapterNumber;
+            const isHovered = hoveredChapter === plan.chapterNumber;
             return (
               <div
                 key={`${plan.chapterNumber}-${plan.version}`}
-                className={`relative rounded-lg border bg-card/40 ${isSelected ? "border-primary/50 ring-1 ring-primary/20" : isExpanded ? "border-primary/40" : "border-border/20"}`}
+                className={`group rounded-lg border bg-card/40 transition-colors ${
+                  isSelected
+                    ? "border-primary/60 bg-primary/10 ring-2 ring-primary/20"
+                    : isHovered
+                      ? "border-primary/40 bg-primary/5"
+                      : "border-border/20 hover:border-primary/30 hover:bg-primary/5"
+                }`}
+                onMouseEnter={() => setHoveredChapter(plan.chapterNumber)}
+                onMouseLeave={() => setHoveredChapter((current) => (current === plan.chapterNumber ? selectedChapter : current))}
+                onClick={() => openEditModal(plan)}
               >
                 <div className="flex items-start gap-2 px-3 py-2">
                   <div className="min-w-0 flex-1">
@@ -503,106 +561,18 @@ export function ChapterPlansSection({ bookId, onSelectChapter, selectedChapter: 
                     </div>
                     <p className="mt-1 text-xs font-medium text-foreground">{plan.chapterName || "（未命名）"}</p>
                   </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1">
-                    <button
-                      type="button"
-                      onClick={() => toggleExpand(plan.chapterNumber)}
-                      className="rounded-md border border-border/30 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary/40 hover:text-foreground"
-                    >
-                      {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => openEditModal(plan)}
-                      className="rounded-md border border-primary/20 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/10"
-                    >
-                      选中
-                    </button>
+                  <div className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
+                    <span className={`rounded-full px-1.5 py-0.5 transition-colors ${
+                      isSelected
+                        ? "bg-primary/20 text-primary"
+                        : isHovered
+                          ? "bg-primary/15 text-primary"
+                          : "bg-muted/40 group-hover:bg-primary/15 group-hover:text-primary"
+                    }`}>
+                      {isSelected ? "已选中" : "点击选中"}
+                    </span>
                   </div>
                 </div>
-
-                {/* Expanded floating panel */}
-                {isExpanded && (
-                  <div className="absolute top-full left-0 right-0 z-30 mt-1 mx-1 rounded-lg border border-border/30 bg-background shadow-xl animate-in fade-in slide-in-from-top-1 duration-200">
-                    <div className="p-3 space-y-2 max-h-[60vh] overflow-y-auto">
-                      {/* All fields displayed */}
-                      <div className="space-y-2">
-                        <div>
-                          <label className="text-[10px] text-muted-foreground font-medium">核心看点</label>
-                          <p className="text-xs text-foreground mt-0.5">{plan.highlight || "—"}</p>
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-muted-foreground font-medium">核心冲突</label>
-                          <p className="text-xs text-foreground mt-0.5">{plan.coreConflict || "—"}</p>
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-muted-foreground font-medium">剧情与冲突</label>
-                          <p className="text-xs text-foreground mt-0.5 whitespace-pre-wrap">{plan.plotAndConflict || "—"}</p>
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-muted-foreground font-medium">情感基调</label>
-                          <p className="text-xs text-foreground mt-0.5">{plan.emotionalTone || "—"}</p>
-                        </div>
-                        <div>
-                          <label className="text-[10px] text-muted-foreground font-medium">结尾钩子</label>
-                          <p className="text-xs text-foreground mt-0.5">{plan.endingHook || "—"}</p>
-                        </div>
-                        <div className="flex gap-4 pt-1">
-                          <div>
-                            <label className="text-[10px] text-muted-foreground font-medium">新增伏笔上限</label>
-                            <p className="text-xs text-foreground mt-0.5">{plan.maxNewHooks ?? 3}</p>
-                          </div>
-                          <div>
-                            <label className="text-[10px] text-muted-foreground font-medium">每章最多回收</label>
-                            <p className="text-xs text-foreground mt-0.5">{plan.maxRecoveryPerChapter ?? 3}</p>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Action buttons */}
-                      <div className="flex flex-wrap gap-1.5 pt-2 border-t border-border/10">
-                        <button
-                          type="button"
-                          onClick={() => handleApprove(plan.chapterNumber)}
-                          className="inline-flex items-center gap-1 rounded border border-emerald-500/30 px-2 py-1 text-[10px] text-emerald-500 hover:bg-emerald-500/10"
-                        >
-                          <Check size={10} />通过
-                        </button>
-                        {plan.lockedFields && plan.lockedFields.length > 0 ? (
-                          <button
-                            type="button"
-                            onClick={() => handleUnlockCoreFields(plan.chapterNumber)}
-                            className="inline-flex items-center gap-1 rounded border border-orange-500/30 px-2 py-1 text-[10px] text-orange-500 hover:bg-orange-500/10"
-                          >
-                            <Lock size={10} />取消锁定
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => handleLockCoreFields(plan.chapterNumber)}
-                            className="inline-flex items-center gap-1 rounded border border-violet-500/30 px-2 py-1 text-[10px] text-violet-400 hover:bg-violet-500/10"
-                          >
-                            <Lock size={10} />锁核心
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => openEditModal(plan)}
-                          className="inline-flex items-center gap-1 rounded border border-primary/30 px-2 py-1 text-[10px] text-primary hover:bg-primary/10"
-                        >
-                          <Sparkles size={10} />编辑优化
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setHistoryChapter(plan.chapterNumber)}
-                          className="inline-flex items-center gap-1 rounded border border-secondary/40 px-2 py-1 text-[10px] text-muted-foreground hover:bg-secondary/30 hover:text-foreground"
-                        >
-                          <History size={10} />版本
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             );
           })}
@@ -713,8 +683,8 @@ function GeneratePlanModal({
   const canGenerate = precheckResult && !precheckResult.hasConflict;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="max-h-[85vh] w-[500px] overflow-y-auto rounded-xl border border-border/40 bg-background shadow-xl">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 px-4">
+      <div className="max-h-[85vh] w-full max-w-[560px] overflow-y-auto rounded-xl border border-border/40 bg-background shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border/20 px-4 py-3">
           <h3 className="text-sm font-medium text-foreground">生成分章设计</h3>

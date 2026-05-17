@@ -1,12 +1,13 @@
-import { useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJson, useApi, postApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { useColors } from "../hooks/use-colors";
+import { useChatStore } from "../store/chat";
+import { useTextSelection } from "../hooks/use-text-selection";
+import { ChapterSelectionToolbar } from "../components/sidebar/ChapterSelectionToolbar";
+import { ChapterRevisionSection } from "../components/sidebar/ChapterRevisionSection";
 import {
   ChevronLeft,
-  Check,
-  X,
   List,
   RotateCcw,
   BookOpen,
@@ -20,6 +21,7 @@ import {
   Eye,
 } from "lucide-react";
 import { countChapterLengthByLanguage } from "../utils/chapter-length";
+import { resolveChapterReaderSelectionState } from "./chapter-reader-state";
 
 interface ChapterData {
   readonly chapterNumber: number;
@@ -33,33 +35,81 @@ interface Nav {
   toDashboard: () => void;
 }
 
-export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
+function splitBody(content: string): { title: string; paragraphs: string[] } {
+  const lines = content.split("\n");
+  const titleLine = lines.find((line) => line.startsWith("# "));
+  const title = titleLine?.replace(/^#\s*/, "") ?? "";
+  const body = titleLine ? lines.filter((line) => line !== titleLine).join("\n").trim() : content.trim();
+  const paragraphs = body.split(/\n\s*\n/u).map((item) => item.trim()).filter(Boolean);
+  return { title, paragraphs };
+}
+
+function getTextareaSelection(el: HTMLTextAreaElement | null): string {
+  if (!el) return "";
+  const start = Math.min(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+  const end = Math.max(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+  return el.value.slice(start, end);
+}
+
+function formatSelectionPreview(text: string): string {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
+}
+
+export function ChapterReader({ bookId, chapterNumber, nav, theme: _theme, t }: {
   bookId: string;
   chapterNumber: number;
   nav: Nav;
   theme: Theme;
   t: TFunction;
 }) {
-  const c = useColors(theme);
-  const { data, loading, error, refetch } = useApi<ChapterData>(
-    `/books/${bookId}/chapters/${chapterNumber}`,
-  );
+  const { data, loading, error, refetch } = useApi<ChapterData>(`/books/${bookId}/chapters/${chapterNumber}`);
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState("");
   const [saving, setSaving] = useState(false);
+  const [selectionModeActive, setSelectionModeActive] = useState(false);
+  const [editorSelectedText, setEditorSelectedText] = useState("");
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const sendMessage = useChatStore((s) => s.sendMessage);
+  const createDraftSession = useChatStore((s) => s.createDraftSession);
+  const viewerSelection = useTextSelection(viewerRef);
 
-  const handleStartEdit = () => {
+  const content = editing ? editContent : data?.content ?? "";
+  const { title, paragraphs } = useMemo(() => splitBody(content), [content]);
+  const selectionState = resolveChapterReaderSelectionState({
+    editing,
+    selectionModeActive,
+    editorSelectedText,
+    viewerSelectedText: viewerSelection.selectedText,
+    viewerIsSelecting: viewerSelection.isSelecting,
+  });
+  const { selectedText, hasSelection, effectiveSelectionMode, showFloatingToolbar } = selectionState;
+  const chapterWordCount = typeof data?.wordCount === "number" && Number.isFinite(data.wordCount)
+    ? data.wordCount
+    : countChapterLengthByLanguage(content);
+
+  const clearAllSelection = useCallback(() => {
+    setSelectionModeActive(false);
+    setEditorSelectedText("");
+    viewerSelection.clearSelection();
+  }, [viewerSelection]);
+
+  const handleStartEdit = useCallback(() => {
     if (!data) return;
     setEditContent(data.content);
     setEditing(true);
-  };
+    clearAllSelection();
+  }, [clearAllSelection, data]);
 
-  const handleCancelEdit = () => {
+  const handleCancelEdit = useCallback(() => {
     setEditing(false);
     setEditContent("");
-  };
+    clearAllSelection();
+  }, [clearAllSelection]);
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     setSaving(true);
     try {
       await fetchJson(`/books/${bookId}/chapters/${chapterNumber}`, {
@@ -74,192 +124,193 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
     } finally {
       setSaving(false);
     }
-  };
+  }, [bookId, chapterNumber, editContent, refetch]);
 
-  if (loading) return (
-    <div className="flex flex-col items-center justify-center py-32 space-y-4">
-      <div className="w-8 h-8 border-2 border-primary/20 border-t-primary rounded-full animate-spin" />
-      <span className="text-sm text-muted-foreground">{t("reader.openingManuscript")}</span>
-    </div>
-  );
-
-  if (error) return <div className="text-destructive p-8 bg-destructive/5 rounded-xl border border-destructive/20">Error: {error}</div>;
-  if (!data) return null;
-
-  const sourceContent = editing ? editContent : data.content;
-  // Split markdown content into title and body
-  const lines = sourceContent.split("\n");
-  const titleLine = lines.find((l) => l.startsWith("# "));
-  const title = titleLine?.replace(/^#\s*/, "") ?? `Chapter ${chapterNumber}`;
-  const body = lines
-    .filter((l) => l !== titleLine)
-    .join("\n")
-    .trim();
-  const chapterWordCount = typeof data.wordCount === "number" && Number.isFinite(data.wordCount)
-    ? data.wordCount
-    : countChapterLengthByLanguage(sourceContent);
-
-  const handleApprove = async () => {
+  const handleApprove = useCallback(async () => {
     try {
       await postApi(`/books/${bookId}/chapters/${chapterNumber}/approve`);
       nav.toBook(bookId);
     } catch (e) {
       alert(e instanceof Error ? e.message : "Approve failed");
     }
-  };
+  }, [bookId, chapterNumber, nav]);
 
-  const handleReject = async () => {
+  const handleReject = useCallback(async () => {
     try {
       await postApi(`/books/${bookId}/chapters/${chapterNumber}/reject`);
       nav.toBook(bookId);
     } catch (e) {
       alert(e instanceof Error ? e.message : "Reject failed");
     }
-  };
+  }, [bookId, chapterNumber, nav]);
 
-  const paragraphs = body.split(/\n\n+/).filter(Boolean);
+  const syncEditorSelection = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const start = Math.min(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+    const end = Math.max(el.selectionStart ?? 0, el.selectionEnd ?? 0);
+    setEditorSelectedText(el.value.slice(start, end));
+  }, []);
+
+  useEffect(() => {
+    if (!editing) {
+      setEditorSelectedText("");
+      return;
+    }
+    syncEditorSelection();
+    const el = editorRef.current;
+    if (!el) return;
+    const onSelectionChange = () => {
+      if (document.activeElement === el) syncEditorSelection();
+    };
+    el.addEventListener("select", syncEditorSelection);
+    el.addEventListener("mouseup", syncEditorSelection);
+    el.addEventListener("keyup", syncEditorSelection);
+    el.addEventListener("touchend", syncEditorSelection);
+    document.addEventListener("selectionchange", onSelectionChange);
+    return () => {
+      el.removeEventListener("select", syncEditorSelection);
+      el.removeEventListener("mouseup", syncEditorSelection);
+      el.removeEventListener("keyup", syncEditorSelection);
+      el.removeEventListener("touchend", syncEditorSelection);
+      document.removeEventListener("selectionchange", onSelectionChange);
+    };
+  }, [editing, syncEditorSelection]);
+
+  useEffect(() => {
+    if (!editing) return;
+    setEditorSelectedText((current) => current);
+  }, [editing]);
+
+  const onToggleSelectionMode = useCallback(() => {
+    if (editing) {
+      setSelectionModeActive((prev) => !prev);
+      setEditorSelectedText("");
+      return;
+    }
+    setSelectionModeActive((prev) => !prev);
+    viewerSelection.clearSelection();
+  }, [editing, viewerSelection]);
+
+  const onDismissSelectionMode = useCallback(() => {
+    clearAllSelection();
+  }, [clearAllSelection]);
+
+  if (loading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-32 space-y-4">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary/20 border-t-primary" />
+        <span className="text-sm text-muted-foreground">{t("reader.openingManuscript")}</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return <div className="rounded-xl border border-destructive/20 bg-destructive/5 p-8 text-destructive">Error: {error}</div>;
+  }
+
+  if (!data) return null;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-10 fade-in">
-      {/* Navigation & Actions */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+    <div className="relative mx-auto w-full max-w-none space-y-6 px-4 py-6 lg:px-8">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
         <nav className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
-          <button
-            onClick={nav.toDashboard}
-            className="hover:text-primary transition-colors flex items-center gap-1"
-          >
-            {t("bread.books")}
-          </button>
+          <button onClick={nav.toDashboard} className="flex items-center gap-1 transition-colors hover:text-primary">{t("bread.books")}</button>
           <span className="text-border">/</span>
-          <button
-            onClick={() => nav.toBook(bookId)}
-            className="hover:text-primary transition-colors truncate max-w-[120px]"
-          >
-            {bookId}
-          </button>
+          <button onClick={() => nav.toBook(bookId)} className="truncate transition-colors hover:text-primary">{bookId}</button>
           <span className="text-border">/</span>
-          <span className="text-foreground flex items-center gap-1">
-            <Hash size={12} />
-            {chapterNumber}
-          </span>
+          <span className="flex items-center gap-1 text-foreground"><Hash size={12} />{chapterNumber}</span>
         </nav>
 
-        <div className="flex gap-2">
-          <button
-            onClick={() => nav.toBook(bookId)}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary text-muted-foreground rounded-xl hover:text-foreground hover:bg-secondary/80 transition-all border border-border/50"
-          >
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => nav.toBook(bookId)} className="flex items-center gap-2 rounded-xl border border-border/50 bg-secondary px-4 py-2 text-xs font-bold text-muted-foreground transition-all hover:bg-secondary/80 hover:text-foreground">
             <List size={14} />
             {t("reader.backToList")}
           </button>
-
-          {/* Edit / Preview toggle */}
           {editing ? (
             <>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-primary text-primary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all shadow-sm disabled:opacity-50"
-              >
-                {saving ? <div className="w-3.5 h-3.5 border-2 border-primary-foreground/20 border-t-primary-foreground rounded-full animate-spin" /> : <Save size={14} />}
+              <button onClick={handleSave} disabled={saving} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-bold text-primary-foreground disabled:opacity-50">
+                <Save size={14} />
                 {saving ? t("book.saving") : t("book.save")}
               </button>
-              <button
-                onClick={handleCancelEdit}
-                className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary text-muted-foreground rounded-xl hover:text-foreground transition-all border border-border/50"
-              >
+              <button onClick={handleCancelEdit} className="flex items-center gap-2 rounded-xl border border-border/50 bg-secondary px-4 py-2 text-xs font-bold text-muted-foreground transition-all hover:text-foreground">
                 <Eye size={14} />
                 {t("reader.preview")}
               </button>
             </>
           ) : (
-            <button
-              onClick={handleStartEdit}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-secondary text-muted-foreground rounded-xl hover:text-primary hover:bg-primary/10 transition-all border border-border/50"
-            >
+            <button onClick={handleStartEdit} className="flex items-center gap-2 rounded-xl border border-border/50 bg-secondary px-4 py-2 text-xs font-bold text-muted-foreground transition-all hover:bg-primary/10 hover:text-primary">
               <Pencil size={14} />
               {t("reader.edit")}
             </button>
           )}
-
-          <button
-            onClick={handleApprove}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-emerald-500/10 text-emerald-600 rounded-xl hover:bg-emerald-500 hover:text-white transition-all border border-emerald-500/20 shadow-sm"
-          >
+          <button onClick={handleApprove} className="flex items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-xs font-bold text-emerald-600">
             <CheckCircle2 size={14} />
             {t("reader.approve")}
           </button>
-          <button
-            onClick={handleReject}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold bg-destructive/10 text-destructive rounded-xl hover:bg-destructive hover:text-white transition-all border border-destructive/20 shadow-sm"
-          >
+          <button onClick={handleReject} className="flex items-center gap-2 rounded-xl border border-destructive/20 bg-destructive/10 px-4 py-2 text-xs font-bold text-destructive">
             <XCircle size={14} />
             {t("reader.reject")}
           </button>
         </div>
       </div>
 
-      {/* Manuscript Sheet */}
-      <div className="paper-sheet rounded-2xl p-8 md:p-16 lg:p-24 shadow-2xl shadow-primary/5 min-h-[80vh] relative overflow-hidden">
-        {/* Physical Paper Details */}
-        <div className="absolute top-0 left-8 w-px h-full bg-primary/5 hidden md:block" />
-        <div className="absolute top-0 right-8 w-px h-full bg-primary/5 hidden md:block" />
-
-        <header className="mb-16 text-center">
-          <div className="flex items-center justify-center gap-2 text-muted-foreground/30 mb-8 select-none">
-            <div className="h-px w-12 bg-border/40" />
-            <BookOpen size={20} />
-            <div className="h-px w-12 bg-border/40" />
+      <div className="w-full">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border/20 pb-4">
+          <div>
+            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-muted-foreground/70">
+              <BookOpen size={14} />
+              章节正文
+            </div>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight">{title || `Chapter ${chapterNumber}`}</h1>
           </div>
-          <h1 className="text-4xl md:text-5xl font-serif font-medium italic text-foreground tracking-tight leading-tight">
-            {title}
-          </h1>
-          <div className="mt-8 flex items-center justify-center gap-4 text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground/60">
-            <span>{t("reader.manuscriptPage")}</span>
-            <span className="text-border">·</span>
-            <span>{chapterNumber.toString().padStart(2, '0')}</span>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1 rounded-full bg-secondary/70 px-3 py-1.5"><Type size={14} />{chapterWordCount.toLocaleString()}</span>
+            <span className="inline-flex items-center gap-1 rounded-full bg-secondary/70 px-3 py-1.5"><Clock size={14} />{Math.max(1, Math.ceil(chapterWordCount / 500))}</span>
           </div>
-        </header>
+        </div>
 
-        {editing ? (
-          <textarea
-            value={editContent}
-            onChange={(e) => setEditContent(e.target.value)}
-            className="w-full min-h-[60vh] bg-transparent font-serif text-lg leading-[1.8] text-foreground/90 focus:outline-none resize-none border border-border/30 rounded-lg p-6 focus:border-primary/40 focus:ring-2 focus:ring-primary/10 transition-all"
-            autoFocus
-          />
-        ) : (
-          <article className="prose prose-zinc dark:prose-invert max-w-none">
-            {paragraphs.map((para, i) => (
-              <p key={i} className="font-serif text-lg md:text-xl leading-[1.8] text-foreground/90 mb-8 first-letter:text-2xl first-letter:font-bold first-letter:text-primary/40">
-                {para}
-              </p>
-            ))}
-          </article>
-        )}
-
-        <footer className="mt-24 pt-12 border-t border-border/20 flex flex-col items-center gap-6 text-center">
-          <div className="flex items-center gap-4 text-xs font-medium text-muted-foreground">
-             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary/50">
-               <Type size={14} className="text-primary/60" />
-               <span>{chapterWordCount.toLocaleString()} {t("reader.characters")}</span>
-             </div>
-             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary/50">
-               <Clock size={14} className="text-primary/60" />
-               <span>{Math.ceil(chapterWordCount / 500)} {t("reader.minRead")}</span>
-             </div>
-          </div>
-          <p className="text-[10px] uppercase tracking-widest text-muted-foreground/40 font-bold">{t("reader.endOfChapter")}</p>
-        </footer>
+        <div ref={viewerRef} className="mt-5 min-w-0">
+          {editing ? (
+            <textarea
+              ref={editorRef}
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              onSelect={syncEditorSelection}
+              onMouseUp={syncEditorSelection}
+              onKeyUp={syncEditorSelection}
+              onBlur={syncEditorSelection}
+              className="min-h-[62vh] w-full resize-y border-0 bg-transparent px-0 py-0 text-[15px] leading-8 text-foreground outline-none"
+              autoFocus
+            />
+          ) : (
+            <article className="space-y-5">
+              {paragraphs.map((para, i) => (
+                <p key={i} className="max-w-none whitespace-pre-wrap text-[16px] leading-8 text-foreground/90">{para}</p>
+              ))}
+            </article>
+          )}
+        </div>
       </div>
 
-      {/* Footer Navigation */}
+      <div className="sticky bottom-4 z-30 rounded-2xl border border-border/30 bg-card/95 shadow-xl shadow-black/10 backdrop-blur-md">
+        <ChapterRevisionSection
+          bookId={bookId}
+          chapterNumber={chapterNumber}
+          selectedText={selectedText}
+          selectionModeActive={effectiveSelectionMode}
+          onToggleSelectionMode={onToggleSelectionMode}
+          onRevisionComplete={(newContent) => {
+            if (newContent !== null) {
+              setEditContent(newContent);
+            }
+          }}
+        />
+      </div>
+
       <div className="flex justify-between items-center py-8">
         {chapterNumber > 1 ? (
-          <button
-            onClick={() => nav.toBook(bookId)}
-            className="flex items-center gap-2 text-sm font-bold text-muted-foreground hover:text-primary transition-all group"
-          >
+          <button onClick={() => nav.toBook(bookId)} className="flex items-center gap-2 text-sm font-bold text-muted-foreground hover:text-primary transition-all group">
             <RotateCcw size={16} className="group-hover:-rotate-45 transition-transform" />
             {t("reader.chapterList")}
           </button>
@@ -267,6 +318,17 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme, t }: {
           <div />
         )}
       </div>
+
+      {showFloatingToolbar && (
+        <ChapterSelectionToolbar
+          bookId={bookId}
+          chapterNumber={chapterNumber}
+          selectedText={selectedText}
+          selectionRect={editing ? null : viewerSelection.selectionRect}
+          selectionModeActive={effectiveSelectionMode}
+          onDismiss={onDismissSelectionMode}
+        />
+      )}
     </div>
   );
 }

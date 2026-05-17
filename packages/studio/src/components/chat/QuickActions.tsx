@@ -9,6 +9,7 @@ export interface QuickActionsProps {
   readonly onAction: (command: string) => void;
   readonly disabled: boolean;
   readonly isZh: boolean;
+  readonly onWriteNext?: () => void;
 }
 
 interface ChipDef {
@@ -50,16 +51,23 @@ const CHIPS: ReadonlyArray<ChipDef> = [
   },
 ];
 
-export function QuickActions({ onAction, disabled, isZh }: QuickActionsProps) {
+export function QuickActions({ onAction, disabled, isZh, onWriteNext }: QuickActionsProps) {
   return (
     <div className="flex gap-2 overflow-x-auto px-1 py-1">
       {CHIPS.map((chip) => {
         const label = isZh ? chip.labelZh : chip.labelEn;
         const command = isZh ? chip.commandZh : chip.commandEn;
+        const isWriteNext = command === "写下一章" || command === "write next";
         return (
           <button
             key={label}
-            onClick={() => onAction(command)}
+            onClick={() => {
+              if (isWriteNext && onWriteNext) {
+                onWriteNext();
+                return;
+              }
+              onAction(command);
+            }}
             disabled={disabled}
             className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-secondary/50 border border-border/30 text-xs font-medium text-muted-foreground hover:text-primary hover:border-primary/30 hover:bg-primary/5 transition-all disabled:opacity-40 disabled:pointer-events-none group"
           >

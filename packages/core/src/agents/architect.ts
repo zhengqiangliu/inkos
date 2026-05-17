@@ -313,8 +313,29 @@ ${finalRequirementsPrompt}`;
       );
     }
 
-    // Initialize new truth files
+    // Initialize new truth files and keep legacy-compatible aliases.
     writes.push(
+      writeFile(
+        join(storyDir, "novel_outline.md"),
+        language === "en"
+          ? "# Novel Outline\n\n## Premise\n\n## Main Line\n\n## Turning Points\n\n## Chapter Beats\n"
+          : "# 小说大纲\n\n## 核心概念\n\n## 主线推进\n\n## 关键转折\n\n## 章节节拍\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "character_arc.md"),
+        language === "en"
+          ? "# Character Arc\n\n## Core Arc\n\n## Start State\n\n## Turning Point\n\n## End State\n"
+          : "# 人物弧光\n\n## 核心弧线\n\n## 起点状态\n\n## 转折点\n\n## 终点状态\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "relationship_map.md"),
+        language === "en"
+          ? "# Relationship Map\n\n## Core Relations\n\n## Conflict Drivers\n\n## Change Directions\n"
+          : "# 人物关系\n\n## 核心关系\n\n## 冲突驱动\n\n## 变化方向\n",
+        "utf-8",
+      ),
       writeFile(
         join(storyDir, "subplot_board.md"),
         language === "en"

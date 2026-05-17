@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
@@ -7,9 +7,11 @@ import { useChatStore } from "../store/chat";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ArtifactView } from "../components/chat/BookSidebar";
 import { BookDetailChatDock } from "../components/chat/BookDetailChatDock";
+import { dispatchWriteNextInstruction } from "../utils/write-next";
 import { ChaptersSection } from "../components/sidebar/ChaptersSection";
 import { ChapterPlansSection } from "../components/sidebar/ChapterPlansSection";
 import { ChapterPlanReader } from "../components/sidebar/ChapterPlanReader";
+import { ASSET_MENU_ITEMS, GUIDE_MENU_ITEMS, TRUTH_MENU_ITEMS, getArtifactLabel } from "../utils/book-artifacts";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -81,62 +83,6 @@ interface ChapterPlansResponse {
 
 type ReaderMode = "chapter" | "design" | "outline" | "truth";
 
-type MenuEntry = {
-  readonly file: string;
-  readonly label: string;
-  readonly source: string;
-  readonly mode: ReaderMode;
-};
-
-const FILE_LABELS: Record<string, string> = {
-  "story_bible.md": "世界观设定",
-  "volume_outline.md": "卷纲规划",
-  "book_rules.md": "叙事规则",
-  "current_state.md": "状态卡 / 世界状态",
-  "pending_hooks.md": "伏笔池 / 未闭合伏笔",
-  "subplot_board.md": "支线进度 / 支线进度板",
-  "emotional_arcs.md": "感情线 / 情感弧线",
-  "character_matrix.md": "角色矩阵 / 角色交互矩阵",
-  "particle_ledger.md": "资源账本",
-  "chapter_summaries.md": "各章摘要",
-  "story/author_intent.md": "长期作者意图",
-  "story/current_focus.md": "当前阶段关注点",
-};
-
-const ASSET_MENU_ITEMS: ReadonlyArray<MenuEntry> = [
-  { file: "story_bible.md", label: "世界观设定", source: "资产列表", mode: "truth" },
-  { file: "volume_outline.md", label: "卷纲规划", source: "资产列表", mode: "outline" },
-  { file: "book_rules.md", label: "叙事规则", source: "资产列表", mode: "truth" },
-  { file: "current_state.md", label: "状态卡", source: "资产列表", mode: "truth" },
-  { file: "pending_hooks.md", label: "伏笔池", source: "资产列表", mode: "truth" },
-  { file: "subplot_board.md", label: "支线进度", source: "资产列表", mode: "truth" },
-  { file: "emotional_arcs.md", label: "感情线", source: "资产列表", mode: "truth" },
-  { file: "character_matrix.md", label: "角色矩阵", source: "资产列表", mode: "truth" },
-];
-
-const GUIDE_MENU_ITEMS: ReadonlyArray<MenuEntry> = [
-  { file: "story_bible.md", label: "简介 / 故事背景", source: "向导资料", mode: "truth" },
-  { file: "story_bible.md", label: "世界观", source: "向导资料", mode: "truth" },
-  { file: "volume_outline.md", label: "大纲", source: "向导资料", mode: "outline" },
-  { file: "volume_outline.md", label: "卷纲规划", source: "向导资料", mode: "outline" },
-  { file: "character_matrix.md", label: "主角 / 配角", source: "向导资料", mode: "truth" },
-  { file: "emotional_arcs.md", label: "人物弧光", source: "向导资料", mode: "truth" },
-  { file: "character_matrix.md", label: "人物关系", source: "向导资料", mode: "truth" },
-  { file: "story/author_intent.md", label: "最终确认", source: "向导资料", mode: "truth" },
-];
-
-const TRUTH_MENU_ITEMS: ReadonlyArray<MenuEntry> = [
-  { file: "current_state.md", label: "世界状态", source: "小说真相", mode: "truth" },
-  { file: "particle_ledger.md", label: "资源账本", source: "小说真相", mode: "truth" },
-  { file: "pending_hooks.md", label: "未闭合伏笔", source: "小说真相", mode: "truth" },
-  { file: "chapter_summaries.md", label: "各章摘要", source: "小说真相", mode: "truth" },
-  { file: "subplot_board.md", label: "支线进度板", source: "小说真相", mode: "truth" },
-  { file: "emotional_arcs.md", label: "情感弧线", source: "小说真相", mode: "truth" },
-  { file: "character_matrix.md", label: "角色交互矩阵", source: "小说真相", mode: "truth" },
-  { file: "story/author_intent.md", label: "长期作者意图", source: "小说真相", mode: "truth" },
-  { file: "story/current_focus.md", label: "当前阶段关注点", source: "小说真相", mode: "truth" },
-];
-
 interface ChapterMeta {
   readonly number: number;
   readonly title: string;
@@ -152,6 +98,44 @@ interface BookDetailProps {
   readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
 }
 
+const DETAIL_LEFT_WIDTH_KEY = "studio.book-detail.left-width";
+const DETAIL_RIGHT_WIDTH_KEY = "studio.book-detail.right-width";
+const DETAIL_LEFT_MIN = 280;
+const DETAIL_LEFT_MAX = 640;
+const DETAIL_RIGHT_MIN = 360;
+const DETAIL_RIGHT_MAX = 1020;
+const DETAIL_LEFT_DEFAULT = 360;
+const DETAIL_RIGHT_DEFAULT = 750;
+const DETAIL_MIDDLE_MIN = 320;
+const DETAIL_HANDLE_WIDTH = 8;
+
+function readStoredWidth(key: string, fallback: number): number {
+  if (typeof window === "undefined") return fallback;
+  const raw = Number(window.localStorage.getItem(key));
+  if (!Number.isFinite(raw)) return fallback;
+  return Math.round(raw);
+}
+
+function clampWidth(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function normalizeDetailWidths(left: number, right: number, viewportWidth: number): { left: number; right: number } {
+  let nextLeft = clampWidth(left, DETAIL_LEFT_MIN, DETAIL_LEFT_MAX);
+  let nextRight = clampWidth(right, DETAIL_RIGHT_MIN, DETAIL_RIGHT_MAX);
+  const maxSides = Math.max(DETAIL_LEFT_MIN + DETAIL_RIGHT_MIN, viewportWidth - DETAIL_MIDDLE_MIN - DETAIL_HANDLE_WIDTH * 2);
+  const total = nextLeft + nextRight;
+  if (total > maxSides) {
+    const overflow = total - maxSides;
+    const rightRoom = nextRight - DETAIL_RIGHT_MIN;
+    const shrinkRight = Math.min(overflow, rightRoom);
+    nextRight -= shrinkRight;
+    const remaining = overflow - shrinkRight;
+    if (remaining > 0) nextLeft = Math.max(DETAIL_LEFT_MIN, nextLeft - remaining);
+  }
+  return { left: nextLeft, right: nextRight };
+}
+
 export function shouldAutoOpenFirstChapter(
   chapters: ReadonlyArray<Pick<ChapterMeta, "number" | "title" | "status" | "wordCount">>,
   activeChapter: number | null,
@@ -159,11 +143,11 @@ export function shouldAutoOpenFirstChapter(
   return activeChapter === null && chapters.length > 0;
 }
 
-function renderMenuEntry(item: MenuEntry) {
+function renderMenuEntry(item: { title: string; subtitle: string; source: string }) {
   return (
     <div className="flex min-w-0 flex-col items-start">
-      <span className="truncate text-left">{item.label}</span>
-      <span className="text-[10px] text-muted-foreground">{item.file} / {item.source}</span>
+      <span className="truncate text-left">{item.title}</span>
+      <span className="text-[10px] text-muted-foreground">{item.subtitle} / {item.source}</span>
     </div>
   );
 }
@@ -189,6 +173,26 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
   const artifactChapter = useChatStore((s) => s.artifactChapter);
   const artifactFile = useChatStore((s) => s.artifactFile);
   const openArtifact = useChatStore((s) => s.openArtifact);
+  const truthFilesToShow = truthData?.files ?? [];
+  const [leftWidth, setLeftWidth] = useState(() => clampWidth(readStoredWidth(DETAIL_LEFT_WIDTH_KEY, DETAIL_LEFT_DEFAULT), DETAIL_LEFT_MIN, DETAIL_LEFT_MAX));
+  const [rightWidth, setRightWidth] = useState(() => clampWidth(readStoredWidth(DETAIL_RIGHT_WIDTH_KEY, DETAIL_RIGHT_DEFAULT), DETAIL_RIGHT_MIN, DETAIL_RIGHT_MAX));
+  const [draggingSide, setDraggingSide] = useState<"left" | "right" | null>(null);
+  const dragStateRef = useRef<{
+    type: "left" | "right";
+    startX: number;
+    startLeft: number;
+    startRight: number;
+  } | null>(null);
+  const leftWidthRef = useRef(leftWidth);
+  const rightWidthRef = useRef(rightWidth);
+
+  useEffect(() => {
+    leftWidthRef.current = leftWidth;
+  }, [leftWidth]);
+
+  useEffect(() => {
+    rightWidthRef.current = rightWidth;
+  }, [rightWidth]);
 
   useEffect(() => {
     if (readerMode !== "chapter") return;
@@ -207,8 +211,6 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     });
   }, [artifactChapter, data, openChapterArtifact, readerMode]);
 
-  const truthFiles = truthData?.files ?? [];
-  const truthFilesToShow = truthFiles.length > 0 ? truthFiles : [];
   const chapterPlans = chapterPlansData?.plans ?? [];
   const selectedPlan = useMemo(() => {
     if (chapterPlans.length === 0) return null;
@@ -230,6 +232,84 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     if (!firstPlan) return;
     setSelectedPlanChapter(firstPlan.chapterNumber);
   }, [chapterPlans, readerMode, selectedPlanChapter]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(DETAIL_LEFT_WIDTH_KEY, String(leftWidth));
+  }, [leftWidth]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(DETAIL_RIGHT_WIDTH_KEY, String(rightWidth));
+  }, [rightWidth]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const clampToViewport = () => {
+      const viewportWidth = window.innerWidth || 0;
+      const next = normalizeDetailWidths(leftWidth, rightWidth, viewportWidth);
+      if (next.left !== leftWidth) setLeftWidth(next.left);
+      if (next.right !== rightWidth) setRightWidth(next.right);
+    };
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, [leftWidth, rightWidth]);
+
+  useEffect(() => {
+    if (!draggingSide) return;
+
+    const onMove = (event: PointerEvent) => {
+      const drag = dragStateRef.current;
+      if (!drag) return;
+      const delta = event.clientX - drag.startX;
+      if (drag.type === "left") {
+        const next = normalizeDetailWidths(drag.startLeft + delta, rightWidthRef.current, window.innerWidth || 0);
+        setLeftWidth(next.left);
+        return;
+      }
+      const next = normalizeDetailWidths(leftWidthRef.current, drag.startRight - delta, window.innerWidth || 0);
+      setRightWidth(next.right);
+    };
+
+    const endDrag = () => {
+      dragStateRef.current = null;
+      setDraggingSide(null);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+      window.removeEventListener("blur", endDrag);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+    window.addEventListener("blur", endDrag);
+
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+      window.removeEventListener("blur", endDrag);
+    };
+  }, [draggingSide]);
+
+  const startDrag = useCallback((type: "left" | "right", event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStateRef.current = {
+      type,
+      startX: event.clientX,
+      startLeft: leftWidth,
+      startRight: rightWidth,
+    };
+    setDraggingSide(type);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+  }, [leftWidth, rightWidth]);
+
 
   const openReaderFile = useCallback((file: string, mode: ReaderMode) => {
     setReaderMode(mode);
@@ -293,7 +373,10 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
 
   return (
     <div className="flex h-full min-w-0 flex-1 overflow-hidden bg-background/30">
-      <aside className="w-[420px] shrink-0 border-r border-border/30 bg-card/40 backdrop-blur-md flex flex-col min-h-0 overflow-hidden">
+      <aside
+        className="shrink-0 border-r border-border/30 bg-card/40 backdrop-blur-md flex flex-col min-h-0 overflow-hidden"
+        style={{ width: `${leftWidth}px` }}
+      >
         <div className="shrink-0 border-b border-border/20 px-4 py-3">
           <button onClick={nav.toDashboard} className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"><ChevronLeft size={14} />{t("bread.books")}</button>
           <div className="mt-3">
@@ -314,6 +397,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
               bookId={bookId}
               onSelectChapter={setSelectedPlanChapter}
               selectedChapter={selectedPlanChapter ?? chapterPlans[0]?.chapterNumber ?? null}
+              chapterNumbers={chapters.map((chapter) => chapter.number)}
             />
           ) : (
             <ChaptersSection
@@ -326,6 +410,16 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
           )}
         </div>
       </aside>
+
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        onPointerDown={(e) => startDrag("left", e)}
+        className={["group relative z-10 w-2 shrink-0 cursor-col-resize select-none bg-transparent touch-none", draggingSide === "left" ? "bg-primary/20" : "hover:bg-primary/10"].join(" ")}
+        title="拖拽调整左侧宽度"
+      >
+        <div className={["absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors", draggingSide === "left" ? "bg-primary/60" : "bg-border/30 group-hover:bg-primary/40"].join(" ")} />
+      </div>
 
       <main className="min-w-0 flex-1 overflow-hidden flex flex-col min-h-0">
         <div className="shrink-0 border-b border-border/30 px-4 py-3 flex items-center justify-between gap-3 overflow-x-auto">
@@ -354,8 +448,8 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
                   {["story/author_intent.md", "story/current_focus.md"].map((file) => (
                     <DropdownMenuItem key={file} onClick={() => openReaderFile(file, "truth")}>
                       <div className="flex min-w-0 flex-col">
-                        <span className="truncate">{FILE_LABELS[file] ?? file}</span>
-                        <span className="text-[10px] text-muted-foreground">{file} / 向导资料</span>
+                        <span className="truncate">{getArtifactLabel(file).title}</span>
+                        <span className="text-[10px] text-muted-foreground">{getArtifactLabel(file).subtitle} / 向导资料</span>
                       </div>
                     </DropdownMenuItem>
                   ))}
@@ -370,14 +464,13 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
               <DropdownMenuContent align="start" className="w-80">
                 <div className="px-1.5 py-1 text-xs font-medium text-muted-foreground">真相文件</div>
                 <DropdownMenuGroup>
-                  {(truthFilesToShow.length > 0 ? truthFilesToShow : TRUTH_MENU_ITEMS.map((item) => ({ name: item.file }))).map((file) => {
-                    const name = file.name;
-                    const label = FILE_LABELS[name] ?? name;
+                  {TRUTH_MENU_ITEMS.map((item) => {
+                    const label = getArtifactLabel(item.file);
                     return (
-                      <DropdownMenuItem key={name} onClick={() => openReaderFile(name, "truth")}>
+                      <DropdownMenuItem key={item.file} onClick={() => openReaderFile(item.file, "truth")}>
                         <div className="flex min-w-0 flex-col">
-                          <span className="truncate">{label}</span>
-                          <span className="text-[10px] text-muted-foreground">{name}</span>
+                          <span className="truncate">{label.title}</span>
+                          <span className="text-[10px] text-muted-foreground">{label.subtitle}</span>
                         </div>
                       </DropdownMenuItem>
                     );
@@ -394,7 +487,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
                 <div className="px-1.5 py-1 text-xs font-medium text-muted-foreground">8 步向导</div>
                 <DropdownMenuGroup>
                   {GUIDE_MENU_ITEMS.map((item) => (
-                    <DropdownMenuItem key={`${item.file}:${item.label}`} onClick={() => openReaderFile(item.file, item.mode)}>
+                    <DropdownMenuItem key={`${item.file}:${item.title}`} onClick={() => openReaderFile(item.file, item.mode)}>
                       {renderMenuEntry(item)}
                     </DropdownMenuItem>
                   ))}
@@ -410,22 +503,40 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
               <BookOpen size={12} />{readerMode === "design" ? "正文" : "分章设计"}
             </button>
           </div>
-          <button onClick={() => setConfirmDeleteOpen(true)} disabled={deleting} className="inline-flex shrink-0 items-center gap-1 rounded-md border border-destructive/20 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"><Trash2 size={12} />删除</button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { void dispatchWriteNextInstruction(bookId); }}
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 hover:text-primary"
+              title={t("book.writeNext")}
+            >
+              <Zap size={12} />{t("book.writeNext")}
+            </button>
+            <button onClick={() => setConfirmDeleteOpen(true)} disabled={deleting} className="inline-flex shrink-0 items-center gap-1 rounded-md border border-destructive/20 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"><Trash2 size={12} />删除</button>
+          </div>
         </div>
 
-        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-          <div className="grid h-full min-h-0 min-w-0 grid-cols-[minmax(0,1fr)_580px]">
-            <section className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-4">
-              <div className="mx-auto w-full max-w-none">
-                {designSelected ? (
-                  <ChapterPlanReader plan={selectedPlan} />
-                ) : (
-                  <ArtifactView bookId={bookId} t={t} />
-                )}
-              </div>
-            </section>
-            <BookDetailChatDock bookId={bookId} nav={nav} theme={theme} t={t} sse={sse} />
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden flex">
+          <section className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-4">
+            <div className="mx-auto w-full max-w-none">
+              {designSelected ? (
+                <ChapterPlanReader plan={selectedPlan} />
+              ) : (
+                <ArtifactView bookId={bookId} t={t} />
+              )}
+            </div>
+          </section>
+
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            onPointerDown={(e) => startDrag("right", e)}
+            className={["group relative z-10 w-2 shrink-0 cursor-col-resize select-none bg-transparent touch-none", draggingSide === "right" ? "bg-primary/20" : "hover:bg-primary/10"].join(" ")}
+            title="拖拽调整右侧宽度"
+          >
+            <div className={["absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors", draggingSide === "right" ? "bg-primary/60" : "bg-border/30 group-hover:bg-primary/40"].join(" ")} />
           </div>
+
+          <BookDetailChatDock bookId={bookId} nav={nav} theme={theme} t={t} sse={sse} width={rightWidth} />
         </div>
       </main>
 
@@ -442,3 +553,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     </div>
   );
 }
+
+
+
+

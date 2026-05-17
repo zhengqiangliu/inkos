@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../../hooks/use-theme";
 import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
@@ -13,18 +13,22 @@ import { Message, MessageContent } from "../ai-elements/message";
 import { resolveModelSelection } from "../../pages/chat-page-state";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { pickLatestAssistantToolExecutions } from "../../pages/chat-execution-panel";
+import { dispatchWriteNextInstruction, readBookDetailSessionId } from "../../utils/write-next";
 
 interface Nav {
   toServices: () => void;
 }
 
-export function BookDetailChatDock({ bookId, nav, theme, t, sse: _sse }: {
+interface BookDetailChatDockProps {
   readonly bookId: string;
   readonly nav: Nav;
   readonly theme: Theme;
   readonly t: TFunction;
   readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
-}) {
+  readonly width?: number;
+}
+
+export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookDetailChatDockProps) {
   const activeSession = useChatStore(chatSelectors.activeSession);
   const messages = useChatStore(chatSelectors.activeMessages);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -86,8 +90,16 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse: _sse }: {
       await loadSessionList(bookId);
       if (cancelled) return;
       const state = useChatStore.getState();
+      const preferredSessionId = readBookDetailSessionId(bookId);
+      const preferredSession = preferredSessionId ? state.sessions[preferredSessionId] : null;
+      if (preferredSessionId && preferredSession?.bookId === bookId) {
+        activateSession(preferredSessionId);
+        await loadSessionDetail(preferredSessionId);
+        return;
+      }
       const currentSession = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
       if (currentSession?.bookId === bookId) {
+        activateSession(currentSession.sessionId);
         await loadSessionDetail(currentSession.sessionId);
         return;
       }
@@ -97,7 +109,9 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse: _sse }: {
         await loadSessionDetail(ids[0]);
         return;
       }
-      await createSession(bookId);
+      const created = await createSession(bookId);
+      activateSession(created);
+      await loadSessionDetail(created);
     })();
     return () => { cancelled = true; };
   }, [activateSession, bookId, createSession, loadSessionDetail, loadSessionList]);
@@ -116,6 +130,10 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse: _sse }: {
   const onSend = () => {
     if (loading || stopping || !activeSessionId) return;
     if (!input.trim()) return;
+    if (/^(鍐欎笅涓€绔爘write next(?: chapter)?|next chapter)$/i.test(input.trim())) {
+      void dispatchWriteNextInstruction(bookId, undefined, activeSessionId);
+      return;
+    }
     void sendMessage(activeSessionId, input, bookId);
   };
 
@@ -130,46 +148,51 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse: _sse }: {
   const executionList = pickLatestAssistantToolExecutions(messages);
 
   return (
-    <aside className="shrink-0 w-[480px] border-l border-border/30 bg-card/80 backdrop-blur-md flex flex-col min-w-0 min-h-0 overflow-hidden">
+    <aside
+      className="shrink-0 border-l border-border/30 bg-card/80 backdrop-blur-md flex flex-col min-w-0 min-h-0 overflow-hidden"
+      style={{ width: `${width}px` }}
+    >
       <div className="shrink-0 border-b border-border/20 px-3 py-3 space-y-3">
-        <div>
-          <div className="text-sm font-semibold">AI 工作台</div>
-          <div className="mt-0.5 text-[11px] text-muted-foreground">对话 / 思考 / 正文</div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">AI 工作台</div>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">对话 / 思考 / 正文</div>
+          </div>
+
+          <div className="shrink-0">
+            {modelPickerStatus === "ready" ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-md border border-border/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+                  <span className="max-w-[180px] truncate">{selectedModel ?? "选择模型"}</span>
+                  <ChevronDown size={14} />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="bottom" align="end" className="w-64 max-h-80 flex flex-col">
+                  {groupedModels.map((group) => (
+                    <div key={group.service}>
+                      <div className="px-2 py-1 text-[10px] text-muted-foreground uppercase tracking-wider">{group.label}</div>
+                      {group.models.map((m) => {
+                        const active = selectedModel === m.id && selectedService === group.service;
+                        return (
+                          <DropdownMenuItem key={`${group.service}:${m.id}`} onClick={() => setSelectedModel(m.id, group.service)}>
+                            <div className="flex flex-1 items-center justify-between">
+                              <span>{m.name ?? m.id}</span>
+                              {active && <Check size={14} className="text-primary" />}
+                            </div>
+                          </DropdownMenuItem>
+                        );
+                      })}
+                    </div>
+                  ))}
+                  <DropdownMenuItem onClick={nav.toServices} className="text-primary">管理模型</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <button onClick={nav.toServices} className="text-xs text-muted-foreground hover:text-primary">配置模型</button>
+            )}
+          </div>
         </div>
 
         <ExecutionPanel executions={executionList} collapsed={executionCollapsed} onCollapsedChange={setExecutionCollapsed} />
-
-        <div className="flex items-center gap-2">
-          {modelPickerStatus === "ready" ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-md border border-border/50 px-2 py-1 text-xs">
-                <span className="max-w-[180px] truncate">{selectedModel ?? "选择模型"}</span>
-                <ChevronDown size={14} />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" className="w-64 max-h-80 flex flex-col">
-                {groupedModels.map((group) => (
-                  <div key={group.service}>
-                    <div className="px-2 py-1 text-[10px] text-muted-foreground uppercase tracking-wider">{group.label}</div>
-                    {group.models.map((m) => {
-                      const active = selectedModel === m.id && selectedService === group.service;
-                      return (
-                        <DropdownMenuItem key={`${group.service}:${m.id}`} onClick={() => setSelectedModel(m.id, group.service)}>
-                          <div className="flex flex-1 items-center justify-between">
-                            <span>{m.name ?? m.id}</span>
-                            {active && <Check size={14} className="text-primary" />}
-                          </div>
-                        </DropdownMenuItem>
-                      );
-                    })}
-                  </div>
-                ))}
-                <DropdownMenuItem onClick={nav.toServices} className="text-primary">管理模型</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <button onClick={nav.toServices} className="text-xs text-muted-foreground hover:text-primary">配置模型</button>
-          )}
-        </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 min-h-0">
@@ -199,7 +222,7 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse: _sse }: {
             {loading && !messages.some((item) => item.role === "assistant" && (item.thinkingStreaming || item.content.length > 0)) && (
               <Message from="assistant">
                 <MessageContent>
-                  <Shimmer className="text-sm" duration={1.5}>{isZh ? "思考中..." : "Thinking..."}</Shimmer>
+                  <Shimmer className="text-sm" duration={1.5}>{isZh ? "鎬濊€冧腑..." : "Thinking..."}</Shimmer>
                 </MessageContent>
               </Message>
             )}
@@ -246,3 +269,5 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse: _sse }: {
     </aside>
   );
 }
+
+

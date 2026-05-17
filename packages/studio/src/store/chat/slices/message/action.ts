@@ -1,4 +1,4 @@
-import type { StateCreator } from "zustand";
+﻿import type { StateCreator } from "zustand";
 import type {
   AgentResponse,
   ChatStore,
@@ -112,8 +112,8 @@ function isTimeoutLikeError(error: unknown): boolean {
     || message.includes("timed out")
     || message.includes("请求超时")
     || message.includes("超时")
-    || message.includes("璇锋眰瓒呮椂")
-    || message.includes("鍚庡彴鍙兘浠嶅湪鎵ц");
+    || message.includes("后端可能仍在执行")
+    || message.includes("后台可能仍在执行");
 }
 
 async function pollAgentRunningStatus(args: {
@@ -225,7 +225,7 @@ function mapExplicitWriteFailure(error: unknown): string | null {
   if (code === "AGENT_WRITE_NOT_PERSISTED") {
     const missingChapterNumbers = normalizeMissingChapterNumbers(apiError.details);
     if (missingChapterNumbers.length > 0) {
-      return withErrorGuidance(`写作失败：章节正文未落盘（第${missingChapterNumbers.join("、")}章）。`);
+      return withErrorGuidance(`写作失败：章节正文未落库（第 ${missingChapterNumbers.join("、")} 章）。`);
     }
     const { beforeCount, afterCount } = normalizeIntegrityCounts(apiError.details);
     if (
@@ -235,18 +235,18 @@ function mapExplicitWriteFailure(error: unknown): string | null {
     ) {
       return withErrorGuidance("写作失败：未检测到新章节索引写入。");
     }
-    return withErrorGuidance("写作失败：章节未完成落盘或索引更新。");
+    return withErrorGuidance("写作失败：章节未完成落库或索引未更新。");
   }
   if (code === "AGENT_WRITE_DEGRADED") {
     const degraded = normalizeDegradedWrite(apiError.details);
     const chapterText = degraded.degradedChapterNumbers.length > 0
-      ? `第${degraded.degradedChapterNumbers.join("、")}章`
+      ? `第 ${degraded.degradedChapterNumbers.join("、")} 章`
       : "目标章节";
     const recoveryText = degraded.attempted
-      ? `已尝试自动修复${degraded.attemptedChapterNumber ? `(第${degraded.attemptedChapterNumber}章)` : ""}，但仍未恢复。`
+      ? `已尝试自动修复${degraded.attemptedChapterNumber ? `（第 ${degraded.attemptedChapterNumber} 章）` : ""}，但仍未恢复。`
       : "未执行自动修复。";
     return withErrorGuidance(
-      `写作降级：正文已落盘，但${chapterText}状态降级。${recoveryText}${degraded.suggestion ? ` ${degraded.suggestion}` : ""}`,
+      `写作降级：正文已落库，但 ${chapterText} 状态降级。${recoveryText}${degraded.suggestion ? ` ${degraded.suggestion}` : ""}`,
     );
   }
   return null;
@@ -472,10 +472,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   createDraftSession: (bookId) => {
-    // 鍓嶇鐢熸垚 sessionId锛堜笌鍚庣 createBookSession 鍚屾牸寮忥級锛屾殏涓嶆寔涔呭寲鍒扮鐩橈紝
-    // 涔熸殏涓嶅啓鍏?sessionIdsByBook鈥斺€斾晶杈规爮鐪嬩笉鍒拌繖鏉?draft銆?
-    // 鍙戦€佺涓€鏉℃秷鎭椂 sendMessage 浼氳皟 POST /sessions { sessionId, bookId } 钀界洏
-    // 骞舵妸 id 杩藉姞杩?sessionIdsByBook锛岄偅涓€鍒讳晶杈规爮鎵嶅嚭鐜拌浼氳瘽锛堝甫鐫€ title锛夈€?
+    // 閸撳秶顏悽鐔稿灇 sessionId閿涘牅绗岄崥搴ｎ伂 createBookSession 閸氬本鐗稿蹇ョ礆閿涘本娈忔稉宥嗗瘮娑斿懎瀵查崚鎵梿閻╂﹫绱?
+    // 娑旂喐娈忔稉宥呭晸閸?sessionIdsByBook閳ユ柡鈧柧鏅舵潏瑙勭埉閻绗夐崚鎷岀箹閺?draft閵?
+    // 閸欐垿鈧胶顑囨稉鈧弶鈩冪Х閹垱妞?sendMessage 娴兼俺鐨?POST /sessions { sessionId, bookId } 閽€鐣屾磸
+    // 楠炶埖濡?id 鏉╄棄濮炴潻?sessionIdsByBook閿涘矂鍋呮稉鈧崚璁虫櫠鏉堣鐖幍宥呭毉閻滄媽顕氭导姘崇樈閿涘牆鐢惈鈧?title閿涘鈧?
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     set((state) => {
       const runtime = createSessionRuntime({
@@ -517,7 +517,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   deleteSession: async (sessionId) => {
     const session = get().sessions[sessionId];
     session?.stream?.close();
-    // 鑽夌浼氳瘽杩樻病鍐欏埌纾佺洏锛岃烦杩?DELETE 璇锋眰閬垮厤鍚庣杩斿洖 404
+    // 閼藉顭堟导姘崇樈鏉╂ɑ鐥呴崘娆忓煂绾句胶娲忛敍宀冪儲鏉?DELETE 鐠囬攱鐪伴柆鍨帳閸氬海顏潻鏂挎礀 404
     if (session && !session.isDraft) {
       try {
         await fetchJson(`/sessions/${sessionId}`, { method: "DELETE" });
@@ -550,8 +550,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   loadSessionDetail: async (sessionId) => {
-    // 鑽夌浼氳瘽锛氱鐩樹笂杩樻病鏈夋枃浠讹紝鐩存帴璺宠繃杩滅鎷夊彇銆?
-    // 鏈湴宸叉湁娑堟伅锛氫笉鎷夊彇杩滅锛岄伩鍏嶆祦寮忎腑鎴栨湭鎸佷箙鍖栫殑娑堟伅琚鐩栥€?
+    // 閼藉顭堟导姘崇樈閿涙氨顥嗛惄妯圭瑐鏉╂ɑ鐥呴張澶嬫瀮娴犺绱濋惄瀛樺复鐠哄疇绻冩潻婊咁伂閹峰褰囬妴?
+    // 閺堫剙婀村鍙夋箒濞戝牊浼呴敍姘瑝閹峰褰囨潻婊咁伂閿涘矂浼╅崗宥嗙ウ瀵繋鑵戦幋鏍ㄦ弓閹镐椒绠欓崠鏍畱濞戝牊浼呯悮顐ヮ洬閻╂牓鈧?
     const existing = get().sessions[sessionId];
     if (existing?.isDraft) return;
     if (existing && existing.messages.length > 0) return;
@@ -565,7 +565,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
 
       set((state) => {
         const runtime = state.sessions[detailSessionId];
-        // set 鎵ц鍒拌繖閲屽彲鑳藉凡鏈夋湰鍦版秷鎭啓鍏ワ紙姣斿骞跺彂 sendMessage锛夛紝鍐嶆煡涓€娆°€?
+        // set 閹笛嗩攽閸掓媽绻栭柌灞藉讲閼宠棄鍑￠張澶嬫拱閸︾増绉烽幁顖氬晸閸忋儻绱欏В鏂款洤楠炶泛褰?sendMessage閿涘绱濋崘宥嗙叀娑撯偓濞喡扳偓?
         if (runtime && runtime.messages.length > 0) return {};
         const nextBookId = detail.bookId ?? runtime?.bookId ?? null;
         return {
@@ -647,9 +647,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       return null;
     }
 
-    // 鑽夌浼氳瘽锛氱涓€鏉℃秷鎭彂閫佹椂鎵嶇湡姝ｆ妸 session 鏂囦欢鍐欏埌纾佺洏銆?
-    // 鍚庣 POST /sessions 鏀寔鎺ュ彈瀹㈡埛绔紶鍏ョ殑 sessionId锛屾墍浠?id 淇濇寔涓€鑷达紝
-    // 鍓嶇 store 閲岀殑 runtime 涓嶇敤 remount锛屽彧闇€瑕佹妸 isDraft 缈绘垚 false銆?
+    // 閼藉顭堟导姘崇樈閿涙氨顑囨稉鈧弶鈩冪Х閹垰褰傞柅浣规閹靛秶婀″锝嗗Ω session 閺傚洣娆㈤崘娆忓煂绾句胶娲忛妴?
+    // 閸氬海顏?POST /sessions 閺€顖涘瘮閹恒儱褰堢€广垺鍩涚粩顖欑炊閸忋儳娈?sessionId閿涘本澧嶆禒?id 娣囨繃瀵旀稉鈧懛杈剧礉
+    // 閸撳秶顏?store 闁插瞼娈?runtime 娑撳秶鏁?remount閿涘苯褰ч棁鈧憰浣瑰Ω isDraft 缂堢粯鍨?false閵?
     if (session.isDraft) {
       try {
         await fetchJson<SessionResponse>("/sessions", {
@@ -657,8 +657,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, bookId: session.bookId }),
         });
-        // 钀界洏鎴愬姛锛氭妸 isDraft 缈绘垚 false锛屽悓鏃舵妸 sessionId 杩藉姞杩?sessionIdsByBook
-        // 璁╀晶杈规爮鐜板湪鎵嶇湅鍒拌繖鏉′細璇濄€?
+        // 閽€鐣屾磸閹存劕濮涢敍姘Ω isDraft 缂堢粯鍨?false閿涘苯鎮撻弮鑸靛Ω sessionId 鏉╄棄濮炴潻?sessionIdsByBook
+        // 鐠佲晙鏅舵潏瑙勭埉閻滄澘婀幍宥囨箙閸掓媽绻栭弶鈥茬窗鐠囨縿鈧?
         set((state) => ({
           sessions: updateSession(state.sessions, sessionId, () => ({ isDraft: false })),
           sessionIdsByBook: {
@@ -736,7 +736,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         effects?: { writeNext?: { persisted?: boolean } };
       } | undefined)?.effects?.writeNext?.persisted === true;
       if (expectsPersistedWrite && !persistedWrite) {
-        const writeError = withErrorGuidance("写作失败：未确认章节落盘（缺少 persisted 信号）。");
+        const writeError = withErrorGuidance("写作失败：未确认章节落库（缺少 persisted 信号）。");
         const hasStream = Boolean(
           get().sessions[sessionId]?.messages.some(
             (message) => message.timestamp === streamTs && message.role === "assistant",
@@ -792,7 +792,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         }
       } else {
         const emptyMessage = withErrorGuidance(
-          "模型未返回正文内容。请检查协议类型（chat/responses）、流式开关或上游服务兼容性。",
+          "模型未返回正文。请检查对话类型（chat/responses）、流式开关或上游服务兼容性。"
         );
         if (hasStream) {
           get().replaceStreamWithError(sessionId, streamTs, emptyMessage);
