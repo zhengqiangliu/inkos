@@ -212,8 +212,8 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme: _theme, t }: 
   if (!data) return null;
 
   return (
-    <div className="relative mx-auto w-full max-w-none space-y-6 px-4 py-6 lg:px-8">
-      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+    <div className="relative isolate mx-auto flex w-full max-w-none flex-col gap-6 px-4 py-6 lg:px-8">
+      <div className="sticky top-0 z-50 -mx-4 mb-6 flex flex-col justify-between gap-4 border-b border-border/30 bg-background/98 px-4 py-4 shadow-sm backdrop-blur-md md:flex-row md:items-center lg:-mx-8 lg:px-8">
         <nav className="flex items-center gap-2 text-[13px] font-medium text-muted-foreground">
           <button onClick={nav.toDashboard} className="flex items-center gap-1 transition-colors hover:text-primary">{t("bread.books")}</button>
           <span className="text-border">/</span>

@@ -1,8 +1,8 @@
-﻿import { useCallback, useEffect, useMemo, useState } from "react";
+﻿import { createPortal } from "react-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJson } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
 import { X, Sparkles, ChevronDown, ChevronUp, RotateCcw, Check, Lock, History } from "lucide-react";
-import { VersionHistoryModal } from "./VersionHistoryModal";
 
 interface ChapterPlan {
   chapterNumber: number;
@@ -32,10 +32,6 @@ interface ChapterPlan {
 interface ChapterPlansResponse {
   count: number;
   plans: ReadonlyArray<ChapterPlan>;
-}
-
-interface BookInfoResponse {
-  nextChapter?: number;
 }
 
 interface ChapterPlanBatchActionResponse {
@@ -141,26 +137,32 @@ const STATUS_CLASS: Record<string, string> = {
 
 interface ChapterPlansSectionProps {
   readonly bookId: string;
+  readonly nextChapter: number;
+  readonly targetChapters: number;
+  readonly refreshToken?: number;
   readonly onSelectChapter?: (chapterNumber: number) => void;
   readonly selectedChapter?: number | null;
   readonly chapterNumbers?: ReadonlyArray<number>;
+  readonly onOpenHistory?: (chapterNumber: number) => void;
 }
 
 export function ChapterPlansSection({
   bookId,
+  nextChapter,
+  targetChapters,
+  refreshToken,
   onSelectChapter,
   selectedChapter: selectedChapterProp = null,
   chapterNumbers = [],
+  onOpenHistory,
 }: ChapterPlansSectionProps) {
   const [plans, setPlans] = useState<ReadonlyArray<ChapterPlan>>([]);
-  const [nextChapter, setNextChapter] = useState(1);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "missing" | "backfilled" | "drift">("all");
   const [selectedChapter, setSelectedChapter] = useState<number | null>(selectedChapterProp);
   const [editingChapter, setEditingChapter] = useState<number | null>(null);
-  const [historyChapter, setHistoryChapter] = useState<number | null>(null);
   const [hoveredChapter, setHoveredChapter] = useState<number | null>(null);
   const [actionSummary, setActionSummary] = useState<{
     label: string;
@@ -187,21 +189,17 @@ export function ChapterPlansSection({
     hasExistingPlan: boolean;
   } | null>(null);
   const [prechecking, setPrechecking] = useState(false);
+  const chapterContentNumberSet = useMemo(() => new Set(chapterNumbers), [chapterNumbers]);
 
   const refetch = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [data, book] = await Promise.all([
-        fetchJson<ChapterPlansResponse>(`/books/${bookId}/chapter-plans`),
-        fetchJson<BookInfoResponse>(`/books/${bookId}`),
-      ]);
+      const data = await fetchJson<ChapterPlansResponse>(`/books/${bookId}/chapter-plans`);
       setPlans(Array.isArray(data.plans) ? data.plans : []);
-      setNextChapter(Math.max(1, Number(book.nextChapter ?? 1)));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPlans([]);
-      setNextChapter(1);
     } finally {
       setLoading(false);
     }
@@ -209,7 +207,7 @@ export function ChapterPlansSection({
 
   useEffect(() => {
     void refetch();
-  }, [refetch]);
+  }, [refreshToken, refetch]);
 
   useEffect(() => {
     if (selectedChapterProp === selectedChapter) return;
@@ -265,22 +263,25 @@ export function ChapterPlansSection({
     () => Math.max(1, nextChapter - 1, latestChapterPlanned),
     [nextChapter, latestChapterPlanned],
   );
-  const recoveryEndChapter = 10000;
 
   const displayRows = useMemo(() => {
     return buildChapterPlanRows(plans, missingChapters, filter);
   }, [plans, missingChapters, filter]);
+  const plannedCount = plans.length;
+  const missingCount = missingChapters.length;
+  const coveredThrough = Math.max(0, nextChapter - 1, ...plans.map((plan) => plan.chapterNumber));
 
   const handleGenerateClick = useCallback(() => {
     // 默认起始章节为下一章
     setGenerateStart(nextChapter);
-    setGenerateCount(20);
+    setGenerateCount(Math.max(1, Math.min(20, targetChapters - nextChapter + 1)));
     setPrecheckResult(null);
     setShowGenerateModal(true);
-  }, [nextChapter]);
+  }, [nextChapter, targetChapters]);
 
   const handlePrecheck = useCallback(async () => {
     setPrechecking(true);
+    setError(null);
     try {
       const result = await fetchJson<{
         startChapter: number;
@@ -302,6 +303,7 @@ export function ChapterPlansSection({
       setPrecheckResult(result);
     } catch (e) {
       setPrecheckResult(null);
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setPrechecking(false);
     }
@@ -329,29 +331,51 @@ export function ChapterPlansSection({
 
   const handleFillMissing = useCallback(() => {
     void runAction("一键补全", async () => {
-      const backfillResponse = await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/backfill-from-chapter`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startChapter: 1, endChapter: recoveryEndChapter }),
-      });
-      const fillResponse = await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/fill-missing`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startChapter: 1, endChapter: recoveryEndChapter }),
-      });
-      return combineChapterPlanBatchActionResponses([backfillResponse, fillResponse]);
+      const responses: Array<ChapterPlanBatchActionResponse | null> = [];
+      const failures: string[] = [];
+
+      try {
+        responses.push(await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/backfill-from-chapter`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startChapter: 1, endChapter: targetChapters }),
+        }));
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : String(e));
+        responses.push(null);
+      }
+
+      try {
+        responses.push(await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/fill-missing`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ startChapter: 1, endChapter: targetChapters }),
+        }));
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : String(e));
+        responses.push(null);
+      }
+
+      const combined = combineChapterPlanBatchActionResponses(responses);
+      if (combined.successChapters?.length || combined.removedChapters?.length || combined.failedChapters?.length) {
+        return combined;
+      }
+      if (failures.length > 0) {
+        throw new Error(failures[0]);
+      }
+      return combined;
     });
-  }, [bookId, recoveryEndChapter, runAction]);
+  }, [bookId, runAction, targetChapters]);
 
   const handleBackfill = useCallback(() => {
     void runAction("正文回填", async () => {
       return await fetchJson<ChapterPlanBatchActionResponse>(`/books/${bookId}/chapter-plans/backfill-from-chapter`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startChapter: 1, endChapter: recoveryEndChapter }),
+        body: JSON.stringify({ startChapter: 1, endChapter: targetChapters }),
       });
     });
-  }, [bookId, recoveryEndChapter, runAction]);
+  }, [bookId, runAction, targetChapters]);
 
   const handleCleanupOverflow = useCallback(() => {
     void runAction("清理超纲分章", async () => {
@@ -362,7 +386,7 @@ export function ChapterPlansSection({
   }, [bookId, runAction]);
 
   const handleApprove = useCallback((chapterNumber: number) => {
-    void runAction(`通过第${chapterNumber}章`, async () => {
+    return runAction(`通过第${chapterNumber}章`, async () => {
       await fetchJson(`/books/${bookId}/chapter-plans/${chapterNumber}/approve`, {
         method: "POST",
       });
@@ -414,6 +438,8 @@ export function ChapterPlansSection({
       .map((item) => item.trim())
       .filter(Boolean)
   ), []);
+
+  const hasChapterContent = useCallback((chapterNumber: number): boolean => chapterContentNumberSet.has(chapterNumber), [chapterContentNumberSet]);
 
   return (
     <SidebarCard
@@ -533,6 +559,8 @@ export function ChapterPlansSection({
             const plan = row.plan;
             const isSelected = selectedChapter === plan.chapterNumber;
             const isHovered = hoveredChapter === plan.chapterNumber;
+            const editable = !hasChapterContent(plan.chapterNumber);
+            const needsReview = Boolean(plan.needsReview);
             return (
               <div
                 key={`${plan.chapterNumber}-${plan.version}`}
@@ -554,25 +582,62 @@ export function ChapterPlansSection({
                       <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${STATUS_CLASS[plan.status] ?? "bg-muted/40 text-muted-foreground"}`}>
                         {plan.status}
                       </span>
+                      {needsReview ? (
+                        <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-500">
+                          待复核
+                        </span>
+                      ) : plan.status === "approved" ? (
+                        <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-500">
+                          已通过
+                        </span>
+                      ) : null}
                       <span className="rounded-full bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
                         v{plan.version}
                       </span>
+                      {!editable && (
+                        <span className="rounded-full bg-slate-500/10 px-1.5 py-0.5 text-[10px] text-slate-500">有正文</span>
+                      )}
                       {plan.lockedFields?.length ? <Lock size={10} className="text-violet-400" /> : null}
                     </div>
                     <p className="mt-1 text-xs font-medium text-foreground">{plan.chapterName || "（未命名）"}</p>
                   </div>
                   <div className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
-                    <span className={`rounded-full px-1.5 py-0.5 transition-colors ${
-                      isSelected
-                        ? "bg-primary/20 text-primary"
-                        : isHovered
-                          ? "bg-primary/15 text-primary"
-                          : "bg-muted/40 group-hover:bg-primary/15 group-hover:text-primary"
-                    }`}>
-                      {isSelected ? "已选中" : "点击选中"}
-                    </span>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onOpenHistory?.(plan.chapterNumber);
+                      }}
+                      className="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
+                      title="查看历史版本"
+                    >
+                      <History size={10} />
+                      历史
+                    </button>
+                    {isSelected ? (
+                      <span
+                        className="inline-flex h-2.5 w-2.5 rounded-full bg-primary shadow-[0_0_0_3px_rgba(59,130,246,0.15)]"
+                        title="已选中"
+                        aria-label="已选中"
+                      />
+                    ) : (
+                      <span
+                        className={`inline-flex h-2.5 w-2.5 rounded-full border transition-colors ${
+                          isHovered
+                            ? "border-primary/60 bg-primary/20"
+                            : "border-border/60 bg-muted/40 group-hover:border-primary/40 group-hover:bg-primary/10"
+                        }`}
+                        title="查看分章设计"
+                        aria-label="查看分章设计"
+                      />
+                    )}
                   </div>
                 </div>
+                {!editable && (
+                  <div className="border-t border-border/20 px-3 py-1.5 text-[10px] text-muted-foreground">
+                    已有正文，仅可查看，不允许手工或 AI 修改。
+                  </div>
+                )}
               </div>
             );
           })}
@@ -585,33 +650,29 @@ export function ChapterPlansSection({
           bookId={bookId}
           chapterNumber={editingChapter}
           plan={plans.find((p) => p.chapterNumber === editingChapter) ?? null}
+          canEdit={!hasChapterContent(editingChapter)}
+          needsReview={plans.find((p) => p.chapterNumber === editingChapter)?.needsReview ?? false}
+          initialSource={plans.find((p) => p.chapterNumber === editingChapter)?.source === "ai" ? "ai" : "manual"}
+          onApprove={async () => {
+            await handleApprove(editingChapter);
+            closeModal();
+          }}
           onClose={closeModal}
-          onSave={async (updated) => {
+          onSave={async (updated, source) => {
             await runAction(`保存第${editingChapter}章`, async () => {
               await fetchJson(`/books/${bookId}/chapter-plans/${editingChapter}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   ...updated,
-                  source: "manual",
-                  needsReview: false,
+                  source: source ?? "manual",
+                  status: "planned",
+                  needsReview: true,
                 }),
               });
             });
             await refetch();
             closeModal();
-          }}
-        />
-      )}
-
-      {historyChapter !== null && (
-        <VersionHistoryModal
-          bookId={bookId}
-          chapterNumber={historyChapter}
-          currentPlan={plans.find((p) => p.chapterNumber === historyChapter)!}
-          onClose={() => setHistoryChapter(null)}
-          onRestore={async (restoredPlan) => {
-            await refetch();
           }}
         />
       )}
@@ -624,6 +685,7 @@ export function ChapterPlansSection({
           setGenerateStart={setGenerateStart}
           generateCount={generateCount}
           setGenerateCount={setGenerateCount}
+          targetChapters={targetChapters}
           precheckResult={precheckResult}
           prechecking={prechecking}
           onPrecheck={handlePrecheck}
@@ -642,6 +704,7 @@ interface GeneratePlanModalProps {
   setGenerateStart: (v: number) => void;
   generateCount: number;
   setGenerateCount: (v: number) => void;
+  targetChapters: number;
   precheckResult: {
     startChapter: number;
     endChapter: number;
@@ -667,23 +730,27 @@ function GeneratePlanModal({
   setGenerateStart,
   generateCount,
   setGenerateCount,
+  targetChapters,
   precheckResult,
   prechecking,
   onPrecheck,
   onGenerate,
   onClose,
 }: GeneratePlanModalProps) {
-  const endChapter = generateStart + generateCount - 1;
+  const endChapter = Math.min(targetChapters, generateStart + generateCount - 1);
+  const remainingChapters = Math.max(1, targetChapters - generateStart + 1);
 
   // 分类章节状态
-  const conflictChapters = precheckResult?.chapters.filter((c) => c.hasContent && c.hasPlan) ?? [];
+  const contentChapters = precheckResult?.chapters.filter((c) => c.hasContent) ?? [];
   const existingPlanChapters = precheckResult?.chapters.filter((c) => c.hasPlan && !c.hasContent) ?? [];
   const newChapters = precheckResult?.chapters.filter((c) => !c.hasPlan && !c.hasContent) ?? [];
 
-  const canGenerate = precheckResult && !precheckResult.hasConflict;
+  const canGenerate = Boolean(precheckResult && !precheckResult.hasConflict && generateStart <= targetChapters);
 
-  return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 px-4">
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 px-4 backdrop-blur-[1px]">
       <div className="max-h-[85vh] w-full max-w-[560px] overflow-y-auto rounded-xl border border-border/40 bg-background shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-border/20 px-4 py-3">
@@ -705,8 +772,9 @@ function GeneratePlanModal({
               <input
                 type="number"
                 min={1}
+                max={targetChapters}
                 value={generateStart}
-                onChange={(e) => setGenerateStart(Math.max(1, parseInt(e.target.value) || 1))}
+                onChange={(e) => setGenerateStart(Math.max(1, Math.min(targetChapters, parseInt(e.target.value) || 1)))}
                 className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
                 placeholder={`下一章: ${nextChapter}`}
               />
@@ -716,9 +784,9 @@ function GeneratePlanModal({
               <input
                 type="number"
                 min={1}
-                max={200}
+                max={remainingChapters}
                 value={generateCount}
-                onChange={(e) => setGenerateCount(Math.max(1, Math.min(200, parseInt(e.target.value) || 1)))}
+                onChange={(e) => setGenerateCount(Math.max(1, Math.min(remainingChapters, parseInt(e.target.value) || 1)))}
                 className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               />
             </div>
@@ -739,11 +807,20 @@ function GeneratePlanModal({
 
           {precheckResult && (
             <div className="space-y-2">
+              {!precheckResult.hasConflict && !precheckResult.hasExistingPlan && (
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
+                  <p className="text-xs font-medium text-emerald-600">检测通过，未发现重复章节</p>
+                  <p className="mt-1 text-[10px] text-emerald-600/70">
+                    当前范围内没有已有正文或重复分章设计，可直接生成。
+                  </p>
+                </div>
+              )}
+
               {precheckResult.hasConflict && (
                 <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2">
                   <p className="text-xs font-medium text-destructive">有章节正文已存在，不能生成分章设计</p>
                   <p className="mt-1 text-[10px] text-destructive/70">
-                    第{conflictChapters.map((c) => c.chapterNumber).join("、")}章正文已存在，无法覆盖
+                    第{contentChapters.map((c) => c.chapterNumber).join("、")}章正文已存在，无法覆盖
                   </p>
                 </div>
               )}
@@ -789,7 +866,8 @@ function GeneratePlanModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -798,11 +876,15 @@ interface EditPlanModalProps {
   bookId: string;
   chapterNumber: number;
   plan: ChapterPlan | null;
+  canEdit: boolean;
+  needsReview: boolean;
+  initialSource?: "manual" | "ai";
+  onApprove: () => Promise<void>;
   onClose: () => void;
-  onSave: (updated: Partial<ChapterPlan>) => Promise<void>;
+  onSave: (updated: Partial<ChapterPlan>, source: "manual" | "ai") => Promise<void>;
 }
 
-function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPlanModalProps) {
+export function EditPlanModal({ bookId, chapterNumber, plan, canEdit, needsReview, initialSource, onApprove, onClose, onSave }: EditPlanModalProps) {
   const [form, setForm] = useState({
     chapterName: plan?.chapterName ?? "",
     highlight: plan?.highlight ?? "",
@@ -814,11 +896,13 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
     maxRecoveryPerChapter: plan?.maxRecoveryPerChapter ?? 3,
   });
   const [aiPrompt, setAiPrompt] = useState("");
+  const [editSource, setEditSource] = useState<"manual" | "ai">(initialSource ?? (plan?.source === "ai" ? "ai" : "manual"));
   const [saving, setSaving] = useState(false);
   const [aiOptimizing, setAiOptimizing] = useState(false);
+  const [approving, setApproving] = useState(false);
 
   const handleOptimize = useCallback(async () => {
-    if (!aiPrompt.trim()) return;
+    if (!canEdit || !aiPrompt.trim()) return;
     setAiOptimizing(true);
     try {
       const response = await fetchJson<{ content: string }>(`/books/${bookId}/chapter-plans/${chapterNumber}/optimize`, {
@@ -846,21 +930,33 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
         // If not JSON, show as highlight
         setForm((prev) => ({ ...prev, highlight: response.content }));
       }
+      setEditSource("ai");
     } catch (err) {
       console.error("AI optimize failed:", err);
     } finally {
       setAiOptimizing(false);
     }
-  }, [aiPrompt, bookId, chapterNumber, form]);
+  }, [aiPrompt, bookId, canEdit, chapterNumber, form]);
 
   const handleSave = useCallback(async () => {
+    if (!canEdit) return;
     setSaving(true);
     try {
-      await onSave(form);
+      await onSave(form, editSource);
     } finally {
       setSaving(false);
     }
-  }, [form, onSave]);
+  }, [canEdit, editSource, form, onSave]);
+
+  const handleApproveClick = useCallback(async () => {
+    if (!plan || approving) return;
+    setApproving(true);
+    try {
+      await onApprove();
+    } finally {
+      setApproving(false);
+    }
+  }, [approving, onApprove, plan]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -879,12 +975,26 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
 
         {/* Form */}
         <div className="space-y-3 p-4">
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className={`rounded-full px-2 py-0.5 ${needsReview ? "bg-amber-500/10 text-amber-500" : "bg-emerald-500/10 text-emerald-500"}`}>
+              {needsReview ? "待复核" : "已通过"}
+            </span>
+            <span className="text-muted-foreground">
+              {needsReview ? "保存后仍需点击通过" : "已处于通过状态"}
+            </span>
+          </div>
+          {!canEdit && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-600">
+              该章已有正文，只能查看分章设计，不能进行手工或 AI 修改。
+            </div>
+          )}
           <div>
             <label className="text-[11px] font-medium text-muted-foreground">章节名称</label>
             <input
               type="text"
               value={form.chapterName}
               onChange={(e) => setForm((p) => ({ ...p, chapterName: e.target.value }))}
+              disabled={!canEdit}
               className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               placeholder="例如：夜探城主府"
             />
@@ -895,6 +1005,7 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
               value={form.highlight}
               onChange={(e) => setForm((p) => ({ ...p, highlight: e.target.value }))}
               rows={2}
+              disabled={!canEdit}
               className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               placeholder="一句话说明本章最吸引人的点"
             />
@@ -905,6 +1016,7 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
               value={form.coreConflict}
               onChange={(e) => setForm((p) => ({ ...p, coreConflict: e.target.value }))}
               rows={2}
+              disabled={!canEdit}
               className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               placeholder="本章最主要的矛盾是什么"
             />
@@ -915,6 +1027,7 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
               value={form.plotAndConflict}
               onChange={(e) => setForm((p) => ({ ...p, plotAndConflict: e.target.value }))}
               rows={4}
+              disabled={!canEdit}
               className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               placeholder="详细描述本章剧情走向和冲突推进"
             />
@@ -925,6 +1038,7 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
               type="text"
               value={form.emotionalTone}
               onChange={(e) => setForm((p) => ({ ...p, emotionalTone: e.target.value }))}
+              disabled={!canEdit}
               className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               placeholder="紧张/温情/悬疑/热血/压抑"
             />
@@ -935,6 +1049,7 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
               value={form.endingHook}
               onChange={(e) => setForm((p) => ({ ...p, endingHook: e.target.value }))}
               rows={2}
+              disabled={!canEdit}
               className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               placeholder="本章结尾留下的悬念或转折"
             />
@@ -950,6 +1065,7 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
                 max={10}
                 value={form.maxNewHooks}
                 onChange={(e) => setForm((p) => ({ ...p, maxNewHooks: Math.max(0, parseInt(e.target.value) || 0) }))}
+                disabled={!canEdit}
                 className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               />
             </div>
@@ -961,6 +1077,7 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
                 max={10}
                 value={form.maxRecoveryPerChapter}
                 onChange={(e) => setForm((p) => ({ ...p, maxRecoveryPerChapter: Math.max(0, parseInt(e.target.value) || 0) }))}
+                disabled={!canEdit}
                 className="mt-1 w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-sm outline-none focus:border-primary/40"
               />
             </div>
@@ -973,19 +1090,20 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
               <span className="text-[11px] font-medium text-primary">AI 优化修正</span>
             </div>
             <p className="text-[10px] text-muted-foreground">
-              输入修改指令，AI 将根据你的要求优化分章设计内容
+              {canEdit ? "输入修改指令，AI 将根据你的要求优化分章设计内容。" : "已有正文，AI 修正已禁用。"}
             </p>
             <textarea
               value={aiPrompt}
               onChange={(e) => setAiPrompt(e.target.value)}
               rows={2}
+              disabled={!canEdit}
               className="w-full rounded-md border border-border/40 bg-background px-3 py-1.5 text-xs outline-none focus:border-primary/40"
               placeholder="例如：让冲突更激烈，加入更多悬念"
             />
             <button
               type="button"
               onClick={handleOptimize}
-              disabled={aiOptimizing || !aiPrompt.trim()}
+              disabled={!canEdit || aiOptimizing || !aiPrompt.trim()}
               className="inline-flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-[11px] text-primary hover:bg-primary/20 disabled:opacity-50"
             >
               {aiOptimizing ? <RotateCcw size={10} className="animate-spin" /> : <Sparkles size={10} />}
@@ -1005,11 +1123,19 @@ function EditPlanModal({ bookId, chapterNumber, plan, onClose, onSave }: EditPla
           </button>
           <button
             type="button"
+            onClick={handleApproveClick}
+            disabled={approving || !plan}
+            className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-4 py-1.5 text-xs text-emerald-600 hover:bg-emerald-500/20 disabled:opacity-50"
+          >
+            {approving ? "通过中..." : needsReview ? "通过" : "已通过"}
+          </button>
+          <button
+            type="button"
             onClick={handleSave}
-            disabled={saving}
+            disabled={!canEdit || saving}
             className="rounded-md bg-primary px-4 py-1.5 text-xs text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {saving ? "保存中..." : "保存"}
+            {!canEdit ? "只读" : saving ? "保存中..." : "保存待复核"}
           </button>
         </div>
       </div>

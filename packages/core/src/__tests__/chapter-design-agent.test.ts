@@ -121,6 +121,49 @@ describe("ChapterDesignAgent backfill prompt", () => {
     expect(userMessage).toContain("chapterName、highlight、coreConflict、plotAndConflict、emotionalTone、endingHook");
   });
 
+  it("falls back to a local backfill plan when the model connection closes", async () => {
+    chatCompletionMock.mockRejectedValueOnce(new Error("fetch failed: ERR_CONNECTION_CLOSED"));
+
+    const agent = new ChapterDesignAgent({
+      client: { provider: "openai", apiFormat: "chat", stream: false, defaults: { temperature: 0.7, maxTokens: 8192, maxTokensCap: null, thinkingBudget: 0, extra: {} } },
+      model: "gpt-5.4",
+      projectRoot: root,
+      bookId: "demo-book",
+    });
+
+    const plan = await agent.analyzeAndDesignChapter({
+      book: {
+        id: "demo-book",
+        title: "Demo",
+        genre: "xuanhuan",
+        platform: "qidian",
+        language: "zh",
+        status: "active",
+        targetChapters: 100,
+        chapterWordCount: 3000,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      bookDir,
+      volumeOutline: volumeOutlineText,
+      chapterNumber: 3,
+      title: "第三章 夜雨",
+      content: "雨夜里，主角追踪线索到旧码头。灯光晃动，远处传来脚步声。最后他看见一张熟悉的脸。",
+      language: "zh",
+    });
+
+    expect(plan).toMatchObject({
+      chapterNumber: 3,
+      chapterName: "夜雨",
+      status: "backfilled",
+      source: "inferred_from_text",
+      needsReview: true,
+    });
+    expect(plan.highlight).toContain("夜雨");
+    expect(plan.coreConflict).toContain("冲突");
+    expect(plan.endingHook.length).toBeGreaterThan(0);
+  });
+
   it("clamps batch generation to the outline limit and ignores model-provided chapter numbers", async () => {
     chatCompletionMock.mockResolvedValue({
       content: [
@@ -185,6 +228,43 @@ describe("ChapterDesignAgent backfill prompt", () => {
     expect(plans[1]?.chapterName).toBe("越界二");
   });
 
+  it("falls back to local batch plans when the model connection closes", async () => {
+    chatCompletionMock.mockRejectedValueOnce(new Error("fetch failed: ERR_CONNECTION_CLOSED"));
+
+    const agent = new ChapterDesignAgent({
+      client: { provider: "openai", apiFormat: "chat", stream: false, defaults: { temperature: 0.7, maxTokens: 8192, maxTokensCap: null, thinkingBudget: 0, extra: {} } },
+      model: "gpt-5.4",
+      projectRoot: root,
+      bookId: "demo-book",
+    });
+
+    const plans = await agent.designBatch({
+      book: {
+        id: "demo-book",
+        title: "Demo",
+        genre: "xuanhuan",
+        platform: "qidian",
+        language: "zh",
+        status: "active",
+        targetChapters: 100,
+        chapterWordCount: 3000,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      bookDir,
+      volumeOutline: volumeOutlineText,
+      startChapter: 2,
+      count: 2,
+      language: "zh",
+    });
+
+    expect(plans).toHaveLength(2);
+    expect(plans.map((plan) => plan.chapterNumber)).toEqual([2, 3]);
+    expect(plans[0]?.status).toBe("planned");
+    expect(plans[0]?.source).toBe("auto");
+    expect(plans[0]?.chapterName).toBe("第2章");
+  });
+
   it("parses Chinese chapter counts from the outline and still enforces limit guards", async () => {
     const chineseOutlineText = "# 卷纲\n\n### 第一卷：风起（1-十章）\n\n共十章推进主线。";
     chatCompletionMock.mockResolvedValue({
@@ -243,7 +323,7 @@ describe("ChapterDesignAgent backfill prompt", () => {
     expect(userMessage).toContain("卷纲总章数：10章");
   });
 
-  it("rejects incomplete batch outputs instead of silently accepting missing chapters", async () => {
+  it("falls back to local batch plans when output is incomplete", async () => {
     chatCompletionMock.mockResolvedValue({
       content: [
         "---",
@@ -266,7 +346,7 @@ describe("ChapterDesignAgent backfill prompt", () => {
       bookId: "demo-book",
     });
 
-    await expect(agent.designBatch({
+    const plans = await agent.designBatch({
       book: {
         id: "demo-book",
         title: "Demo",
@@ -284,7 +364,12 @@ describe("ChapterDesignAgent backfill prompt", () => {
       startChapter: 2,
       count: 2,
       language: "zh",
-    })).rejects.toThrow("Failed to parse complete chapter design output");
+    });
+
+    expect(plans).toHaveLength(2);
+    expect(plans.map((plan) => plan.chapterNumber)).toEqual([2, 3]);
+    expect(plans[0]?.chapterName).toBe("第2章");
+    expect(plans[1]?.chapterName).toBe("第3章");
   });
 
   it("fails fast when volume outline input is empty", async () => {

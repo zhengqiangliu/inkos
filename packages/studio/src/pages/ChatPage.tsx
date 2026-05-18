@@ -12,12 +12,8 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "../components/ui/dropdown-menu";
-import {
-  Reasoning,
-  ReasoningTrigger,
-  ReasoningContent,
-} from "../components/ai-elements/reasoning";
 import { ChatMessage } from "../components/chat/ChatMessage";
+import { AssistantThinkingCard } from "../components/chat/AssistantThinkingCard";
 import { QuickActions } from "../components/chat/QuickActions";
 import {
   Loader2,
@@ -28,10 +24,8 @@ import {
   Check,
 } from "lucide-react";
 import { Shimmer } from "../components/ai-elements/shimmer";
-import {
-  Message,
-  MessageContent,
-} from "../components/ai-elements/message";
+import { Message } from "../components/ai-elements/message";
+import { AssistantOutputCard } from "../components/chat/AssistantOutputCard";
 import {
   clearBookCreateSessionId,
   filterModelGroups,
@@ -298,13 +292,11 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                   return (
                       <div className="space-y-2">
                         {!!msg.thinking && (
-                          <div className="rounded-xl border border-border/40 bg-card/40 px-3 py-2">
-                            <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">思考过程（流式）</div>
-                            <Reasoning isStreaming={msg.thinkingStreaming === true}>
-                              <ReasoningTrigger />
-                              <ReasoningContent>{msg.thinking}</ReasoningContent>
-                            </Reasoning>
-                          </div>
+                          <AssistantThinkingCard
+                            heading="思考过程（流式）"
+                            content={msg.thinking}
+                            isStreaming={msg.thinkingStreaming === true}
+                          />
                         )}
                         {preview.shouldShowPreview && (
                           <div className="space-y-1">
@@ -361,11 +353,11 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
             {/* Loading indicator — only when loading and no streaming activity */}
             {loading && !isStreaming && (
               <Message from="assistant">
-                <MessageContent>
+                <AssistantOutputCard>
                   <Shimmer className="text-sm" duration={1.5}>
                     {isZh ? "思考中..." : "Thinking..."}
                   </Shimmer>
-                </MessageContent>
+                </AssistantOutputCard>
               </Message>
             )}
 

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { renderToString } from "react-dom/server";
+import { createElement } from "react";
 import {
   buildChapterPlanRows,
   computeMissingChapterNumbers,
   mapChapterPlanFailureReason,
 } from "./ChapterPlansSection";
+import { ChapterPlanReader } from "./ChapterPlanReader";
 
 describe("computeMissingChapterNumbers", () => {
   it("keeps missing chapters visible when plans are partially generated", () => {
@@ -80,5 +83,29 @@ describe("mapChapterPlanFailureReason", () => {
       reasonCode: "CHAPTER_PLAN_AGENT_FAILED",
       reason: "timeout",
     })).toBe("timeout");
+  });
+});
+
+describe("ChapterPlanReader", () => {
+  it("renders a history entry point for the current plan", () => {
+    const html = renderToString(createElement(ChapterPlanReader, {
+      plan: {
+        chapterNumber: 3,
+        chapterName: "demo",
+        highlight: "demo",
+        coreConflict: "demo",
+        plotAndConflict: "demo",
+        emotionalTone: "demo",
+        endingHook: "demo",
+        status: "planned",
+        source: "auto",
+        version: 1,
+      },
+      onOpenHistory: () => undefined,
+    }));
+
+    expect(html).toContain("历史版本");
+    expect(html).toContain("修改复核");
+    expect(html).toContain("通过");
   });
 });

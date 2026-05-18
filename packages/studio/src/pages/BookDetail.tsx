@@ -2,15 +2,16 @@
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
-import { useApi } from "../hooks/use-api";
+import { fetchJson, useApi } from "../hooks/use-api";
 import { useChatStore } from "../store/chat";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ArtifactView } from "../components/chat/BookSidebar";
 import { BookDetailChatDock } from "../components/chat/BookDetailChatDock";
 import { dispatchWriteNextInstruction } from "../utils/write-next";
 import { ChaptersSection } from "../components/sidebar/ChaptersSection";
-import { ChapterPlansSection } from "../components/sidebar/ChapterPlansSection";
+import { ChapterPlansSection, EditPlanModal } from "../components/sidebar/ChapterPlansSection";
 import { ChapterPlanReader } from "../components/sidebar/ChapterPlanReader";
+import { VersionHistoryModal } from "../components/sidebar/VersionHistoryModal";
 import { ASSET_MENU_ITEMS, GUIDE_MENU_ITEMS, TRUTH_MENU_ITEMS, getArtifactLabel } from "../utils/book-artifacts";
 import {
   DropdownMenu,
@@ -46,6 +47,7 @@ interface BookData {
     readonly status: string;
     readonly wordCount: number;
   }>;
+  readonly nextChapter?: number;
 }
 
 interface TruthFile {
@@ -164,11 +166,15 @@ function renderMenuEmpty(label: string, subtitle: string) {
 export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
   const { data, loading, error } = useApi<BookData>(`/books/${bookId}`);
   const { data: truthData } = useApi<TruthFilesResponse>(`/books/${bookId}/truth`);
-  const { data: chapterPlansData } = useApi<ChapterPlansResponse>(`/books/${bookId}/chapter-plans`);
+  const { data: chapterPlansData, refetch: refetchChapterPlans } = useApi<ChapterPlansResponse>(`/books/${bookId}/chapter-plans`);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [readerMode, setReaderMode] = useState<ReaderMode>("chapter");
   const [selectedPlanChapter, setSelectedPlanChapter] = useState<number | null>(null);
+  const [historyChapter, setHistoryChapter] = useState<number | null>(null);
+  const [planEditorChapter, setPlanEditorChapter] = useState<number | null>(null);
+  const [planEditorSource, setPlanEditorSource] = useState<"manual" | "ai">("manual");
+  const [chapterPlansRefreshKey, setChapterPlansRefreshKey] = useState(0);
   const openChapterArtifact = useChatStore((s) => s.openChapterArtifact);
   const artifactChapter = useChatStore((s) => s.artifactChapter);
   const artifactFile = useChatStore((s) => s.artifactFile);
@@ -217,6 +223,14 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     if (selectedPlanChapter === null) return chapterPlans[0] ?? null;
     return chapterPlans.find((plan) => plan.chapterNumber === selectedPlanChapter) ?? chapterPlans[0] ?? null;
   }, [chapterPlans, selectedPlanChapter]);
+  const historyPlan = useMemo(() => {
+    if (historyChapter === null) return null;
+    return chapterPlans.find((plan) => plan.chapterNumber === historyChapter) ?? null;
+  }, [chapterPlans, historyChapter]);
+  const planEditorPlan = useMemo(() => {
+    if (planEditorChapter === null) return null;
+    return chapterPlans.find((plan) => plan.chapterNumber === planEditorChapter) ?? null;
+  }, [chapterPlans, planEditorChapter]);
 
   useEffect(() => {
     if (readerMode !== "design") return;
@@ -363,13 +377,53 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     }
   }, [bookId, nav]);
 
+  const handleApprovePlan = useCallback(async () => {
+    if (!selectedPlan) return;
+    const chapterNumber = selectedPlan.chapterNumber;
+    await fetchJson(`/books/${bookId}/chapter-plans/${chapterNumber}/approve`, {
+      method: "POST",
+    });
+    await refetchChapterPlans();
+    setChapterPlansRefreshKey((value) => value + 1);
+    setPlanEditorChapter(null);
+  }, [bookId, refetchChapterPlans, selectedPlan]);
+
+  const handleSavePlan = useCallback(async (updated: Partial<ChapterPlan>, source: "manual" | "ai") => {
+    if (planEditorChapter === null) return;
+    const savedChapter = planEditorChapter;
+    await fetchJson(`/books/${bookId}/chapter-plans/${planEditorChapter}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...updated,
+        source,
+        status: "planned",
+        needsReview: true,
+      }),
+    });
+    await refetchChapterPlans();
+    setChapterPlansRefreshKey((value) => value + 1);
+    setSelectedPlanChapter(savedChapter);
+    setPlanEditorChapter(null);
+  }, [bookId, planEditorChapter, refetchChapterPlans]);
+
   if (loading) return <div className="flex flex-1 items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-primary/20 border-t-primary" /></div>;
   if (error) return <div className="p-6 text-destructive">{error}</div>;
   if (!data) return null;
 
   const { book, chapters } = data;
+  const nextChapter = Math.max(1, Number(data.nextChapter ?? chapters.length + 1));
+  const latestChapterNumber = chapters[chapters.length - 1]?.number ?? null;
+  const targetChapters = Math.max(1, Number(book.targetChapters ?? 1));
   const totalWords = chapters.reduce((sum, ch) => sum + (ch.wordCount ?? 0), 0);
   const designSelected = readerMode === "design";
+  const selectedPlanHasContent = selectedPlan ? chapters.some((chapter) => chapter.number === selectedPlan.chapterNumber) : false;
+
+  const handleOpenReview = () => {
+    if (!selectedPlan) return;
+    setPlanEditorChapter(selectedPlan.chapterNumber);
+    setPlanEditorSource(selectedPlan.source === "ai" ? "ai" : "manual");
+  };
 
   return (
     <div className="flex h-full min-w-0 flex-1 overflow-hidden bg-background/30">
@@ -386,20 +440,42 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
               <span className="inline-flex items-center gap-1"><FileText size={12} />{chapters.length}</span>
+              <span className="inline-flex items-center gap-1"><BookOpen size={12} />{targetChapters}</span>
               <span className="inline-flex items-center gap-1"><Zap size={12} />{totalWords.toLocaleString()}</span>
               {book.fanficMode && <span className="inline-flex items-center gap-1"><Sparkles size={12} />{book.fanficMode}</span>}
             </div>
           </div>
         </div>
+        <div className="shrink-0 border-b border-border/20 px-3 py-2">
+          <div className="flex items-center justify-end gap-1">
+            <button
+              type="button"
+              onClick={() => handleSelectReaderMode("chapter")}
+              aria-pressed={readerMode === "chapter"}
+              className={`inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                readerMode === "chapter"
+                  ? "bg-primary/15 text-primary"
+                  : "border border-border/50 text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <BookOpen size={12} />正文
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSelectReaderMode("design")}
+              aria-pressed={readerMode === "design"}
+              className={`inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs transition-colors ${
+                readerMode === "design"
+                  ? "bg-primary/15 text-primary"
+                  : "border border-border/50 text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <BookOpen size={12} />分章设计
+            </button>
+          </div>
+        </div>
         <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
-          {designSelected ? (
-            <ChapterPlansSection
-              bookId={bookId}
-              onSelectChapter={setSelectedPlanChapter}
-              selectedChapter={selectedPlanChapter ?? chapterPlans[0]?.chapterNumber ?? null}
-              chapterNumbers={chapters.map((chapter) => chapter.number)}
-            />
-          ) : (
+          <div className={designSelected ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
             <ChaptersSection
               bookId={bookId}
               t={t}
@@ -407,7 +483,19 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
               className="flex min-h-0 flex-1 flex-col"
               listClassName="h-full min-h-0"
             />
-          )}
+          </div>
+          <div className={designSelected ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
+              <ChapterPlansSection
+                bookId={bookId}
+                nextChapter={nextChapter}
+                targetChapters={targetChapters}
+                refreshToken={chapterPlansRefreshKey}
+                onSelectChapter={setSelectedPlanChapter}
+                selectedChapter={selectedPlanChapter ?? chapterPlans[0]?.chapterNumber ?? null}
+                chapterNumbers={chapters.map((chapter) => chapter.number)}
+                onOpenHistory={setHistoryChapter}
+              />
+          </div>
         </div>
       </aside>
 
@@ -496,12 +584,6 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
             </DropdownMenu>
 
             <button onClick={() => nav.toAnalytics(bookId)} className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border/50 px-2 py-1 hover:text-foreground"><BarChart2 size={12} />分析</button>
-            <button
-              onClick={() => handleSelectReaderMode(readerMode === "design" ? "chapter" : "design")}
-              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border/50 px-2 py-1 hover:text-foreground"
-            >
-              <BookOpen size={12} />{readerMode === "design" ? "正文" : "分章设计"}
-            </button>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -516,10 +598,16 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
         </div>
 
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden flex">
-          <section className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-4">
-            <div className="mx-auto w-full max-w-none">
+          <section className={`min-h-0 min-w-0 flex-1 overflow-x-hidden p-4 ${designSelected ? "overflow-y-auto" : "overflow-hidden"}`}>
+            <div className="mx-auto h-full w-full max-w-none min-h-0">
               {designSelected ? (
-                <ChapterPlanReader plan={selectedPlan} />
+                <ChapterPlanReader
+                  plan={selectedPlan}
+                  canEdit={Boolean(selectedPlan && !selectedPlanHasContent)}
+                  onEditReview={selectedPlan ? handleOpenReview : undefined}
+                  onApprove={selectedPlan ? handleApprovePlan : undefined}
+                  onOpenHistory={selectedPlan ? () => setHistoryChapter(selectedPlan.chapterNumber) : undefined}
+                />
               ) : (
                 <ArtifactView bookId={bookId} t={t} />
               )}
@@ -536,7 +624,17 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
             <div className={["absolute inset-y-0 left-1/2 w-px -translate-x-1/2 transition-colors", draggingSide === "right" ? "bg-primary/60" : "bg-border/30 group-hover:bg-primary/40"].join(" ")} />
           </div>
 
-          <BookDetailChatDock bookId={bookId} nav={nav} theme={theme} t={t} sse={sse} width={rightWidth} />
+          <BookDetailChatDock
+            bookId={bookId}
+            nav={nav}
+            theme={theme}
+            t={t}
+            sse={sse}
+            width={rightWidth}
+            latestChapterNumber={latestChapterNumber}
+            nextChapter={nextChapter}
+            targetChapters={targetChapters}
+          />
         </div>
       </main>
 
@@ -550,6 +648,38 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
         onConfirm={handleDeleteBook}
         onCancel={() => setConfirmDeleteOpen(false)}
       />
+
+      {planEditorChapter !== null && planEditorPlan && (
+        <EditPlanModal
+          bookId={bookId}
+          chapterNumber={planEditorChapter}
+          plan={planEditorPlan}
+          canEdit={!selectedPlanHasContent}
+          needsReview={planEditorPlan.needsReview ?? false}
+          initialSource={planEditorSource}
+          onApprove={async () => {
+            await handleApprovePlan();
+            setPlanEditorChapter(null);
+          }}
+          onClose={() => setPlanEditorChapter(null)}
+          onSave={handleSavePlan}
+        />
+      )}
+
+      {historyChapter !== null && historyPlan && (
+        <VersionHistoryModal
+          bookId={bookId}
+          chapterNumber={historyChapter}
+          currentPlan={historyPlan}
+          onClose={() => setHistoryChapter(null)}
+          onRestore={async (restoredPlan) => {
+            setHistoryChapter(null);
+            await refetchChapterPlans();
+            setChapterPlansRefreshKey((value) => value + 1);
+            setSelectedPlanChapter(restoredPlan.chapterNumber);
+          }}
+        />
+      )}
     </div>
   );
 }

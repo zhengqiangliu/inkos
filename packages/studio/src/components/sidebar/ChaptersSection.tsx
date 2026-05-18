@@ -280,6 +280,7 @@ export function ChaptersSection({
   const lastProcessedSseMessageRef = useRef<SSEMessage | null>(null);
   const latestAuditSummaryByChapterRef = useRef<Map<number, MessageAuditSummary>>(new Map());
   const openChapterArtifact = useChatStore((s) => s.openChapterArtifact);
+  const activeChapterNumber = useChatStore((s) => s.artifactChapter);
   const bumpBookDataVersion = useChatStore((s) => s.bumpBookDataVersion);
   const bookDataVersion = useChatStore((s) => s.bookDataVersion);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -1255,16 +1256,33 @@ export function ChaptersSection({
               : autoReviewDisplay?.tone === "success"
                 ? "text-emerald-700/90"
                 : "text-sky-700/90";
+            const isSelected = activeChapterNumber === ch.number;
             return (
               <li
                 key={`${ch.number}-${ch.title ?? ""}`}
-                className="py-1 text-xs text-muted-foreground rounded px-1 -mx-1 hover:bg-secondary/50 transition-colors">
+                role="button"
+                tabIndex={0}
+                onClick={() => handleOpenChapterEditor(ch)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    handleOpenChapterEditor(ch);
+                  }
+                }}
+                className={cn(
+                  "py-1 text-xs rounded px-1 -mx-1 transition-colors cursor-pointer outline-none",
+                  isSelected
+                    ? "border border-primary/50 bg-primary/10 text-foreground shadow-sm"
+                    : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground",
+                )}
+              >
                 <div className="flex items-start gap-2">
                   <span
                     className={cn(
                       "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-semibold",
                       meta.badge,
                       meta.color,
+                      isSelected ? "ring-2 ring-primary/20" : "",
                     )}
                     title={statusLabel(ch.status, t)}
                     aria-label={statusLabel(ch.status, t)}
@@ -1274,7 +1292,7 @@ export function ChaptersSection({
                   <button
                     type="button"
                     onClick={() => handleOpenChapterEditor(ch)}
-                    className="min-w-0 flex-1 text-left hover:text-foreground transition-colors"
+                    className="min-w-0 flex-1 text-left transition-colors"
                     title={t("sidebar.chapter.editBody")}
                   >
                     <div className="truncate">

@@ -22,11 +22,11 @@ describe("resolveChapterReaderSelectionState", () => {
       editing: false,
       selectionModeActive: false,
       editorSelectedText: "",
-      viewerSelectedText: "",
-      viewerIsSelecting: false,
+      viewerSelectedText: "选中正文",
+      viewerIsSelecting: true,
     })).toMatchObject({
-      hasSelection: false,
-      effectiveSelectionMode: false,
+      hasSelection: true,
+      effectiveSelectionMode: true,
       showFloatingToolbar: false,
     });
   });

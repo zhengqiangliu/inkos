@@ -502,6 +502,107 @@ describe("runChapterReviewCycle", () => {
     expect(result.auditResult.issues.some((issue) => issue.category === "评分门禁")).toBe(false);
   });
 
+  it("uses rewrite on first round when score-gated warning-heavy issues need broader repair", async () => {
+    const draft = "字".repeat(220);
+    const warningIssues: AuditIssue[] = [
+      {
+        severity: "warning",
+        category: "节奏",
+        description: "节奏推进不足",
+        suggestion: "提高推进效率",
+      },
+      {
+        severity: "warning",
+        category: "情绪",
+        description: "情绪曲线单一",
+        suggestion: "增加情绪层次",
+      },
+      {
+        severity: "warning",
+        category: "冲突",
+        description: "冲突压力不够",
+        suggestion: "提升场景对抗性",
+      },
+      {
+        severity: "warning",
+        category: "信息",
+        description: "信息重复偏多",
+        suggestion: "压缩重复信息",
+      },
+    ];
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(createAuditResult({
+        passed: true,
+        issues: warningIssues,
+        summary: "warning only",
+      }))
+      .mockResolvedValueOnce(createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }));
+    const reviseModes: ReviseMode[] = [];
+    const reviseChapter = vi.fn().mockImplementation(async (
+      _bookDir: string,
+      content: string,
+      _chapterNumber: number,
+      _issues: ReadonlyArray<AuditIssue>,
+      mode: ReviseMode,
+    ) => {
+      reviseModes.push(mode);
+      const revisedContent = `${content}修订`;
+      return {
+        revisedContent,
+        wordCount: revisedContent.length,
+        fixedIssues: ["[ISSUE-01] rewritten"],
+        updatedState: "",
+        updatedLedger: "",
+        updatedHooks: "",
+        tokenUsage: ZERO_USAGE,
+      };
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn().mockResolvedValue({
+      content: `${draft}修订`,
+      wordCount: `${draft}修订`.length,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 1,
+      initialOutput: {
+        content: draft,
+        wordCount: 220,
+        postWriteErrors: [],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      reviseMode: "spot-fix",
+      maxReviseRounds: 2,
+    });
+
+    expect(reviseModes).toEqual(["rewrite"]);
+    expect(result.finalContent).toContain("修订");
+    expect(result.auditResult.passed).toBe(true);
+  });
+
   it("classifies structural issues and escalates first revise round to rework", async () => {
     const draft = "字".repeat(220);
     const firstAudit = createAuditResult({

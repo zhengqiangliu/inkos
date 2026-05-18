@@ -50,6 +50,53 @@ export interface AnalyzeChapterInput {
   readonly language?: string;
 }
 
+function stripMarkdownToPlainText(value: string): string {
+  return String(value ?? "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, " ")
+    .replace(/\[(.*?)\]\([^)]+\)/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/[`*_>~\-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncateText(value: string, maxLength: number): string {
+  const text = stripMarkdownToPlainText(value);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function splitSentences(value: string): string[] {
+  return stripMarkdownToPlainText(value)
+    .split(/[。！？!?；;\n]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function cleanChapterName(title: string, chapterNumber: number): string {
+  const normalized = stripMarkdownToPlainText(title)
+    .replace(/^第[\d一二三四五六七八九十百千零]+章[：:\s-]*/u, "")
+    .trim();
+  return normalized || `第${chapterNumber}章`;
+}
+
+function inferTone(text: string): string {
+  const normalized = stripMarkdownToPlainText(text);
+  const toneRules: ReadonlyArray<{ pattern: RegExp; tone: string }> = [
+    { pattern: /(悬念|线索|秘密|疑云|暗中|追踪|窥探|诡异)/, tone: "悬疑" },
+    { pattern: /(紧张|危机|逼迫|追赶|威胁|冲突|对峙|压迫)/, tone: "紧张" },
+    { pattern: /(压抑|沉重|绝望|疲惫|屈辱|灰暗|低落)/, tone: "压抑" },
+    { pattern: /(温暖|轻松|安慰|安心|和解|松弛)/, tone: "温情" },
+    { pattern: /(热血|爆发|反击|逆袭|燃|战斗|激斗)/, tone: "热血" },
+    { pattern: /(反转|翻盘|扭转|突破|觉醒|揭露)/, tone: "转折" },
+  ];
+  for (const rule of toneRules) {
+    if (rule.pattern.test(normalized)) return rule.tone;
+  }
+  return "推进";
+}
+
 export class ChapterDesignAgent extends BaseAgent {
   get name(): string {
     return "chapter-design";
@@ -148,42 +195,46 @@ export class ChapterDesignAgent extends BaseAgent {
       { role: "user" as const, content: buildChapterDesignUserMessage(context, input.startChapter, effectiveCount, language) },
     ];
 
-    const response = await this.chat(messages, { temperature: 0.7 });
+    try {
+      const response = await this.chat(messages, { temperature: 0.7 });
 
-    const parsed = parseChapterDesignOutput(response.content, input.startChapter, effectiveCount);
-    if (parsed.length !== effectiveCount) {
-      throw new Error(`Failed to parse complete chapter design output for chapters ${input.startChapter}-${input.startChapter + effectiveCount - 1}: expected ${effectiveCount}, got ${parsed.length}`);
+      const parsed = parseChapterDesignOutput(response.content, input.startChapter, effectiveCount);
+      if (parsed.length !== effectiveCount) {
+        throw new Error(`Failed to parse complete chapter design output for chapters ${input.startChapter}-${input.startChapter + effectiveCount - 1}: expected ${effectiveCount}, got ${parsed.length}`);
+      }
+      const now = new Date().toISOString();
+
+      return parsed.map((p, index) =>
+        ChapterPlanSchema.parse({
+          chapterNumber: input.startChapter + index,
+          chapterName: p.chapterName,
+          highlight: p.highlight,
+          coreConflict: p.coreConflict,
+          plotAndConflict: p.plotAndConflict,
+          emotionalTone: p.emotionalTone || "推进",
+          endingHook: p.endingHook,
+          hookAssignment: p.hookAssignment,
+          requiredRecoverHooks: p.requiredRecoverHooks,
+          maxNewHooks: p.maxNewHooks,
+          status: "planned",
+          source: "auto",
+          version: 1,
+          needsReview: true,
+          anchorRefs: {
+            worldRefs: [],
+            characterRefs: [],
+            emotionRefs: [],
+            hookRefs: [],
+          },
+          driftFlags: [],
+          lockedFields: [],
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+    } catch {
+      return this.buildFallbackBatchPlans(input, context);
     }
-    const now = new Date().toISOString();
-
-    return parsed.map((p, index) =>
-      ChapterPlanSchema.parse({
-        chapterNumber: input.startChapter + index,
-        chapterName: p.chapterName,
-        highlight: p.highlight,
-        coreConflict: p.coreConflict,
-        plotAndConflict: p.plotAndConflict,
-        emotionalTone: p.emotionalTone || "推进",
-        endingHook: p.endingHook,
-        hookAssignment: p.hookAssignment,
-        requiredRecoverHooks: p.requiredRecoverHooks,
-        maxNewHooks: p.maxNewHooks,
-        status: "planned",
-        source: "auto",
-        version: 1,
-        needsReview: true,
-        anchorRefs: {
-          worldRefs: [],
-          characterRefs: [],
-          emotionRefs: [],
-          hookRefs: [],
-        },
-        driftFlags: [],
-        lockedFields: [],
-        createdAt: now,
-        updatedAt: now,
-      }),
-    );
   }
 
   private async loadContext(params: {
@@ -373,23 +424,138 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
       { role: "user" as const, content: userMessage },
     ];
 
-    const response = await this.chat(messages, { temperature: 0.7 });
+    try {
+      const response = await this.chat(messages, { temperature: 0.7 });
 
-    const parsed = parseChapterDesignOutput(response.content, input.chapterNumber, 1);
-    const first = parsed[0];
+      const parsed = parseChapterDesignOutput(response.content, input.chapterNumber, 1);
+      const first = parsed[0];
 
+      const now = new Date().toISOString();
+      return ChapterPlanSchema.parse({
+        chapterNumber: input.chapterNumber,
+        chapterName: first?.chapterName || input.title || `第${input.chapterNumber}章`,
+        highlight: first?.highlight || `第${input.chapterNumber}章核心看点待确认`,
+        coreConflict: first?.coreConflict || `第${input.chapterNumber}章核心冲突待确认`,
+        plotAndConflict: first?.plotAndConflict || `第${input.chapterNumber}章剧情与冲突待确认`,
+        emotionalTone: first?.emotionalTone || "待确认",
+        endingHook: first?.endingHook || "待确认",
+        hookAssignment: first?.hookAssignment ?? [],
+        requiredRecoverHooks: first?.requiredRecoverHooks ?? [],
+        maxNewHooks: first?.maxNewHooks ?? 3,
+        status: "backfilled",
+        source: "inferred_from_text",
+        version: 1,
+        needsReview: true,
+        anchorRefs: {
+          worldRefs: [],
+          characterRefs: [],
+          emotionRefs: [],
+          hookRefs: [],
+        },
+        driftFlags: [],
+        lockedFields: [],
+        createdAt: now,
+        updatedAt: now,
+      });
+    } catch {
+      return this.buildFallbackBackfillPlan(input);
+    }
+  }
+
+  private buildFallbackBatchPlans(
+    input: DesignBatchInput,
+    context: ChapterDesignContext,
+  ): ChapterPlan[] {
     const now = new Date().toISOString();
+    const previousPlan = input.existingPlans?.at(-1);
+    const previousName = previousPlan ? cleanChapterName(previousPlan.chapterName, previousPlan.chapterNumber) : "";
+    const previousHook = previousPlan?.endingHook?.trim() ? truncateText(previousPlan.endingHook, 28) : "";
+    const tone = previousPlan?.emotionalTone?.trim() || "推进";
+    const limit = typeof context.outlineChapterLimit === "number"
+      ? context.outlineChapterLimit
+      : input.startChapter + input.count - 1;
+    const endChapter = Math.min(input.startChapter + input.count - 1, limit);
+    const plans: ChapterPlan[] = [];
+
+    for (let chapterNumber = input.startChapter; chapterNumber <= endChapter; chapterNumber += 1) {
+      const chapterName = `第${chapterNumber}章`;
+      const highlight = previousHook
+        ? `承接${previousHook}，推动第${chapterNumber}章的局势变化。`
+        : `第${chapterNumber}章承接前文，继续推进主线。`;
+      const coreConflict = previousName
+        ? `围绕${previousName}留下的余波，第${chapterNumber}章在新的压力下继续展开冲突。`
+        : `第${chapterNumber}章围绕卷纲主线推进冲突与选择。`;
+      const plotAndConflict = previousName
+        ? `本章承接${previousName}的结果，继续推进新的事件、信息揭示与冲突升级，并在章末抛出新的钩子。`
+        : `本章承接前文节奏，推进新的事件、信息揭示与冲突升级，并在章末抛出新的钩子。`;
+      const endingHook = previousHook
+        ? `延续${previousHook}所指向的问题，第${chapterNumber}章末再度留下悬念。`
+        : `第${chapterNumber}章在新的变化中收束，为后续章节留出悬念。`;
+
+      plans.push(ChapterPlanSchema.parse({
+        chapterNumber,
+        chapterName,
+        highlight,
+        coreConflict,
+        plotAndConflict,
+        emotionalTone: tone,
+        endingHook,
+        status: "planned",
+        source: "auto",
+        version: 1,
+        needsReview: true,
+        anchorRefs: {
+          worldRefs: [],
+          characterRefs: [],
+          emotionRefs: [],
+          hookRefs: [],
+        },
+        driftFlags: [],
+        lockedFields: [],
+        createdAt: now,
+        updatedAt: now,
+      }));
+    }
+
+    return plans;
+  }
+
+  private buildFallbackBackfillPlan(input: AnalyzeChapterInput): ChapterPlan {
+    const now = new Date().toISOString();
+    const chapterName = cleanChapterName(input.title, input.chapterNumber);
+    const normalizedContent = input.content.trim();
+    const paragraphs = normalizedContent
+      .replace(/\r\n/g, "\n")
+      .split(/\n{2,}/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const opening = paragraphs[0] ?? normalizedContent;
+    const closing = paragraphs.at(-1) ?? normalizedContent;
+    const openingSentences = splitSentences(opening);
+    const closingSentences = splitSentences(closing);
+    const lead = openingSentences.slice(0, 2).join("，") || truncateText(opening, 48);
+    const tail = closingSentences.slice(-2).join("，") || truncateText(closing, 48);
+    const tone = inferTone(normalizedContent);
+
     return ChapterPlanSchema.parse({
       chapterNumber: input.chapterNumber,
-      chapterName: first?.chapterName || input.title || `第${input.chapterNumber}章`,
-      highlight: first?.highlight || `第${input.chapterNumber}章核心看点待确认`,
-      coreConflict: first?.coreConflict || `第${input.chapterNumber}章核心冲突待确认`,
-      plotAndConflict: first?.plotAndConflict || `第${input.chapterNumber}章剧情与冲突待确认`,
-      emotionalTone: first?.emotionalTone || "待确认",
-      endingHook: first?.endingHook || "待确认",
-      hookAssignment: first?.hookAssignment ?? [],
-      requiredRecoverHooks: first?.requiredRecoverHooks ?? [],
-      maxNewHooks: first?.maxNewHooks ?? 3,
+      chapterName,
+      highlight: lead
+        ? `${chapterName}围绕${truncateText(lead, 26)}展开。`
+        : `${chapterName}承接前文，推动主线变化。`,
+      coreConflict: lead
+        ? `${chapterName}中，${truncateText(lead, 46)}，冲突在推进中逐步加压。`
+        : `${chapterName}围绕新的局势变化展开，主角面临现实压力与选择。`,
+      plotAndConflict: lead
+        ? `本章从${truncateText(opening, 34)}切入，随后推进到${truncateText(lead, 86)}，并在章末通过${truncateText(tail || "新的悬念", 36)}收束。`
+        : `本章承接前文局势，推进新的事件、冲突与信息揭示，并在章末留出后续悬念。`,
+      emotionalTone: tone,
+      endingHook: tail
+        ? truncateText(tail, 48)
+        : `第${input.chapterNumber}章在新的悬念中收束。`,
+      hookAssignment: [],
+      requiredRecoverHooks: [],
+      maxNewHooks: 3,
       status: "backfilled",
       source: "inferred_from_text",
       version: 1,

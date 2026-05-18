@@ -441,6 +441,7 @@ describe("ReviserAgent", () => {
       expect(userPrompt).toContain("门禁策略：critical gate");
       expect(userPrompt).toContain("当前评分: 62");
       expect(userPrompt).toContain("通过阈值: 80");
+      expect(userPrompt).toContain("距离通过阈值还差: 18");
       expect(userPrompt).toContain("问题分类计数：structural=2, textual=1");
       expect(userPrompt).toContain("主问题类型：structural");
       expect(userPrompt).toContain("ISSUE-01");

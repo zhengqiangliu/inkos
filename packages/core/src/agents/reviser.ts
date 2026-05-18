@@ -119,6 +119,7 @@ export class ReviserAgent extends BaseAgent {
         failureGate?: "critical" | "score" | "none";
         score?: number;
         passScoreThreshold?: number;
+        scoreShortfall?: number;
         unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
         mustFixFirstIssueIds?: ReadonlyArray<string>;
         issueClassCounts?: Readonly<{
@@ -253,6 +254,17 @@ export class ReviserAgent extends BaseAgent {
         : failureGate === "none"
           ? `\n- 门禁策略：none。保持保守修改，优先完成 must-fix 与未收敛项。`
           : "";
+    const currentScore = Number.isFinite(Number(reviseContext?.score))
+      ? Math.trunc(Number(reviseContext?.score))
+      : undefined;
+    const passScoreThreshold = Number.isFinite(Number(reviseContext?.passScoreThreshold))
+      ? Math.trunc(Number(reviseContext?.passScoreThreshold))
+      : undefined;
+    const scoreShortfall = Number.isFinite(Number(reviseContext?.scoreShortfall))
+      ? Math.max(0, Math.trunc(Number(reviseContext?.scoreShortfall)))
+      : (typeof currentScore === "number" && typeof passScoreThreshold === "number"
+        ? Math.max(0, passScoreThreshold - currentScore)
+        : undefined);
     const issueClassCounts = reviseContext?.issueClassCounts;
     const issueClassCountsBlock = issueClassCounts
       && Number.isFinite(Number(issueClassCounts.structural))
@@ -269,7 +281,7 @@ export class ReviserAgent extends BaseAgent {
       ? `\n- 主问题类型：${primaryIssueClass}`
       : "";
     const auditGateBlock = failureGate || Number.isFinite(Number(reviseContext?.score)) || Number.isFinite(Number(reviseContext?.passScoreThreshold)) || mustFixFirstBlock.length > 0
-      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${Number.isFinite(Number(reviseContext?.score)) ? `\n- 当前评分: ${Math.trunc(Number(reviseContext?.score))}` : ""}${Number.isFinite(Number(reviseContext?.passScoreThreshold)) ? `\n- 通过阈值: ${Math.trunc(Number(reviseContext?.passScoreThreshold))}` : ""}${failureGateStrategyBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
+      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${typeof currentScore === "number" ? `\n- 当前评分: ${currentScore}` : ""}${typeof passScoreThreshold === "number" ? `\n- 通过阈值: ${passScoreThreshold}` : ""}${typeof scoreShortfall === "number" ? `\n- 距离通过阈值还差: ${scoreShortfall}` : ""}${failureGateStrategyBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
       : "";
     const hooksWorkingSet = governedMode && options?.contextPackage
       ? buildGovernedHookWorkingSet({

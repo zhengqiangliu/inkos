@@ -6,14 +6,17 @@ import { chatSelectors, useChatStore } from "../../store/chat";
 import { useServiceStore } from "../../store/service";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "../ui/dropdown-menu";
 import { ChatMessage } from "./ChatMessage";
-import { Reasoning, ReasoningTrigger, ReasoningContent } from "../ai-elements/reasoning";
-import { BotMessageSquare, ArrowUp, Square, ChevronDown, Check } from "lucide-react";
+import { AssistantOutputCard } from "./AssistantOutputCard";
+import { AssistantThinkingCard } from "./AssistantThinkingCard";
+import { BookTaskPanel } from "./BookTaskPanel";
+import { BotMessageSquare, ArrowUp, Square, ChevronDown, Check, Sparkles, Zap, Search, RefreshCcw } from "lucide-react";
 import { Shimmer } from "../ai-elements/shimmer";
-import { Message, MessageContent } from "../ai-elements/message";
+import { Message } from "../ai-elements/message";
 import { resolveModelSelection } from "../../pages/chat-page-state";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { pickLatestAssistantToolExecutions } from "../../pages/chat-execution-panel";
-import { dispatchWriteNextInstruction, readBookDetailSessionId } from "../../utils/write-next";
+import { dispatchWriteNextInstruction, readBookDetailSessionId, resolveBookDetailSessionId } from "../../utils/write-next";
+import { resolveBookAgentInstruction } from "../../utils/agent-instruction";
 
 interface Nav {
   toServices: () => void;
@@ -26,12 +29,16 @@ interface BookDetailChatDockProps {
   readonly t: TFunction;
   readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
   readonly width?: number;
+  readonly latestChapterNumber?: number | null;
+  readonly nextChapter?: number;
+  readonly targetChapters?: number;
 }
 
-export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookDetailChatDockProps) {
+export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, latestChapterNumber = null, nextChapter = 1, targetChapters = 1 }: BookDetailChatDockProps) {
   const activeSession = useChatStore(chatSelectors.activeSession);
   const messages = useChatStore(chatSelectors.activeMessages);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
+  const artifactChapter = useChatStore((s) => s.artifactChapter);
   const input = useChatStore((s) => s.input);
   const loading = useChatStore(chatSelectors.isActiveSessionStreaming);
   const setInput = useChatStore((s) => s.setInput);
@@ -47,8 +54,12 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const quickMenuTimerRef = useRef<number | null>(null);
+  const [quickMenuOpen, setQuickMenuOpen] = useState(false);
   const stopping = activeSession?.isStopping ?? false;
   const canStop = Boolean(activeSessionId) && (loading || stopping);
+  const hasDraftInput = input.trim().length > 0;
+  const quickActionsAvailable = Boolean(activeSessionId) && !loading && !stopping;
   const isZh = t("nav.connected") === "已连接";
 
   const services = useServiceStore((s) => s.services);
@@ -58,6 +69,7 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
   const fetchModels = useServiceStore((s) => s.fetchModels);
 
   const [executionCollapsed, setExecutionCollapsed] = useState(false);
+  const [panelMode, setPanelMode] = useState<"chat" | "tasks">("chat");
 
   useEffect(() => { void fetchServices(); }, [fetchServices]);
   useEffect(() => {
@@ -75,6 +87,8 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
         models: modelsByService[service.service]!.models,
       }))
   ), [modelsByService, services]);
+  const quickActionChapter = artifactChapter ?? latestChapterNumber ?? null;
+  const hasQuickActionChapter = quickActionChapter !== null && Number.isFinite(quickActionChapter);
 
   useEffect(() => {
     const resolved = resolveModelSelection(groupedModels, selectedModel, selectedService);
@@ -120,8 +134,15 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 88), 180)}px`;
   }, [input]);
+
+  useEffect(() => () => {
+    if (quickMenuTimerRef.current !== null) {
+      window.clearTimeout(quickMenuTimerRef.current);
+      quickMenuTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -137,6 +158,50 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
     void sendMessage(activeSessionId, input, bookId);
   };
 
+  const runQuickAction = async (action: "write-next" | "audit" | "rewrite") => {
+    if (loading || stopping) return;
+    setQuickMenuOpen(false);
+    try {
+      if (action === "write-next") {
+        await dispatchWriteNextInstruction(bookId, isZh ? undefined : "en", activeSessionId);
+        return;
+      }
+
+      if (!hasQuickActionChapter) return;
+      const sessionId = await resolveBookDetailSessionId(bookId, activeSessionId);
+      const instruction = action === "audit"
+        ? (isZh ? `审计第${quickActionChapter}章` : `audit chapter ${quickActionChapter}`)
+        : resolveBookAgentInstruction("rewrite", {
+          chapterNumber: quickActionChapter,
+          language: isZh ? "zh" : "en",
+        });
+      await sendMessage(sessionId, instruction, bookId);
+    } catch (error) {
+      console.error("Quick action failed", error);
+    }
+  };
+
+  const cancelQuickMenuClose = () => {
+    if (quickMenuTimerRef.current !== null) {
+      window.clearTimeout(quickMenuTimerRef.current);
+      quickMenuTimerRef.current = null;
+    }
+  };
+
+  const openQuickMenu = () => {
+    if (!quickActionsAvailable) return;
+    cancelQuickMenuClose();
+    setQuickMenuOpen(true);
+  };
+
+  const closeQuickMenu = (delay = 120) => {
+    cancelQuickMenuClose();
+    quickMenuTimerRef.current = window.setTimeout(() => {
+      setQuickMenuOpen(false);
+      quickMenuTimerRef.current = null;
+    }, delay);
+  };
+
   const modelPickerStatus = useMemo(() => {
     if (servicesLoading || services.length === 0) return "loading" as const;
     const connected = services.filter((s) => s.connected);
@@ -145,7 +210,17 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
     return connected.some((s) => (modelsByService[s.service]?.models.length ?? 0) > 0) ? "ready" as const : "no-models" as const;
   }, [modelsByService, services, servicesLoading]);
 
-  const executionList = pickLatestAssistantToolExecutions(messages);
+  const executionList = useMemo(() => {
+    const latest = pickLatestAssistantToolExecutions(messages);
+    if (loading) return latest;
+    return latest.map((execution) => {
+      if (execution.status !== "running" && execution.status !== "processing") return execution;
+      return {
+        ...execution,
+        status: "completed" as const,
+      };
+    });
+  }, [loading, messages]);
 
   return (
     <aside
@@ -156,7 +231,7 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="text-sm font-semibold">AI 工作台</div>
-            <div className="mt-0.5 text-[11px] text-muted-foreground">对话 / 思考 / 正文</div>
+            <div className="mt-0.5 text-[11px] text-muted-foreground">对话 / 任务 / 正文</div>
           </div>
 
           <div className="shrink-0">
@@ -192,80 +267,206 @@ export function BookDetailChatDock({ bookId, nav, theme, t, width = 580 }: BookD
           </div>
         </div>
 
-        <ExecutionPanel executions={executionList} collapsed={executionCollapsed} onCollapsedChange={setExecutionCollapsed} />
-      </div>
+        <div className="inline-flex rounded-full border border-border/40 bg-background/50 p-0.5 text-[11px]">
+          <button
+            type="button"
+            onClick={() => setPanelMode("chat")}
+            className={`rounded-full px-3 py-1.5 transition-colors ${panelMode === "chat" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"}`}
+          >
+            聊天
+          </button>
+          <button
+            type="button"
+            onClick={() => setPanelMode("tasks")}
+            className={`rounded-full px-3 py-1.5 transition-colors ${panelMode === "tasks" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"}`}
+          >
+            任务
+          </button>
+        </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 min-h-0">
-        {messages.length === 0 && !loading ? (
-          <div className="h-full flex items-center justify-center text-center">
-            <div className="space-y-3">
-              <BotMessageSquare size={24} className="mx-auto text-muted-foreground/50" />
-              <p className="text-sm text-muted-foreground">输入需求后，AI 会在这里输出思考过程和正文。</p>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {messages.map((msg, i) => (
-              <div key={`${msg.timestamp}-${i}`}>
-                {msg.role === "assistant" && msg.thinking ? (
-                  <div className="rounded-lg border border-border/40 bg-card/40 px-3 py-2">
-                    <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">思考过程</div>
-                    <Reasoning isStreaming={msg.thinkingStreaming === true}>
-                      <ReasoningTrigger />
-                      <ReasoningContent>{msg.thinking}</ReasoningContent>
-                    </Reasoning>
-                  </div>
-                ) : null}
-                <ChatMessage role={msg.role} content={msg.content} timestamp={msg.timestamp} theme={theme} />
-              </div>
-            ))}
-            {loading && !messages.some((item) => item.role === "assistant" && (item.thinkingStreaming || item.content.length > 0)) && (
-              <Message from="assistant">
-                <MessageContent>
-                  <Shimmer className="text-sm" duration={1.5}>{isZh ? "鎬濊€冧腑..." : "Thinking..."}</Shimmer>
-                </MessageContent>
-              </Message>
-            )}
-          </div>
+        {panelMode === "chat" && (
+          <ExecutionPanel executions={executionList} collapsed={executionCollapsed} onCollapsedChange={setExecutionCollapsed} />
         )}
       </div>
 
-      <div className="shrink-0 border-t border-border/30 p-3 bg-card/80">
-        <div className="rounded-lg border border-border/40 bg-secondary/20 px-3 py-2">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                onSend();
-              }
-            }}
-            rows={1}
-            placeholder={isZh ? "输入修改要求..." : "Enter request..."}
-            className="w-full resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground/50 max-h-[180px]"
-          />
-          <div className="mt-2 flex items-center justify-between gap-2">
-            <span className="text-[11px] text-muted-foreground/60">{canStop ? "运行中" : "可发送"}</span>
-            <button
-              type="button"
-              onClick={() => {
-                if (!activeSessionId) return;
-                if (canStop) {
-                  void stopMessage(activeSessionId);
-                  return;
-                }
-                onSend();
-              }}
-              disabled={!activeSessionId || (!canStop && !input.trim()) || stopping}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-30"
-            >
-              {canStop ? <Square size={12} fill="currentColor" /> : <ArrowUp size={14} />}
-            </button>
+      {panelMode === "chat" ? (
+        <>
+          <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 min-h-0">
+            {messages.length === 0 && !loading ? (
+              <div className="h-full flex items-center justify-center text-center">
+                <div className="space-y-3">
+                  <BotMessageSquare size={24} className="mx-auto text-muted-foreground/50" />
+                  <p className="text-sm text-muted-foreground">输入需求后，AI 会在这里输出思考过程和正文。</p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {messages.map((msg, i) => (
+                  <div key={`${msg.timestamp}-${i}`}>
+                    {msg.role === "assistant" && msg.thinking ? (
+                      <AssistantThinkingCard content={msg.thinking} isStreaming={msg.thinkingStreaming === true} />
+                    ) : null}
+                    <ChatMessage
+                      role={msg.role}
+                      content={msg.content}
+                      timestamp={msg.timestamp}
+                      theme={theme}
+                    />
+                  </div>
+                ))}
+                {loading && !messages.some((item) => item.role === "assistant" && (item.thinkingStreaming || item.content.length > 0)) && (
+                  <Message from="assistant">
+                    <AssistantOutputCard className="w-full">
+                      <Shimmer className="text-sm" duration={1.5}>{isZh ? "思考中..." : "Thinking..."}</Shimmer>
+                    </AssistantOutputCard>
+                  </Message>
+                )}
+              </div>
+            )}
           </div>
+
+          <div className="shrink-0 border-t border-border/30 p-3 bg-card/80">
+            <div className="relative rounded-lg border border-border/40 bg-secondary/20 px-3 py-2 pr-14 pb-14">
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    onSend();
+                  }
+                }}
+                rows={2}
+                placeholder={isZh ? "输入修改要求..." : "Enter request..."}
+                className="w-full resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground/50 max-h-[180px]"
+              />
+              <div
+                className="absolute bottom-2 right-2"
+                onMouseEnter={() => {
+                  if (hasDraftInput && quickActionsAvailable) openQuickMenu();
+                }}
+                onMouseLeave={() => {
+                  if (hasDraftInput && quickActionsAvailable) closeQuickMenu();
+                }}
+              >
+                <div className="relative">
+                  {quickMenuOpen && quickActionsAvailable && (
+                    <div
+                      className="chat-suspense-panel absolute right-0 bottom-full mb-2 w-48 rounded-xl border border-border/60 bg-popover/98 p-1 shadow-xl backdrop-blur-md"
+                      onMouseEnter={openQuickMenu}
+                      onMouseLeave={() => closeQuickMenu()}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => { void runQuickAction("write-next"); }}
+                        disabled={!quickActionsAvailable}
+                        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-popover-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
+                      >
+                        <Zap size={14} />{isZh ? "写下一章" : "Write next"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { void runQuickAction("audit"); }}
+                        disabled={!hasQuickActionChapter || !quickActionsAvailable}
+                        className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-popover-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <Search size={14} />{isZh ? "审计" : "Audit"}
+                        </span>
+                        {hasQuickActionChapter && (
+                          <span className="text-[11px] text-muted-foreground">
+                            {isZh ? `第${quickActionChapter}章` : `Ch ${quickActionChapter}`}
+                          </span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { void runQuickAction("rewrite"); }}
+                        disabled={!hasQuickActionChapter || !quickActionsAvailable}
+                        className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left text-xs text-popover-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-40"
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <RefreshCcw size={14} />{isZh ? "重写" : "Rewrite"}
+                        </span>
+                        {hasQuickActionChapter && (
+                          <span className="text-[11px] text-muted-foreground">
+                            {isZh ? `第${quickActionChapter}章` : `Ch ${quickActionChapter}`}
+                          </span>
+                        )}
+                      </button>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!activeSessionId) return;
+                      if (canStop) {
+                        void stopMessage(activeSessionId);
+                        return;
+                      }
+                      if (hasDraftInput) {
+                        setQuickMenuOpen(false);
+                        onSend();
+                        return;
+                      }
+                      setQuickMenuOpen((prev) => !prev);
+                    }}
+                    onMouseEnter={() => {
+                      if (hasDraftInput && quickActionsAvailable) openQuickMenu();
+                    }}
+                    onMouseLeave={() => closeQuickMenu()}
+                    onFocus={() => {
+                      if (hasDraftInput && quickActionsAvailable) openQuickMenu();
+                    }}
+                    onBlur={() => {
+                      if (hasDraftInput && quickActionsAvailable) closeQuickMenu();
+                    }}
+                    disabled={!activeSessionId || stopping}
+                    className="relative inline-flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg shadow-primary/20 transition-transform hover:scale-105 disabled:opacity-30"
+                    title={
+                      canStop
+                        ? (isZh ? "停止" : "Stop")
+                        : hasDraftInput
+                          ? (isZh ? "发送 / 快捷操作" : "Send / quick actions")
+                          : (isZh ? "快捷操作" : "Quick actions")
+                    }
+                    aria-label={
+                      canStop
+                        ? (isZh ? "停止" : "Stop")
+                        : hasDraftInput
+                          ? (isZh ? "发送 / 快捷操作" : "Send / quick actions")
+                          : (isZh ? "快捷操作" : "Quick actions")
+                    }
+                  >
+                    {hasDraftInput && quickActionsAvailable && !canStop && (
+                      <span className="pointer-events-none absolute inset-[-7px] rounded-full border border-primary/35 chat-suspense-pulse" />
+                    )}
+                    {hasDraftInput && quickActionsAvailable && !canStop && (
+                      <span className="pointer-events-none absolute inset-[1px] rounded-full bg-primary/10" />
+                    )}
+                    {canStop
+                      ? <Square size={12} fill="currentColor" />
+                      : hasDraftInput
+                        ? <ArrowUp size={15} />
+                        : <Sparkles size={15} />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-3 py-3 min-h-0">
+          <BookTaskPanel
+            bookId={bookId}
+            nextChapter={nextChapter}
+            targetChapters={targetChapters}
+            sse={sse}
+          />
         </div>
-      </div>
+      )}
     </aside>
   );
 }

@@ -319,15 +319,19 @@ export const MessageBranchPage = ({
   );
 };
 
-export type MessageResponseProps = ComponentProps<typeof Streamdown>;
+export type MessageResponseProps = ComponentProps<typeof Streamdown> & {
+  readonly size?: "sm" | "base";
+};
 
 const streamdownPlugins = { cjk, code, math, mermaid };
 
 export const MessageResponse = memo(
-  ({ className, ...props }: MessageResponseProps) => (
+  ({ className, size = "sm", ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn(
-        "size-full text-[16px] leading-[1.6] font-['SimSun','Songti_SC','STSong',serif] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-4",
+        size === "base"
+          ? "size-full text-[15px] leading-7 font-['SimSun','Songti_SC','STSong',serif] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-3.5"
+          : "size-full text-[16px] leading-[1.6] font-['SimSun','Songti_SC','STSong',serif] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-4",
         className
       )}
       plugins={streamdownPlugins}

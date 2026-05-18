@@ -1,3 +1,4 @@
+import { History, CheckCircle2 } from "lucide-react";
 import { SidebarCard } from "./SidebarCard";
 
 interface ChapterPlan {
@@ -34,13 +35,54 @@ function field(text: string | undefined | null): string {
   return value || "暂无内容";
 }
 
-export function ChapterPlanReader({ plan }: { readonly plan: ChapterPlan | null }) {
+export function ChapterPlanReader({
+  plan,
+  canEdit = false,
+  onOpenHistory,
+  onEditReview,
+  onApprove,
+}: {
+  readonly plan: ChapterPlan | null;
+  readonly canEdit?: boolean;
+  readonly onOpenHistory?: () => void;
+  readonly onEditReview?: () => void;
+  readonly onApprove?: () => void;
+}) {
   return (
     <SidebarCard title="分章设计">
       {!plan ? (
         <p className="text-xs text-muted-foreground">暂无分章设计</p>
       ) : (
         <div className="space-y-3 text-sm">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onEditReview}
+              disabled={!onEditReview || !canEdit}
+              className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 px-2 py-1 text-[11px] text-amber-500 hover:bg-amber-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <CheckCircle2 size={10} />
+              修改复核
+            </button>
+            <button
+              type="button"
+              onClick={onApprove}
+              disabled={!onApprove}
+              className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 px-2 py-1 text-[11px] text-emerald-500 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <CheckCircle2 size={10} />
+              通过
+            </button>
+            <button
+              type="button"
+              onClick={onOpenHistory}
+              disabled={!onOpenHistory}
+              className="inline-flex items-center gap-1 rounded-md border border-border/40 px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <History size={10} />
+              历史版本
+            </button>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] text-primary">第{plan.chapterNumber}章</span>
             <span className="rounded-full bg-secondary/60 px-2 py-0.5 text-[10px] text-muted-foreground">{statusLabel(plan.status)}</span>

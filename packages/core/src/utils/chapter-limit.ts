@@ -36,30 +36,28 @@ function parseChineseIntegerToken(token: string): number | null {
 export function extractChapterLimitFromOutline(outline: string): number | null {
   const lines = outline.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 
-  for (const line of lines) {
-    const totalMatch = line.match(/(?:^|[^A-Za-z])(?:共|总(?:章数|计)|章节总数|总章节数|total(?:\s+chapters?)?)(?:\s*[:：]?\s*)(\d+|[零〇一二三四五六七八九十两]+)\s*章?/i)
-      ?? line.match(/(?:chapter\s*(?:count|total)|total\s*chapters?)(?:\s*[:：]?\s*)(\d+|[零〇一二三四五六七八九十两]+)/i);
-    if (!totalMatch) continue;
-
-    const total = parseChineseIntegerToken(totalMatch[1] ?? "");
-    if (typeof total === "number" && total > 0) return total;
-  }
-
-  const rangePatterns = [
-    /(?:chapter\s*range|章节范围|章节区间|卷范围|volume range)(?:\s*[:：]?\s*)?(?:第\s*)?(\d+|[零〇一二三四五六七八九十两]+)\s*[-~–—至到]\s*(\d+|[零〇一二三四五六七八九十两]+)\s*(?:章|chapters?)?/i,
-    /(?:第\s*)?(\d+|[零〇一二三四五六七八九十两]+)\s*[-~–—至到]\s*(\d+|[零〇一二三四五六七八九十两]+)\s*(?:章|chapters?)?/i,
-  ];
+  const chapterMarkers = /(?:第\s*)?(\d+|[零〇一二三四五六七八九十两]+)\s*章(?:\s*[-~–—至到]\s*(?:第\s*)?(\d+|[零〇一二三四五六七八九十两]+)\s*章?)?/gi;
+  const chapterTotalPattern = /(?:总章数|章节总数|总章节数|total(?:\s+chapters?)?|chapter(?:\s+count|\s+total)?)(?:\s*[:：]?\s*)(\d+|[零〇一二三四五六七八九十两]+)(?:\s*章)?/i;
 
   let maxChapter: number | null = null;
   for (const line of lines) {
-    if (!/[章卷]|chapter|range|范围|区间/i.test(line)) continue;
-    for (const pattern of rangePatterns) {
-      const match = line.match(pattern);
-      if (!match) continue;
+    const totalMatch = line.match(chapterTotalPattern);
+    if (totalMatch) {
+      const total = parseChineseIntegerToken(totalMatch[1] ?? "");
+      if (typeof total === "number" && total > 0) return total;
+    }
 
+    let match: RegExpExecArray | null;
+    chapterMarkers.lastIndex = 0;
+    while ((match = chapterMarkers.exec(line)) !== null) {
+      const start = parseChineseIntegerToken(match[1] ?? "");
+      if (typeof start === "number" && start > 0) {
+        maxChapter = maxChapter === null ? start : Math.max(maxChapter, start);
+      }
       const end = parseChineseIntegerToken(match[2] ?? "");
-      if (typeof end !== "number" || end < 1) continue;
-      maxChapter = maxChapter === null ? end : Math.max(maxChapter, end);
+      if (typeof end === "number" && end > 0) {
+        maxChapter = maxChapter === null ? end : Math.max(maxChapter, end);
+      }
     }
   }
 

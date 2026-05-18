@@ -133,6 +133,77 @@ export interface RunStreamEvent {
   readonly error?: string;
 }
 
+// --- Book Tasks ---
+
+export type BookTaskType = "auto-write";
+
+export type BookTaskStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "stopping"
+  | "cancelled"
+  | "failed"
+  | "succeeded";
+
+export interface BookTaskCreatePayload {
+  readonly requestedChapters?: number;
+  readonly wordCount?: number;
+  readonly quickMode?: boolean;
+  readonly preferFastWriterModel?: boolean;
+  readonly service?: string;
+  readonly model?: string;
+}
+
+export interface BookTask {
+  readonly id: string;
+  readonly bookId: string;
+  readonly type: BookTaskType;
+  readonly title: string;
+  readonly status: BookTaskStatus;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly startedAt: string | null;
+  readonly finishedAt: string | null;
+  readonly stopRequestedAt: string | null;
+  readonly stoppedAt: string | null;
+  readonly requestedChapters: number;
+  readonly completedChapters: number;
+  readonly currentChapterNumber: number | null;
+  readonly nextChapterNumber: number | null;
+  readonly lastChapterNumber: number | null;
+  readonly options: {
+    readonly wordCount: number | null;
+    readonly quickMode: boolean;
+    readonly preferFastWriterModel: boolean;
+    readonly service: string | null;
+    readonly model: string | null;
+  };
+  readonly logs: ReadonlyArray<RunLogEntry>;
+  readonly result: unknown | null;
+  readonly error: string | null;
+}
+
+export interface BookTaskListResponse {
+  readonly tasks: ReadonlyArray<BookTask>;
+}
+
+export interface BookTaskDetailResponse {
+  readonly task: BookTask;
+}
+
+export interface BookTaskCreateResponse {
+  readonly task: BookTask;
+}
+
+export interface BookTaskStopResponse {
+  readonly task: BookTask;
+}
+
+export interface BookTaskResumeResponse {
+  readonly task: BookTask;
+}
+
 // --- API Error Response ---
 
 export interface ApiErrorResponse {

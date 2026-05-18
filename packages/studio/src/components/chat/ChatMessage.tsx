@@ -5,6 +5,7 @@ import {
   MessageContent,
   MessageResponse,
 } from "../ai-elements/message";
+import { AssistantOutputCard } from "./AssistantOutputCard";
 import { BookFormCard } from "./BookFormCard";
 import type { BookFormArgs } from "./BookFormCard";
 import {
@@ -213,6 +214,154 @@ function severityMeta(severity: AuditSeverity): { badge: string; text: string; d
   };
 }
 
+function AssistantErrorContent({ content }: { content: string }) {
+  return (
+    <AssistantOutputCard tone="error" className="text-sm text-destructive">
+      <div className="flex items-start gap-2">
+        <XCircle size={14} className="mt-0.5 shrink-0" />
+        <span>{content.replace(/^\u2717\s*/, "")}</span>
+      </div>
+    </AssistantOutputCard>
+  );
+}
+
+function AssistantAuditContent({
+  report,
+  issues,
+}: {
+  report: ParsedAuditReport;
+  issues: Readonly<Record<AuditSeverity, ReadonlyArray<AuditIssueItem>>>;
+}) {
+  return (
+    <AssistantOutputCard className="w-full min-w-0 space-y-2">
+      <div className="text-sm font-medium text-foreground">{report.statusLine}</div>
+      {report.scoreLine && (
+        <div className="text-xs text-muted-foreground">审计评分：{report.scoreLine}</div>
+      )}
+      {report.failureReason && (
+        <div className="text-xs text-muted-foreground">失败原因：{report.failureReason}</div>
+      )}
+      {report.summary && (
+        <div className="text-xs text-muted-foreground">
+          审计报告：{report.summary}
+        </div>
+      )}
+      {report.dimensionChecks && report.dimensionChecks.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs text-muted-foreground">维度核查：</div>
+          <ul className="space-y-1">
+            {report.dimensionChecks.map((item, index) => {
+              const statusText = item.status === "pass" ? "通过" : item.status === "warning" ? "警告" : "失败";
+              const statusClass = item.status === "pass"
+                ? "text-emerald-600 dark:text-emerald-400"
+                : item.status === "warning"
+                  ? "text-amber-600 dark:text-amber-400"
+                  : "text-destructive";
+              return (
+                <li key={`dimension-${index}`} className="text-xs leading-5 text-muted-foreground">
+                  <span className={cn("font-medium", statusClass)}>[{statusText}]</span>
+                  {" "}
+                  <span className="text-foreground/90">{item.dimension}</span>
+                  {item.evidence ? <span>：{item.evidence}</span> : null}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+      {report.issues.length === 0 ? (
+        <div className="text-xs text-muted-foreground">问题清单：无</div>
+      ) : (
+        <div className="space-y-2">
+          {(["critical", "warning", "info"] as const).map((severityKey) => {
+            const items = issues[severityKey] ?? [];
+            if (items.length === 0) return null;
+            const meta = severityMeta(severityKey);
+            return (
+              <section key={severityKey} className="space-y-1.5">
+                <div className={cn("text-xs font-medium", meta.text)}>{meta.label}</div>
+                <ul className="space-y-1.5">
+                  {items.map((issue, index) => (
+                    <li key={`${severityKey}-${index}`} className="flex items-start gap-2 rounded-lg border border-border/40 bg-background/40 px-2.5 py-2">
+                      <span className={cn("mt-1 inline-block h-1.5 w-1.5 rounded-full shrink-0", meta.dot)} />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <span className={cn("inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium", meta.badge)}>
+                          {meta.label}
+                        </span>
+                        <div className={cn("text-xs leading-5 break-words", meta.text)}>
+                          {issue.text}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </AssistantOutputCard>
+  );
+}
+
+function AssistantTextContent({
+  content,
+  repairCommand,
+  onQuickCommand,
+}: {
+  content: string;
+  repairCommand: string | null;
+  onQuickCommand?: (command: string) => void;
+}) {
+  return (
+    <AssistantOutputCard className="space-y-2">
+      <MessageResponse size="base">{content}</MessageResponse>
+      {repairCommand && onQuickCommand ? (
+        <button
+          type="button"
+          onClick={() => onQuickCommand(repairCommand)}
+          className="inline-flex items-center rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/15 transition-colors"
+        >
+          一键修复
+        </button>
+      ) : null}
+    </AssistantOutputCard>
+  );
+}
+
+function AssistantMessageBody({
+  content,
+  isError,
+  parsedAuditReport,
+  groupedAuditIssues,
+  repairCommand,
+  onQuickCommand,
+}: {
+  content: string;
+  isError: boolean;
+  parsedAuditReport: ParsedAuditReport | null;
+  groupedAuditIssues: Readonly<Record<AuditSeverity, ReadonlyArray<AuditIssueItem>>> | null;
+  repairCommand: string | null;
+  onQuickCommand?: (command: string) => void;
+}) {
+  if (isError) return <AssistantErrorContent content={content} />;
+  if (parsedAuditReport) {
+    return (
+      <AssistantAuditContent
+        report={parsedAuditReport}
+        issues={groupedAuditIssues ?? { critical: [], warning: [], info: [] }}
+      />
+    );
+  }
+  return (
+      <AssistantTextContent
+        content={content}
+        repairCommand={repairCommand}
+        onQuickCommand={onQuickCommand}
+      />
+  );
+}
+
 export interface ToolCall {
   readonly name: string;
   readonly arguments: Record<string, unknown>;
@@ -264,104 +413,27 @@ export function ChatMessage({
       }
     : null;
   const repairCommand = role === "assistant" ? extractRepairCommand(content) : null;
-  const canQuickRepair = Boolean(repairCommand && onQuickCommand);
 
   const hasBookForm = toolCall?.name === "create_book" && onArgsChange && onConfirm;
 
   return (
-    <Message from={role}>
-      <MessageContent>
-        {isUser ? (
+    <Message from={role} className={cn(role === "assistant" && "max-w-full")}>
+      {isUser ? (
+        <MessageContent>
           <div className="text-sm leading-relaxed">{content}</div>
-        ) : isError ? (
-          <div className="flex items-center gap-2 text-sm text-destructive">
-            <XCircle size={14} className="shrink-0" />
-            <span>{content.replace(/^\u2717\s*/, "")}</span>
-          </div>
-        ) : parsedAuditReport ? (
-          <div className="w-full min-w-0 space-y-2 rounded-xl border border-border/50 bg-card/40 p-3">
-            <div className="text-sm font-medium text-foreground">{parsedAuditReport.statusLine}</div>
-            {parsedAuditReport.scoreLine && (
-              <div className="text-xs text-muted-foreground">审计评分：{parsedAuditReport.scoreLine}</div>
-            )}
-            {parsedAuditReport.failureReason && (
-              <div className="text-xs text-muted-foreground">失败原因：{parsedAuditReport.failureReason}</div>
-            )}
-            {parsedAuditReport.summary && (
-              <div className="text-xs text-muted-foreground">
-                审计报告：{parsedAuditReport.summary}
-              </div>
-            )}
-            {parsedAuditReport.dimensionChecks && parsedAuditReport.dimensionChecks.length > 0 && (
-              <div className="space-y-1.5">
-                <div className="text-xs text-muted-foreground">维度核查：</div>
-                <ul className="space-y-1">
-                  {parsedAuditReport.dimensionChecks.map((item, index) => {
-                    const statusText = item.status === "pass" ? "通过" : item.status === "warning" ? "警告" : "失败";
-                    const statusClass = item.status === "pass"
-                      ? "text-emerald-600 dark:text-emerald-400"
-                      : item.status === "warning"
-                        ? "text-amber-600 dark:text-amber-400"
-                        : "text-destructive";
-                    return (
-                      <li key={`dimension-${index}`} className="text-xs leading-5 text-muted-foreground">
-                        <span className={cn("font-medium", statusClass)}>[{statusText}]</span>
-                        {" "}
-                        <span className="text-foreground/90">{item.dimension}</span>
-                        {item.evidence ? <span>：{item.evidence}</span> : null}
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            )}
-            {parsedAuditReport.issues.length === 0 ? (
-              <div className="text-xs text-muted-foreground">问题清单：无</div>
-            ) : (
-              <div className="space-y-2">
-                {(["critical", "warning", "info"] as const).map((severityKey) => {
-                  const items = groupedAuditIssues?.[severityKey] ?? [];
-                  if (items.length === 0) return null;
-                  const meta = severityMeta(severityKey);
-                  return (
-                    <section key={severityKey} className="space-y-1.5">
-                      <div className={cn("text-xs font-medium", meta.text)}>{meta.label}</div>
-                      <ul className="space-y-1.5">
-                        {items.map((issue, index) => (
-                          <li key={`${severityKey}-${index}`} className="flex items-start gap-2 rounded-lg border border-border/40 bg-background/40 px-2.5 py-2">
-                            <span className={cn("mt-1 inline-block h-1.5 w-1.5 rounded-full shrink-0", meta.dot)} />
-                            <div className="min-w-0 flex-1 space-y-1">
-                              <span className={cn("inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium", meta.badge)}>
-                                {meta.label}
-                              </span>
-                              <div className={cn("text-xs leading-5 break-words", meta.text)}>
-                                {issue.text}
-                              </div>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    </section>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="space-y-2">
-            <MessageResponse>{content}</MessageResponse>
-            {canQuickRepair && (
-              <button
-                type="button"
-                onClick={() => onQuickCommand?.(repairCommand!)}
-                className="inline-flex items-center rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary hover:bg-primary/15 transition-colors"
-              >
-                一键修复
-              </button>
-            )}
-          </div>
-        )}
-      </MessageContent>
+        </MessageContent>
+      ) : (
+        <div className="w-full min-w-0 space-y-2">
+          <AssistantMessageBody
+            content={content}
+            isError={isError}
+            parsedAuditReport={parsedAuditReport}
+            groupedAuditIssues={groupedAuditIssues}
+            repairCommand={repairCommand}
+            onQuickCommand={onQuickCommand}
+          />
+        </div>
+      )}
 
       {hasBookForm && (
         <BookFormCard

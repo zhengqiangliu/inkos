@@ -49,11 +49,12 @@ import {
   type LogSink,
   type LogEntry,
 } from "@actalk/inkos-core";
-import { access, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
+import { BookTaskController } from "./lib/book-task-controller.js";
 import { countChapterLengthByLanguage } from "../utils/chapter-length.js";
 import {
   AUDIT_PASS_SCORE_THRESHOLD,
@@ -95,6 +96,7 @@ const AGENT_LABELS: Record<string, string> = {
 const TOOL_LABELS: Record<string, string> = {
   read: "读取文件", edit: "编辑文件", grep: "搜索", ls: "列目录",
 };
+const CHAPTER_PLAN_HISTORY_FILE = "chapter-plans.history.json";
 const WRITE_STAGE_HEARTBEAT_MS = 3_000;
 const MAX_STAGE_SILENCE_MS = 15_000;
 
@@ -238,6 +240,19 @@ type ReviewEntry = "write-next" | "write-target" | "rewrite";
 interface NormalizedAuditIssue {
   readonly severity: AuditSeverity;
   readonly text: string;
+}
+
+interface ChapterPlanHistoryEntry {
+  readonly chapterNumber: number;
+  readonly version: number;
+  readonly action: string;
+  readonly savedAt: string;
+  readonly plan: Record<string, unknown>;
+}
+
+interface ChapterPlanHistoryStore {
+  readonly entries: ChapterPlanHistoryEntry[];
+  readonly updatedAt?: string;
 }
 
 function normalizeAuditSeverity(raw: unknown): AuditSeverity {
@@ -5368,6 +5383,27 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   }
 
+  const bookTaskController = new BookTaskController({
+    state,
+    loadCurrentProjectConfig,
+    buildPipelineConfig,
+    resolvePipelineClientFromSelection,
+    createPipeline: (config) => new PipelineRunner(config),
+    broadcast,
+    resolveWriteStageHeartbeatMs,
+  });
+  void (async () => {
+    try {
+      const currentConfig = await loadCurrentProjectConfig();
+      const bookIds = await state.listBooks();
+      for (const bookId of bookIds) {
+        await bookTaskController.recoverPendingTasks(bookId, currentConfig);
+      }
+    } catch (error) {
+      console.warn("[studio] book task recovery skipped:", error);
+    }
+  })();
+
   // --- Books ---
 
   app.get("/api/v1/books", async (c) => {
@@ -5652,6 +5688,50 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch {
       return c.json({ error: `Book "${id}" not found` }, 404);
     }
+  });
+
+  app.get("/api/v1/books/:id/tasks", async (c) => {
+    const id = c.req.param("id");
+    const tasks = await bookTaskController.list(id);
+    return c.json({ tasks });
+  });
+
+  app.post("/api/v1/books/:id/tasks", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json<{
+      requestedChapters?: number;
+      wordCount?: number;
+      quickMode?: boolean;
+      preferFastWriterModel?: boolean;
+      service?: string;
+      model?: string;
+    }>().catch(() => ({}));
+    const task = await bookTaskController.create(id, body);
+    return c.json({ task }, 201);
+  });
+
+  app.get("/api/v1/books/:id/tasks/:taskId", async (c) => {
+    const id = c.req.param("id");
+    const taskId = c.req.param("taskId");
+    const task = await bookTaskController.get(id, taskId);
+    if (!task) {
+      return c.json({ error: `Task "${taskId}" not found` }, 404);
+    }
+    return c.json({ task });
+  });
+
+  app.post("/api/v1/books/:id/tasks/:taskId/stop", async (c) => {
+    const id = c.req.param("id");
+    const taskId = c.req.param("taskId");
+    const task = await bookTaskController.stop(id, taskId);
+    return c.json({ task });
+  });
+
+  app.post("/api/v1/books/:id/tasks/:taskId/resume", async (c) => {
+    const id = c.req.param("id");
+    const taskId = c.req.param("taskId");
+    const task = await bookTaskController.resume(id, taskId);
+    return c.json({ task });
   });
 
   // --- Actions ---
@@ -11659,28 +11739,29 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   // --- Helpers ---
 
-  async function readOutlineMaxChapters(bookDir: string): Promise<number | null> {
-    try {
-      const outline = await readVolumeMap(bookDir, "");
-      return extractChapterLimitFromOutline(outline);
-    } catch {
-      return null;
-    }
-  }
-
   async function readRequiredVolumeOutline(bookDir: string): Promise<{
     readonly volumeOutline: string;
-    readonly outlineChapterLimit: number | null;
   } | null> {
     const volumeOutline = (await readVolumeMap(bookDir, "")).trim();
     if (!volumeOutline) return null;
-    return {
-      volumeOutline,
-      outlineChapterLimit: extractChapterLimitFromOutline(volumeOutline),
-    };
+    return { volumeOutline };
   }
 
-  async function createDesignAgent(): Promise<ChapterDesignAgent> {
+  function resolveChapterLimitFromBook(book: { targetChapters?: number } | null | undefined): number | null {
+    const raw = Number(book?.targetChapters);
+    if (!Number.isFinite(raw) || raw < 1) return null;
+    return Math.trunc(raw);
+  }
+
+  async function chapterHasContent(bookDir: string, chapterNumber: number): Promise<boolean> {
+    const chaptersDir = join(bookDir, "chapters");
+    const chapterFiles = await readdir(chaptersDir).catch(() => [] as string[]);
+    return chapterFiles.some((file) => parseChapterFileNumber(file) === chapterNumber);
+  }
+
+  async function createDesignAgent(options?: {
+    readonly onTextDelta?: (text: string) => void;
+  }): Promise<ChapterDesignAgent> {
     const config = await loadCurrentProjectConfig();
     const client = createLLMClient(config.llm);
     const logger = createLogger({ tag: "chapter-design", sinks: [consoleSink, sseSink] });
@@ -11689,6 +11770,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       model: config.llm.model,
       projectRoot: root,
       logger,
+      ...(options?.onTextDelta ? { onTextDelta: options.onTextDelta } : {}),
     };
     return new ChapterDesignAgent(ctx);
   }
@@ -11717,14 +11799,186 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return [];
   }
 
+  function chapterPlanHistoryPath(bookDir: string): string {
+    return join(bookDir, "story", "state", CHAPTER_PLAN_HISTORY_FILE);
+  }
+
+  function normalizeChapterPlanVersion(raw: unknown): number {
+    const version = Number(raw);
+    if (!Number.isFinite(version) || version < 1) return 1;
+    return Math.trunc(version);
+  }
+
+  function cloneChapterPlanSnapshot(plan: unknown): Record<string, unknown> {
+    if (!plan || typeof plan !== "object") return {};
+    return structuredClone(plan) as Record<string, unknown>;
+  }
+
+  function normalizeChapterPlanHistoryEntry(raw: unknown): ChapterPlanHistoryEntry | null {
+    if (!raw || typeof raw !== "object") return null;
+    const payload = raw as Partial<ChapterPlanHistoryEntry> & { plan?: unknown };
+    const plan = payload.plan && typeof payload.plan === "object" ? payload.plan as Record<string, unknown> : null;
+    const chapterNumber = Number(payload.chapterNumber ?? plan?.chapterNumber ?? NaN);
+    if (!Number.isFinite(chapterNumber) || chapterNumber < 1 || !plan) return null;
+    return {
+      chapterNumber: Math.trunc(chapterNumber),
+      version: normalizeChapterPlanVersion(payload.version ?? plan.version),
+      action: typeof payload.action === "string" && payload.action.trim() ? payload.action.trim() : "manual",
+      savedAt: typeof payload.savedAt === "string" && payload.savedAt.trim() ? payload.savedAt.trim() : new Date().toISOString(),
+      plan,
+    };
+  }
+
+  function loadChapterPlanHistoryJson(raw: string): ChapterPlanHistoryStore {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return {
+        entries: parsed.map((item) => normalizeChapterPlanHistoryEntry(item)).filter((item): item is ChapterPlanHistoryEntry => item !== null),
+      };
+    }
+    if (!parsed || typeof parsed !== "object") return { entries: [] };
+    const payload = parsed as { entries?: unknown; updatedAt?: unknown };
+    const entries = Array.isArray(payload.entries)
+      ? payload.entries.map((item) => normalizeChapterPlanHistoryEntry(item)).filter((item): item is ChapterPlanHistoryEntry => item !== null)
+      : [];
+    return {
+      entries,
+      ...(typeof payload.updatedAt === "string" && payload.updatedAt.trim() ? { updatedAt: payload.updatedAt.trim() } : {}),
+    };
+  }
+
+  async function readChapterPlanHistoryStore(historyPath: string): Promise<ChapterPlanHistoryStore> {
+    try {
+      const raw = await readFile(historyPath, "utf-8");
+      return loadChapterPlanHistoryJson(raw);
+    } catch {
+      return { entries: [] };
+    }
+  }
+
+  function summarizeChapterPlanHistoryEntry(entry: ChapterPlanHistoryEntry): {
+    chapterNumber: number;
+    version: number;
+    action: string;
+    chapterName: string;
+    status: string;
+    source: string;
+    updatedAt: string;
+    lockedFields?: ReadonlyArray<string>;
+    driftFlags?: ReadonlyArray<{ code: string; message: string }>;
+    needsReview?: boolean;
+  } {
+    const plan = entry.plan as {
+      chapterName?: unknown;
+      status?: unknown;
+      source?: unknown;
+      updatedAt?: unknown;
+      lockedFields?: unknown;
+      driftFlags?: unknown;
+      needsReview?: unknown;
+    };
+    return {
+      chapterNumber: entry.chapterNumber,
+      version: entry.version,
+      action: entry.action,
+      chapterName: typeof plan.chapterName === "string" ? plan.chapterName : "",
+      status: typeof plan.status === "string" ? plan.status : "planned",
+      source: typeof plan.source === "string" ? plan.source : "auto",
+      updatedAt: typeof plan.updatedAt === "string" ? plan.updatedAt : entry.savedAt,
+      ...(Array.isArray(plan.lockedFields) ? { lockedFields: plan.lockedFields.filter((item): item is string => typeof item === "string") } : {}),
+      ...(Array.isArray(plan.driftFlags)
+        ? { driftFlags: plan.driftFlags.filter((item): item is { code: string; message: string } => !!item && typeof item === "object") as Array<{ code: string; message: string }> }
+        : {}),
+      ...(typeof plan.needsReview === "boolean" ? { needsReview: plan.needsReview } : {}),
+    };
+  }
+
+  function dedupeChapterPlanHistoryEntries(entries: ReadonlyArray<ChapterPlanHistoryEntry>): ChapterPlanHistoryEntry[] {
+    const map = new Map<string, ChapterPlanHistoryEntry>();
+    for (const entry of entries) {
+      const key = `${entry.chapterNumber}:${entry.version}`;
+      const existing = map.get(key);
+      if (!existing || existing.savedAt <= entry.savedAt) {
+        map.set(key, entry);
+      }
+    }
+    return [...map.values()].sort((left, right) => {
+      if (left.chapterNumber !== right.chapterNumber) return left.chapterNumber - right.chapterNumber;
+      if (left.version !== right.version) return left.version - right.version;
+      return left.savedAt.localeCompare(right.savedAt);
+    });
+  }
+
+  async function readChapterPlanHistoryEntries(bookDir: string, chapterNumber: number, currentPlan?: Record<string, unknown> | null): Promise<ChapterPlanHistoryEntry[]> {
+    const historyPath = chapterPlanHistoryPath(bookDir);
+    const store = await readChapterPlanHistoryStore(historyPath);
+    const entries = store.entries.filter((entry) => entry.chapterNumber === chapterNumber);
+    if (currentPlan && Number.isFinite(Number(currentPlan.chapterNumber)) && Number(currentPlan.chapterNumber) === chapterNumber) {
+      const version = normalizeChapterPlanVersion((currentPlan as { version?: unknown }).version);
+      entries.push({
+        chapterNumber,
+        version,
+        action: "current",
+        savedAt: typeof currentPlan.updatedAt === "string" ? currentPlan.updatedAt : new Date().toISOString(),
+        plan: cloneChapterPlanSnapshot(currentPlan),
+      });
+    }
+    return dedupeChapterPlanHistoryEntries(entries);
+  }
+
+  async function persistChapterPlansWithHistory(args: {
+    readonly bookDir: string;
+    readonly plansPath: string;
+    readonly collection?: Record<string, unknown>;
+    readonly plans: ReadonlyArray<Record<string, unknown>>;
+    readonly historyEntries?: ReadonlyArray<ChapterPlanHistoryEntry>;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await mkdir(join(args.bookDir, "story", "state"), { recursive: true });
+    await writeFile(
+      args.plansPath,
+      JSON.stringify({
+        ...(args.collection ?? {}),
+        plans: args.plans,
+        updatedAt: now,
+      }, null, 2),
+      "utf-8",
+    );
+    if (!args.historyEntries || args.historyEntries.length === 0) return;
+    const historyPath = chapterPlanHistoryPath(args.bookDir);
+    const historyStore = await readChapterPlanHistoryStore(historyPath);
+    historyStore.entries.push(...args.historyEntries);
+    await writeFile(
+      historyPath,
+      JSON.stringify({
+        entries: dedupeChapterPlanHistoryEntries(historyStore.entries),
+        updatedAt: now,
+      }, null, 2),
+      "utf-8",
+    );
+  }
+
+  async function readCurrentChapterPlan(bookDir: string, chapterNumber: number): Promise<Record<string, unknown> | null> {
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const { plans } = loadPlansJson(raw);
+      const found = plans.find((plan: any) => Number(plan.chapterNumber) === chapterNumber);
+      return found && typeof found === "object" ? cloneChapterPlanSnapshot(found) : null;
+    } catch {
+      return null;
+    }
+  }
+
   // --- Chapter Plans ---
 
   app.get("/api/v1/books/:id/chapter-plans", async (c) => {
     const id = c.req.param("id");
     const bookDir = state.bookDir(id);
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
-    const outlineMax = await readOutlineMaxChapters(bookDir);
-    await trimPlansBeyondLimit(plansPath, outlineMax);
+    const book = await state.loadBookConfig(id).catch(() => null);
+    const chapterLimit = resolveChapterLimitFromBook(book);
+    await trimPlansBeyondLimit(plansPath, chapterLimit);
     try {
       const raw = await readFile(plansPath, "utf-8");
       const { plans } = loadPlansJson(raw);
@@ -11741,17 +11995,23 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({ error: "startChapter and count are required" }, 400);
     }
     const bookDir = state.bookDir(id);
+    let book;
+    try {
+      book = await state.loadBookConfig(id);
+    } catch (e) {
+      return c.json({ error: `Book not found: ${e}` }, 404);
+    }
+    const chapterLimit = resolveChapterLimitFromBook(book);
+    if (chapterLimit == null) {
+      return c.json({ error: "book.json 缺少 targetChapters，无法进行分章设计。" }, 400);
+    }
     const endChapter = startChapter + count - 1;
+    const effectiveEndChapter = Math.min(endChapter, chapterLimit);
 
     const outlineData = await readRequiredVolumeOutline(bookDir);
     if (!outlineData) {
       return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
     }
-    if (outlineData.outlineChapterLimit == null) {
-      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
-    }
-    const chapterLimit = outlineData.outlineChapterLimit;
-    const effectiveEndChapter = Math.min(endChapter, chapterLimit);
     if (startChapter > chapterLimit) {
       return c.json({
         startChapter,
@@ -11787,14 +12047,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     // Build per-chapter status
     const chapters = [];
     let hasExistingPlan = false;
+    let hasConflict = false;
     for (let ch = startChapter; ch <= effectiveEndChapter; ch++) {
       const plan = existingPlanMap.get(ch);
       const hasPlan = !!plan;
       if (hasPlan) hasExistingPlan = true;
+      const hasContent = existingChapterNumbers.has(ch);
+      if (hasContent) hasConflict = true;
       chapters.push({
         chapterNumber: ch,
         hasPlan,
-        hasContent: existingChapterNumbers.has(ch),
+        hasContent,
         status: plan?.status ?? null,
       });
     }
@@ -11804,7 +12067,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       endChapter: effectiveEndChapter,
       count: effectiveCount,
       chapters,
-      hasConflict: false,
+      hasConflict,
       hasExistingPlan,
     });
   });
@@ -11822,14 +12085,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       return c.json({ error: `Book not found: ${e}` }, 404);
     }
+    const targetChapters = resolveChapterLimitFromBook(book);
+    if (targetChapters == null) {
+      return c.json({ error: "book.json 缺少 targetChapters，无法进行分章设计。" }, 400);
+    }
     const outlineData = await readRequiredVolumeOutline(bookDir);
     if (!outlineData) {
       return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
     }
-    if (outlineData.outlineChapterLimit == null) {
-      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
-    }
-    const targetChapters = outlineData.outlineChapterLimit;
 
     // Trim excess plans beyond outline and load
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
@@ -11851,7 +12114,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     // Validate range against outline and clamp if needed
     const endChapter = startChapter + chapterCount - 1;
     if (startChapter > targetChapters) {
-      return c.json({ error: `起始章节 ${startChapter} 超出卷纲规划章数 (${targetChapters}章)` }, 400);
+      return c.json({ error: `起始章节 ${startChapter} 超出 book.json 总章数 (${targetChapters}章)` }, 400);
     }
     const clampedEnd = Math.min(endChapter, targetChapters);
     const clampedCount = clampedEnd - startChapter + 1;
@@ -11891,13 +12154,45 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       // Merge with existing plans and save
       const merged = [...existingPlans];
+      const historyEntries: ChapterPlanHistoryEntry[] = [];
+      const now = new Date().toISOString();
       for (const plan of plans) {
         const idx = merged.findIndex((p: any) => p.chapterNumber === plan.chapterNumber);
-        if (idx >= 0) merged[idx] = plan;
-        else merged.push(plan);
+        const base = idx >= 0 ? merged[idx] : null;
+        const nextVersion = base
+          ? normalizeChapterPlanVersion((base as { version?: unknown }).version) + 1
+          : normalizeChapterPlanVersion(plan.version);
+        const nextPlan = base
+          ? {
+              ...base,
+              ...plan,
+              chapterNumber: plan.chapterNumber,
+              version: nextVersion,
+              updatedAt: now,
+            }
+          : {
+              ...plan,
+              version: nextVersion,
+              createdAt: now,
+              updatedAt: now,
+            };
+        if (idx >= 0) merged[idx] = nextPlan;
+        else merged.push(nextPlan);
+        historyEntries.push({
+          chapterNumber: plan.chapterNumber,
+          version: nextVersion,
+          action: base ? "generate-replace" : "generate",
+          savedAt: now,
+          plan: cloneChapterPlanSnapshot(nextPlan),
+        });
       }
       merged.sort((a: any, b: any) => a.chapterNumber - b.chapterNumber);
-      await writeFile(plansPath, JSON.stringify({ plans: merged, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+      await persistChapterPlansWithHistory({
+        bookDir,
+        plansPath,
+        plans: merged,
+        historyEntries,
+      });
 
       return c.json({ ok: true, successChapters: plans.map((p) => p.chapterNumber) });
     } catch (e) {
@@ -11915,15 +12210,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       return c.json({ error: `Book not found: ${e}` }, 404);
     }
+    const chapterLimit = resolveChapterLimitFromBook(book);
+    if (chapterLimit == null) {
+      return c.json({ error: "book.json 缺少 targetChapters，无法进行分章设计。" }, 400);
+    }
 
     const outlineData = await readRequiredVolumeOutline(bookDir);
     if (!outlineData) {
       return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
     }
-    if (outlineData.outlineChapterLimit == null) {
-      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
-    }
-    const chapterLimit = outlineData.outlineChapterLimit;
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
     const removedChapters = await trimPlansBeyondLimit(plansPath, chapterLimit);
 
@@ -11947,14 +12242,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       return c.json({ error: `Book not found: ${e}` }, 404);
     }
+    const chapterLimit = resolveChapterLimitFromBook(book);
+    if (chapterLimit == null) {
+      return c.json({ error: "book.json 缺少 targetChapters，无法进行分章设计。" }, 400);
+    }
     const outlineData = await readRequiredVolumeOutline(bookDir);
     if (!outlineData) {
       return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
     }
-    if (outlineData.outlineChapterLimit == null) {
-      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
-    }
-    const chapterLimit = outlineData.outlineChapterLimit;
     const startChapterRaw = Number(body.startChapter);
     const endChapterRaw = Number(body.endChapter);
     const startChapter = Number.isFinite(startChapterRaw) ? Math.max(1, Math.trunc(startChapterRaw)) : 1;
@@ -12027,13 +12322,51 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     // Merge and save
     const merged = [...existingPlans];
+    const historyEntries: ChapterPlanHistoryEntry[] = [];
+    const now = new Date().toISOString();
     for (const plan of allPlans) {
       const idx = merged.findIndex((p: any) => p.chapterNumber === plan.chapterNumber);
-      if (idx >= 0) merged[idx] = plan;
-      else merged.push(plan);
+      const nextPlan = {
+        ...plan,
+        version: normalizeChapterPlanVersion(plan.version),
+        createdAt: now,
+        updatedAt: now,
+      };
+      if (idx >= 0) {
+        const base = merged[idx];
+        const nextVersion = normalizeChapterPlanVersion((base as { version?: unknown }).version) + 1;
+        merged[idx] = {
+          ...base,
+          ...nextPlan,
+          chapterNumber: plan.chapterNumber,
+          version: nextVersion,
+          updatedAt: now,
+        };
+        historyEntries.push({
+          chapterNumber: plan.chapterNumber,
+          version: nextVersion,
+          action: "fill-missing",
+          savedAt: now,
+          plan: cloneChapterPlanSnapshot(merged[idx]),
+        });
+      } else {
+        merged.push(nextPlan);
+        historyEntries.push({
+          chapterNumber: plan.chapterNumber,
+          version: nextPlan.version,
+          action: "fill-missing",
+          savedAt: now,
+          plan: cloneChapterPlanSnapshot(nextPlan),
+        });
+      }
     }
     merged.sort((a: any, b: any) => a.chapterNumber - b.chapterNumber);
-    await writeFile(plansPath, JSON.stringify({ plans: merged, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+    await persistChapterPlansWithHistory({
+      bookDir,
+      plansPath,
+      plans: merged,
+      historyEntries,
+    });
 
     return c.json({
       ok: failedChapters.length === 0,
@@ -12055,14 +12388,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     } catch (e) {
       return c.json({ error: `Book not found: ${e}` }, 404);
     }
+    const chapterLimit = resolveChapterLimitFromBook(book);
+    if (chapterLimit == null) {
+      return c.json({ error: "book.json 缺少 targetChapters，无法进行分章设计。" }, 400);
+    }
     const outlineData = await readRequiredVolumeOutline(bookDir);
     if (!outlineData) {
       return c.json({ error: "卷纲规划缺失：请先提供 story/outline/volume_map.md 或 legacy story/volume_outline.md。" }, 400);
     }
-    if (outlineData.outlineChapterLimit == null) {
-      return c.json({ error: "卷纲规划缺少总章数或章节范围，无法进行分章设计。" }, 400);
-    }
-    const chapterLimit = outlineData.outlineChapterLimit;
     const startChapterRaw = Number(body.startChapter);
     const endChapterRaw = Number(body.endChapter);
     const startChapter = Number.isFinite(startChapterRaw) ? Math.max(1, Math.trunc(startChapterRaw)) : 1;
@@ -12137,6 +12470,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     // Merge and save
     const merged = [...existingPlans];
+    const historyEntries: ChapterPlanHistoryEntry[] = [];
+    const now = new Date().toISOString();
     for (const plan of allPlans) {
       const idx = merged.findIndex((p: any) => p.chapterNumber === plan.chapterNumber);
       const base = idx >= 0 ? merged[idx] : existingPlanMap.get(plan.chapterNumber) ?? null;
@@ -12147,15 +12482,32 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             chapterNumber: plan.chapterNumber,
             status: "backfilled",
             source: plan.source ?? base.source ?? "inferred_from_text",
-            version: (base.version ?? 0) + 1,
-            updatedAt: new Date().toISOString(),
+            version: normalizeChapterPlanVersion((base as { version?: unknown }).version) + 1,
+            updatedAt: now,
           }
-        : plan;
+        : {
+            ...plan,
+            version: normalizeChapterPlanVersion(plan.version),
+            createdAt: now,
+            updatedAt: now,
+          };
       if (idx >= 0) merged[idx] = nextPlan;
       else merged.push(nextPlan);
+      historyEntries.push({
+        chapterNumber: plan.chapterNumber,
+        version: normalizeChapterPlanVersion((nextPlan as { version?: unknown }).version),
+        action: "backfill",
+        savedAt: now,
+        plan: cloneChapterPlanSnapshot(nextPlan),
+      });
     }
     merged.sort((a: any, b: any) => a.chapterNumber - b.chapterNumber);
-    await writeFile(plansPath, JSON.stringify({ plans: merged, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+    await persistChapterPlansWithHistory({
+      bookDir,
+      plansPath,
+      plans: merged,
+      historyEntries,
+    });
 
     return c.json({
       ok: failedChapters.length === 0,
@@ -12170,20 +12522,48 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const num = Number(c.req.param("num"));
     const body = await c.req.json();
     const bookDir = state.bookDir(id);
+    if (await chapterHasContent(bookDir, num)) {
+      return c.json({ error: "该章已有正文，不允许手工修改分章设计。" }, 400);
+    }
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
     try {
-      const raw = await readFile(plansPath, "utf-8");
-      const data = JSON.parse(raw);
+      const raw = await readFile(plansPath, "utf-8").catch(() => "");
+      const data = raw.trim() ? JSON.parse(raw) : {};
       const plans = Array.isArray(data.plans) ? data.plans : [];
       const idx = plans.findIndex((p: any) => p.chapterNumber === num);
-      const updated = { ...body, chapterNumber: num, updatedAt: new Date().toISOString() };
+      const now = new Date().toISOString();
+      const currentVersion = idx >= 0 ? normalizeChapterPlanVersion(plans[idx]?.version) : 0;
+      const nextVersion = currentVersion + 1;
+      const saveSource = typeof body.source === "string" && body.source.trim() ? body.source.trim() : "manual";
+      const updated = {
+        ...body,
+        chapterNumber: num,
+        version: nextVersion,
+        status: "planned",
+        source: saveSource,
+        updatedAt: now,
+        ...(typeof body.needsReview === "boolean" ? {} : { needsReview: true }),
+      };
+      const nextPlan = idx >= 0
+        ? { ...plans[idx], ...updated }
+        : { ...updated, createdAt: now };
       if (idx >= 0) {
-        plans[idx] = { ...plans[idx], ...updated };
+        plans[idx] = nextPlan;
       } else {
-        updated.createdAt = new Date().toISOString();
-        plans.push(updated);
+        plans.push(nextPlan);
       }
-      await writeFile(plansPath, JSON.stringify({ plans }, null, 2), "utf-8");
+      await persistChapterPlansWithHistory({
+        bookDir,
+        plansPath,
+        plans,
+        historyEntries: [{
+          chapterNumber: num,
+          version: nextVersion,
+          action: saveSource === "ai" ? "ai" : "manual",
+          savedAt: now,
+          plan: cloneChapterPlanSnapshot(nextPlan),
+        }],
+      });
 
       // Sync chapter title if chapterName changed and a chapter body exists
       const newTitle = typeof body.chapterName === "string" ? body.chapterName.trim() : "";
@@ -12246,13 +12626,33 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const bookDir = state.bookDir(id);
     const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
     try {
-      const raw = await readFile(plansPath, "utf-8");
-      const data = JSON.parse(raw);
+      const raw = await readFile(plansPath, "utf-8").catch(() => "");
+      const data = raw.trim() ? JSON.parse(raw) : {};
       const plans = Array.isArray(data.plans) ? data.plans : [];
       const idx = plans.findIndex((p: any) => p.chapterNumber === num);
       if (idx < 0) return c.json({ error: "Chapter plan not found" }, 404);
-      plans[idx] = { ...plans[idx], status: "approved", updatedAt: new Date().toISOString() };
-      await writeFile(plansPath, JSON.stringify({ plans }, null, 2), "utf-8");
+      const now = new Date().toISOString();
+      const currentVersion = normalizeChapterPlanVersion(plans[idx]?.version);
+      const nextPlan = {
+        ...plans[idx],
+        status: "approved",
+        needsReview: false,
+        version: currentVersion + 1,
+        updatedAt: now,
+      };
+      plans[idx] = nextPlan;
+      await persistChapterPlansWithHistory({
+        bookDir,
+        plansPath,
+        plans,
+        historyEntries: [{
+          chapterNumber: num,
+          version: nextPlan.version,
+          action: "approve",
+          savedAt: now,
+          plan: cloneChapterPlanSnapshot(nextPlan),
+        }],
+      });
       return c.json({ ok: true });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
@@ -12299,19 +12699,167 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   });
 
   app.post("/api/v1/books/:id/chapter-plans/:num/optimize", async (c) => {
-    return c.json({ error: "Not implemented: AI optimization requires agent" }, 501);
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const bookDir = state.bookDir(id);
+    const body = (await c.req.json().catch(() => ({}))) as {
+      instruction?: string;
+      currentPlan?: Record<string, unknown>;
+    };
+    if (await chapterHasContent(bookDir, num)) {
+      return c.json({ error: "该章已有正文，不允许 AI 修改分章设计。" }, 400);
+    }
+    const instruction = typeof body.instruction === "string" ? body.instruction.trim() : "";
+    if (!instruction) {
+      return c.json({ error: "instruction is required" }, 400);
+    }
+    const savedPlan = await readCurrentChapterPlan(bookDir, num);
+    const requestedPlan = body.currentPlan && typeof body.currentPlan === "object"
+      ? body.currentPlan
+      : null;
+    const currentPlan: Record<string, unknown> = {
+      ...(savedPlan ?? {}),
+      ...(requestedPlan ?? {}),
+      chapterNumber: num,
+    };
+    const basePlan = {
+      chapterName: typeof currentPlan["chapterName"] === "string" ? currentPlan["chapterName"] : "",
+      highlight: typeof currentPlan["highlight"] === "string" ? currentPlan["highlight"] : "",
+      coreConflict: typeof currentPlan["coreConflict"] === "string" ? currentPlan["coreConflict"] : "",
+      plotAndConflict: typeof currentPlan["plotAndConflict"] === "string" ? currentPlan["plotAndConflict"] : "",
+      emotionalTone: typeof currentPlan["emotionalTone"] === "string" ? currentPlan["emotionalTone"] : "",
+      endingHook: typeof currentPlan["endingHook"] === "string" ? currentPlan["endingHook"] : "",
+    };
+    broadcast("agent:start", {
+      bookId: id,
+      chapterNumber: num,
+      mode: "chapter-plan-optimize",
+    });
+    broadcast("thinking:start", {
+      bookId: id,
+      chapterNumber: num,
+      mode: "chapter-plan-optimize",
+    });
+    try {
+      const agent = await createDesignAgent({
+        onTextDelta: (text) => {
+          broadcast("thinking:delta", {
+            bookId: id,
+            chapterNumber: num,
+            mode: "chapter-plan-optimize",
+            text,
+          });
+        },
+      });
+      const optimized = await agent.optimizePlan({
+        chapterNumber: num,
+        instruction,
+        currentPlan: basePlan,
+      });
+      const merged = {
+        ...currentPlan,
+        ...optimized,
+        chapterNumber: num,
+      };
+      broadcast("thinking:end", {
+        bookId: id,
+        chapterNumber: num,
+        mode: "chapter-plan-optimize",
+      });
+      broadcast("agent:complete", {
+        bookId: id,
+        chapterNumber: num,
+        mode: "chapter-plan-optimize",
+      });
+      return c.json({ content: JSON.stringify(merged) });
+    } catch (e) {
+      broadcast("thinking:end", {
+        bookId: id,
+        chapterNumber: num,
+        mode: "chapter-plan-optimize",
+      });
+      broadcast("agent:error", {
+        bookId: id,
+        chapterNumber: num,
+        mode: "chapter-plan-optimize",
+        error: String(e),
+      });
+      return c.json({ error: `AI优化失败: ${e}` }, 500);
+    }
   });
 
   app.get("/api/v1/books/:id/chapter-plans/:num/history", async (c) => {
-    return c.json({ versions: [] });
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const bookDir = state.bookDir(id);
+    const currentPlan = await readCurrentChapterPlan(bookDir, num);
+    const history = await readChapterPlanHistoryEntries(bookDir, num, currentPlan);
+    return c.json({ history: history.map((entry) => summarizeChapterPlanHistoryEntry(entry)) });
   });
 
   app.get("/api/v1/books/:id/chapter-plans/:num/diff", async (c) => {
-    return c.json({ left: null, right: null, diff: null });
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const fromVersion = Number(c.req.query("fromVersion"));
+    const toVersion = Number(c.req.query("toVersion"));
+    const bookDir = state.bookDir(id);
+    if (!Number.isFinite(fromVersion) || !Number.isFinite(toVersion) || fromVersion < 1 || toVersion < 1) {
+      return c.json({ error: "fromVersion and toVersion are required" }, 400);
+    }
+    const currentPlan = await readCurrentChapterPlan(bookDir, num);
+    const history = await readChapterPlanHistoryEntries(bookDir, num, currentPlan);
+    const from = history.find((entry) => entry.version === Math.trunc(fromVersion));
+    const to = history.find((entry) => entry.version === Math.trunc(toVersion));
+    if (!from || !to) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const fromPlan = from.plan as Record<string, unknown>;
+    const toPlan = to.plan as Record<string, unknown>;
+    const fields = new Set([...Object.keys(fromPlan), ...Object.keys(toPlan)]);
+    const changedFields = [...fields].filter((field) => JSON.stringify(fromPlan[field]) !== JSON.stringify(toPlan[field]));
+    return c.json({
+      fromVersion: from.version,
+      toVersion: to.version,
+      changedFields,
+      from: fromPlan,
+      to: toPlan,
+    });
   });
 
   app.post("/api/v1/books/:id/chapter-plans/:num/rollback", async (c) => {
-    return c.json({ error: "Not implemented" }, 501);
+    const id = c.req.param("id");
+    const num = Number(c.req.param("num"));
+    const body = await c.req.json<{ targetVersion?: number }>().catch(() => ({ targetVersion: undefined }));
+    const targetVersion = Number(body.targetVersion);
+    if (!Number.isFinite(targetVersion) || targetVersion < 1) {
+      return c.json({ error: "targetVersion is required" }, 400);
+    }
+    const bookDir = state.bookDir(id);
+    const plansPath = join(bookDir, "story", "state", "chapter-plans.json");
+    const currentPlan = await readCurrentChapterPlan(bookDir, num);
+    const history = await readChapterPlanHistoryEntries(bookDir, num, currentPlan);
+    const target = history.find((entry) => entry.version === Math.trunc(targetVersion));
+    if (!target) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    try {
+      const raw = await readFile(plansPath, "utf-8");
+      const data = JSON.parse(raw);
+      const plans = Array.isArray(data.plans) ? data.plans : [];
+      const idx = plans.findIndex((p: any) => Number(p.chapterNumber) === num);
+      if (idx < 0) return c.json({ error: "Chapter plan not found" }, 404);
+      const restored = {
+        ...cloneChapterPlanSnapshot(target.plan),
+        chapterNumber: num,
+        version: target.version,
+        updatedAt: new Date().toISOString(),
+      };
+      plans[idx] = restored;
+      await writeFile(plansPath, JSON.stringify({ ...data, plans, updatedAt: new Date().toISOString() }, null, 2), "utf-8");
+      return c.json({ ok: true, plan: restored });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
   });
 
   // --- Radar Scan ---

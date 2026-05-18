@@ -7,9 +7,10 @@ import { useColors } from "../hooks/use-colors";
 import { chatSelectors, useChatStore } from "../store/chat";
 import { useServiceStore } from "../store/service";
 import { ChatMessage } from "../components/chat/ChatMessage";
-import { Reasoning, ReasoningContent, ReasoningTrigger } from "../components/ai-elements/reasoning";
+import { AssistantOutputCard } from "../components/chat/AssistantOutputCard";
+import { AssistantThinkingCard } from "../components/chat/AssistantThinkingCard";
 import { Shimmer } from "../components/ai-elements/shimmer";
-import { Message, MessageContent } from "../components/ai-elements/message";
+import { Message } from "../components/ai-elements/message";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../components/ui/dropdown-menu";
 import { ArrowUp, BotMessageSquare, Check, ChevronDown, Square } from "lucide-react";
 import { clearBookCreateSessionId, filterModelGroups, getBookCreateSessionId, resolveModelSelection, setBookCreateSessionId } from "./chat-page-state";
@@ -725,24 +726,28 @@ function BookCreateChatDock(props: {
                 ) : (
                   <div className="space-y-2">
                     {!!msg.thinking && (
-                      <div className="rounded-xl border border-border/40 bg-card/40 px-3 py-2">
-                        <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">思考过程（流式）</div>
-                        <Reasoning isStreaming={msg.thinkingStreaming === true}>
-                          <ReasoningTrigger />
-                          <ReasoningContent>{msg.thinking}</ReasoningContent>
-                        </Reasoning>
-                      </div>
+                      <AssistantThinkingCard
+                        heading="思考过程（流式）"
+                        content={msg.thinking}
+                        isStreaming={msg.thinkingStreaming === true}
+                      />
                     )}
-                    <ChatMessage role="assistant" content={msg.content} timestamp={msg.timestamp} theme={pageTheme} audit={msg.audit as never} />
+                    <ChatMessage
+                      role="assistant"
+                      content={msg.content}
+                      timestamp={msg.timestamp}
+                      theme={pageTheme}
+                      audit={msg.audit as never}
+                    />
                   </div>
                 )}
               </div>
             ))}
             {loading && (
               <Message from="assistant">
-                <MessageContent>
+                <AssistantOutputCard>
                   <Shimmer className="text-sm" duration={1.5}>Thinking...</Shimmer>
-                </MessageContent>
+                </AssistantOutputCard>
               </Message>
             )}
           </div>

@@ -554,7 +554,6 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     // 閺堫剙婀村鍙夋箒濞戝牊浼呴敍姘瑝閹峰褰囨潻婊咁伂閿涘矂浼╅崗宥嗙ウ瀵繋鑵戦幋鏍ㄦ弓閹镐椒绠欓崠鏍畱濞戝牊浼呯悮顐ヮ洬閻╂牓鈧?
     const existing = get().sessions[sessionId];
     if (existing?.isDraft) return;
-    if (existing && existing.messages.length > 0) return;
 
     try {
       const data = await fetchJson<SessionResponse>(`/sessions/${sessionId}`);
@@ -565,21 +564,27 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
 
       set((state) => {
         const runtime = state.sessions[detailSessionId];
-        // set 閹笛嗩攽閸掓媽绻栭柌灞藉讲閼宠棄鍑￠張澶嬫拱閸︾増绉烽幁顖氬晸閸忋儻绱欏В鏂款洤楠炶泛褰?sendMessage閿涘绱濋崘宥嗙叀娑撯偓濞喡扳偓?
-        if (runtime && runtime.messages.length > 0) return {};
         const nextBookId = detail.bookId ?? runtime?.bookId ?? null;
+        const hasLiveStream = Boolean(runtime?.stream);
+        const nextRuntime = runtime ?? createSessionRuntime({
+          sessionId: detailSessionId,
+          bookId: nextBookId,
+          title: detail.title ?? null,
+        });
         return {
           sessions: {
             ...state.sessions,
             [detailSessionId]: {
-              ...(runtime ?? createSessionRuntime({
-                sessionId: detailSessionId,
-                bookId: nextBookId,
-                title: detail.title ?? null,
-              })),
+              ...nextRuntime,
               bookId: nextBookId,
               title: detail.title ?? runtime?.title ?? null,
-              messages,
+              messages: hasLiveStream ? runtime?.messages ?? messages : messages,
+              stream: runtime?.stream ?? null,
+              isStreaming: hasLiveStream ? runtime?.isStreaming ?? false : false,
+              isStopping: hasLiveStream ? runtime?.isStopping ?? false : false,
+              stoppedByUser: hasLiveStream ? runtime?.stoppedByUser ?? false : false,
+              currentRunId: hasLiveStream ? runtime?.currentRunId ?? null : null,
+              lastError: hasLiveStream ? runtime?.lastError ?? null : null,
             },
           },
           sessionIdsByBook: {

@@ -22,6 +22,7 @@ export interface ChapterReviewContext {
   readonly failureGate?: "critical" | "score" | "none";
   readonly score?: number;
   readonly passScoreThreshold?: number;
+  readonly scoreShortfall?: number;
   readonly unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
   readonly mustFixFirstIssueIds?: ReadonlyArray<string>;
   readonly issueClassCounts?: Readonly<{
@@ -134,9 +135,9 @@ function applyScoreGateToAuditResult(params: {
   if (score >= MIN_AUDIT_PASS_SCORE) return params.auditResult;
 
   // Score gate is a convergence guard, not a second auditor.
-  // Only block when the chapter still has actionable risk signals;
-  // otherwise, let the LLM pass stand to avoid false-negative churn.
-  const hasBlockingSignal = severityCounts.critical > 0 || severityCounts.warning > 0;
+  // Only block when the chapter still has materially actionable risk signals;
+  // keep low-warning chapters from being over-penalized by the score threshold.
+  const hasBlockingSignal = severityCounts.critical > 0 || severityCounts.warning >= 4;
   if (!hasBlockingSignal) {
     return params.auditResult;
   }
@@ -311,6 +312,8 @@ function splitIssuesByClass(issues: ReadonlyArray<AuditIssue>): {
 function resolveTextualReviseMode(
   issues: ReadonlyArray<AuditIssue>,
   reviseRound: number,
+  failureGate?: "critical" | "score" | "none",
+  scoreShortfall?: number,
 ): ReviseMode {
   const severity = countIssueSeverities(issues);
   if (severity.critical > 0) {
@@ -319,6 +322,9 @@ function resolveTextualReviseMode(
     return reviseRound <= 1 ? "spot-fix" : "rework";
   }
   if (reviseRound <= 1 && severity.critical === 0 && severity.warning >= 3) {
+    if (failureGate === "score" && typeof scoreShortfall === "number" && scoreShortfall >= 8) {
+      return "rewrite";
+    }
     return "polish";
   }
   return "spot-fix";
@@ -369,6 +375,7 @@ function resolveAdaptiveReviseMode(
   issues: ReadonlyArray<AuditIssue>,
   reviseRound: number,
   carryover?: IssueCarryoverPartition,
+  reviseContext?: ChapterReviewContext,
 ): ReviseMode {
   if (configuredMode !== "spot-fix") return configuredMode;
   if (reviseRound > 1 && carryover && (carryover.unresolved.length > 0 || carryover.partial.length > 0)) {
@@ -379,7 +386,10 @@ function resolveAdaptiveReviseMode(
   if (!hasStructuralAuditSignals(issues)) {
     // Pure word-count deficiency: use rewrite (broader than spot-fix but lighter than rework)
     if (isLengthOnlyIssues(issues)) return "rewrite";
-    return resolveTextualReviseMode(issues, reviseRound);
+    const scoreShortfall = typeof reviseContext?.score === "number" && typeof reviseContext?.passScoreThreshold === "number"
+      ? Math.max(0, Math.trunc(reviseContext.passScoreThreshold) - Math.trunc(reviseContext.score))
+      : undefined;
+    return resolveTextualReviseMode(issues, reviseRound, reviseContext?.failureGate, scoreShortfall);
   }
   // Stage switch: first round tackles structural issues with deeper rewrite,
   // then fallback to spot-fix for follow-up convergence rounds.
@@ -732,13 +742,36 @@ export async function runChapterReviewCycle(params: {
       unresolvedPrioritizedIssues,
       reviseRound,
     );
-    let reviseMode = resolveAdaptiveReviseMode(configuredReviseMode, issuesForRound, reviseRound, carryover ?? undefined);
+    const issueClassCounts = countIssueClasses(issuesForRound);
+    const primaryIssueClass = resolvePrimaryIssueClass(issueClassCounts);
+    const persistentIssues = carryover ? [...carryover.unresolved, ...carryover.partial] : [];
+    const structuralPriorityIssues = issuesForRound.filter((issue) => isStructuralAuditIssue(issue));
+    const mustFixFirstSource = structuralPriorityIssues.length > 0 ? structuralPriorityIssues : issuesForRound;
+    const scoreShortfall = Math.max(0, MIN_AUDIT_PASS_SCORE - priorAuditScore);
+    const reviseContext: ChapterReviewContext = {
+      failureGate: countIssueSeverities(blockingIssues).critical > 0 ? "critical" as const : "score" as const,
+      score: priorAuditScore,
+      passScoreThreshold: MIN_AUDIT_PASS_SCORE,
+      scoreShortfall,
+      issueClassCounts,
+      primaryIssueClass,
+      dimensionChecks: auditResult.dimensionChecks,
+      unresolvedIssueIdsFromPrevRound: collectIssueIds(persistentIssues),
+      mustFixFirstIssueIds: collectIssueIds(mustFixFirstSource.slice(0, 3)),
+    };
+    let reviseMode = resolveAdaptiveReviseMode(
+      configuredReviseMode,
+      issuesForRound,
+      reviseRound,
+      carryover ?? undefined,
+      reviseContext,
+    );
     if (configuredReviseMode === "spot-fix" && reviseRound > 1 && carryover && (carryover.unresolved.length > 0 || carryover.partial.length > 0)) {
-      const persistentIssues = [...carryover.unresolved, ...carryover.partial];
-      reviseMode = hasStructuralAuditSignals(persistentIssues) ? "rework" : "rewrite";
+      const persistentIssuesForMode = [...carryover.unresolved, ...carryover.partial];
+      reviseMode = hasStructuralAuditSignals(persistentIssuesForMode) ? "rework" : "rewrite";
       params.logWarn({
-        zh: `第${reviseRound}轮仍有 ${persistentIssues.length} 个未收敛问题，切换为${reviseMode}以避免 spot-fix 空转`,
-        en: `Round ${reviseRound} still has ${persistentIssues.length} unresolved/partial issue(s); switching to ${reviseMode} to avoid spot-fix churn`,
+        zh: `第${reviseRound}轮仍有 ${persistentIssuesForMode.length} 个未收敛问题，切换为${reviseMode}以避免 spot-fix 空转`,
+        en: `Round ${reviseRound} still has ${persistentIssuesForMode.length} unresolved/partial issue(s); switching to ${reviseMode} to avoid spot-fix churn`,
       });
     }
     // Early escalation: if previous round's spot-fix made no meaningful delta,
@@ -754,21 +787,6 @@ export async function runChapterReviewCycle(params: {
     if (reviseMode === "spot-fix" && reviseRound >= maxReviseRounds) {
       reviseMode = "rewrite";
     }
-    const issueClassCounts = countIssueClasses(issuesForRound);
-    const primaryIssueClass = resolvePrimaryIssueClass(issueClassCounts);
-    const persistentIssues = carryover ? [...carryover.unresolved, ...carryover.partial] : [];
-    const structuralPriorityIssues = issuesForRound.filter((issue) => isStructuralAuditIssue(issue));
-    const mustFixFirstSource = structuralPriorityIssues.length > 0 ? structuralPriorityIssues : issuesForRound;
-    const reviseContext: ChapterReviewContext = {
-      failureGate: countIssueSeverities(blockingIssues).critical > 0 ? "critical" as const : "score" as const,
-      score: priorAuditScore,
-      passScoreThreshold: MIN_AUDIT_PASS_SCORE,
-      issueClassCounts,
-      primaryIssueClass,
-      dimensionChecks: auditResult.dimensionChecks,
-      unresolvedIssueIdsFromPrevRound: collectIssueIds(persistentIssues),
-      mustFixFirstIssueIds: collectIssueIds(mustFixFirstSource.slice(0, 3)),
-    };
     if (hasStructuralAuditSignals(issuesForRound)) {
       try {
         await params.onStructuralPreRevise?.({

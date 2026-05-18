@@ -6,6 +6,20 @@ import { Streamdown } from "streamdown";
 import { cjk } from "@streamdown/cjk";
 import { fetchJson } from "../../hooks/use-api";
 import { useChatStore } from "../../store/chat";
+import {
+  getChapterFullscreenPaginationCache,
+  getChapterFullscreenPaginationSessionCache,
+  estimateChapterFullscreenMarkdownFit,
+  resolveChapterFullscreenLineHeightMultiplier,
+  resolveChapterFullscreenPaginationCacheKey,
+  resolveChapterFullscreenContentHeightLimit,
+  resolveChapterFullscreenContentWidth,
+  resolveChapterFullscreenPageHeight,
+  resolveChapterFullscreenPageWidth,
+  resolveChapterFullscreenPaginationTimeoutMs,
+  setChapterFullscreenPaginationCache,
+  resolveChapterFullscreenRenderedPageCount,
+} from "./chapter-fullscreen-layout";
 
 const streamdownPlugins = { cjk };
 
@@ -28,10 +42,11 @@ const PAGE_STORAGE_PREFIX = "studio.chapter.fullscreen.page.";
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 20;
 const FONT_STEP = 2;
-const PAGE_HEADER_HEIGHT = 40;
-const PAGE_PADDING_X = 24;
-const PAGE_PADDING_Y = 24;
-const PAGINATION_TIMEOUT_MS = 2500;
+const PAGINATION_WATCHDOG_TICK_MS = 1000;
+const PAGINATION_COMMIT_BATCH_SIZE = 2;
+const PAGINATION_FRAME_BUDGET_MS = 12;
+
+type PaginationPageSink = (page: string) => void | Promise<void>;
 
 function readStoredMode(bookId: string): ReadingMode {
   if (typeof window === "undefined") return "spread";
@@ -111,7 +126,10 @@ export function ChapterFullscreenModal({
   const [fontSize, setFontSize] = useState<number>(() => readStoredFontSize(bookId));
   const [pageIndex, setPageIndex] = useState<number>(() => readStoredPageIndex(bookId));
   const [direction, setDirection] = useState<1 | -1>(1);
-  const [readerViewport, setReaderViewport] = useState({ width: 1120, height: 800 });
+  const [readerViewport, setReaderViewport] = useState(() => ({
+    width: typeof window === "undefined" ? 1120 : Math.max(720, window.innerWidth),
+    height: typeof window === "undefined" ? 800 : Math.max(560, window.innerHeight),
+  }));
   const [pages, setPages] = useState<string[]>([]);
   const [paginationFailed, setPaginationFailed] = useState(false);
   const [isPaginating, setIsPaginating] = useState(false);
@@ -125,29 +143,31 @@ export function ChapterFullscreenModal({
   const probeResolveMapRef = useRef(new Map<number, (height: number) => void>());
   const probeHeightCacheRef = useRef(new Map<string, number>());
   const probeIdRef = useRef(0);
+  const paginationProgressRef = useRef(0);
   const paginateJobRef = useRef(0);
   const paginationTimeoutRef = useRef<number | null>(null);
   const openChapterArtifact = useChatStore((s) => s.openChapterArtifact);
 
   const contentToRead = editing ? editContent : content ?? "";
   const pageWidth = useMemo(() => {
-    const available = Math.max(360, readerViewport.width - 112);
-    const spreadBasis = Math.floor((available - 24) / 2);
-    return Math.max(340, Math.min(520, spreadBasis));
-  }, [readerViewport.width]);
+    return resolveChapterFullscreenPageWidth(mode, readerViewport.width);
+  }, [mode, readerViewport.width]);
   const pageHeight = useMemo(() => {
-    const ideal = Math.round(pageWidth * 1.55);
-    const available = Math.max(560, readerViewport.height - 80);
-    return Math.max(620, Math.min(ideal, available));
+    return resolveChapterFullscreenPageHeight(pageWidth, readerViewport.height);
   }, [pageWidth, readerViewport.height]);
-  const contentWidth = useMemo(() => Math.max(300, pageWidth - PAGE_PADDING_X * 2), [pageWidth]);
-  const contentHeightLimit = useMemo(
-    () => Math.max(420, pageHeight - PAGE_HEADER_HEIGHT - PAGE_PADDING_Y * 2),
-    [pageHeight],
+  const contentWidth = useMemo(() => resolveChapterFullscreenContentWidth(pageWidth), [pageWidth]);
+  const contentHeightLimit = useMemo(() => resolveChapterFullscreenContentHeightLimit(pageHeight), [pageHeight]);
+  const paginationTimeoutMs = useMemo(
+    () => resolveChapterFullscreenPaginationTimeoutMs(mode, contentToRead.length),
+    [contentToRead.length, mode],
   );
   const measurementSignature = useMemo(
-    () => `${mode}:${fontSize}:${pageWidth}:${pageHeight}:${contentHeightLimit}`,
-    [contentHeightLimit, fontSize, mode, pageHeight, pageWidth],
+    () => `${fontSize}:${pageWidth}:${pageHeight}:${contentHeightLimit}`,
+    [contentHeightLimit, fontSize, pageHeight, pageWidth],
+  );
+  const paginationCacheKey = useMemo(
+    () => resolveChapterFullscreenPaginationCacheKey(measurementSignature, contentToRead.trim()),
+    [contentToRead, measurementSignature],
   );
   const step = mode === "spread" ? 2 : 1;
   const pageStorageKey = useMemo(
@@ -156,6 +176,10 @@ export function ChapterFullscreenModal({
   );
   const currentPage = Math.min(normalizePageIndex(pageIndex, mode), Math.max(0, pages.length - step));
   const visiblePages = pages.slice(currentPage, currentPage + step);
+  const renderedPageCount = useMemo(
+    () => resolveChapterFullscreenRenderedPageCount(mode, visiblePages.length),
+    [mode, visiblePages.length],
+  );
   const canGoPrev = currentPage > 0;
   const canGoNext = currentPage + step < pages.length;
   const currentPaperStyle = useMemo(
@@ -168,7 +192,7 @@ export function ChapterFullscreenModal({
   const contentTypographyStyle = useMemo(
     () => ({
       fontSize: `${fontSize}px`,
-      lineHeight: mode === "spread" ? 2 : 1.92,
+      lineHeight: resolveChapterFullscreenLineHeightMultiplier(mode),
     }),
     [fontSize, mode],
   );
@@ -180,32 +204,70 @@ export function ChapterFullscreenModal({
     probeResolveMapRef.current.clear();
   }, []);
 
+  const markPaginationProgress = useCallback(() => {
+    paginationProgressRef.current = Date.now();
+  }, []);
+
+  const yieldToBrowser = useCallback(() => {
+    if (typeof window === "undefined") {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      if (typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(() => resolve());
+        return;
+      }
+      window.setTimeout(() => resolve(), 0);
+    });
+  }, []);
+
   const measureMarkdown = useCallback((markdown: string): Promise<number> => {
     const normalized = markdown.trim();
     if (!normalized) return Promise.resolve(0);
     const cacheKey = `${measurementSignature}::${normalized}`;
     const cached = probeHeightCacheRef.current.get(cacheKey);
-    if (typeof cached === "number") return Promise.resolve(cached);
+    if (typeof cached === "number") {
+      markPaginationProgress();
+      return Promise.resolve(cached);
+    }
     return new Promise<number>((resolve) => {
       const id = ++probeIdRef.current;
       probeResolveMapRef.current.set(id, resolve);
       setProbeSample({ id, markdown: normalized });
+      markPaginationProgress();
     });
-  }, [measurementSignature]);
+  }, [markPaginationProgress, measurementSignature]);
 
   const fitsMarkdown = useCallback(
     async (markdown: string) => {
+      const verdict = estimateChapterFullscreenMarkdownFit(markdown, {
+        contentWidth,
+        contentHeightLimit,
+        fontSize,
+        mode,
+      });
+      if (verdict === "fit") {
+        markPaginationProgress();
+        return true;
+      }
+      if (verdict === "overflow") {
+        markPaginationProgress();
+        return false;
+      }
       const height = await measureMarkdown(markdown);
       return height > 0 && height <= contentHeightLimit;
     },
-    [contentHeightLimit, measureMarkdown],
+    [contentHeightLimit, contentWidth, fontSize, markPaginationProgress, measureMarkdown, mode],
   );
 
   const splitMarkdownToFit = useCallback(
-    async (markdown: string): Promise<string[]> => {
+    async (markdown: string, emitPage?: PaginationPageSink): Promise<string[]> => {
       const normalized = markdown.trim();
       if (!normalized) return [];
-      if (await fitsMarkdown(normalized)) return [normalized];
+      if (await fitsMarkdown(normalized)) {
+        await emitPage?.(normalized);
+        return [normalized];
+      }
 
       const sentences = splitBlockIntoSentences(normalized);
       if (sentences.length > 1) {
@@ -219,37 +281,47 @@ export function ChapterFullscreenModal({
           }
           if (current) {
             result.push(current);
+            await emitPage?.(current);
             current = "";
           }
           if (await fitsMarkdown(sentence)) {
             current = sentence;
             continue;
           }
-          const pieces = await splitMarkdownByRenderedHeight(sentence);
+          const pieces = await splitMarkdownByRenderedHeight(sentence, emitPage);
           if (pieces.length === 1) {
             result.push(...pieces);
           } else {
             result.push(pieces[0]);
-            result.push(...await splitMarkdownToFit(pieces[1]));
+            result.push(...await splitMarkdownToFit(pieces[1], emitPage));
           }
         }
-        if (current) result.push(current);
+        if (current) {
+          result.push(current);
+          await emitPage?.(current);
+        }
         return result.filter(Boolean);
       }
 
-      return splitMarkdownByRenderedHeight(normalized);
+      return splitMarkdownByRenderedHeight(normalized, emitPage);
     },
     [fitsMarkdown],
   );
 
   const splitMarkdownByRenderedHeight = useCallback(
-    async (markdown: string): Promise<string[]> => {
+    async (markdown: string, emitPage?: PaginationPageSink): Promise<string[]> => {
       const normalized = markdown.trim();
       if (!normalized) return [];
-      if (await fitsMarkdown(normalized)) return [normalized];
+      if (await fitsMarkdown(normalized)) {
+        await emitPage?.(normalized);
+        return [normalized];
+      }
 
       const graphemes = splitTextIntoGraphemes(normalized);
-      if (graphemes.length <= 1) return [normalized];
+      if (graphemes.length <= 1) {
+        await emitPage?.(normalized);
+        return [normalized];
+      }
 
       let lo = 1;
       let hi = graphemes.length;
@@ -272,11 +344,15 @@ export function ChapterFullscreenModal({
         }
       }
 
-      if (best <= 0) return [normalized];
+      if (best <= 0) {
+        await emitPage?.(normalized);
+        return [normalized];
+      }
 
       const tail = graphemes.slice(best).join("").trim();
+      await emitPage?.(bestText);
       if (!tail) return [bestText];
-      return [bestText, tail];
+      return [bestText, ...(await splitMarkdownToFit(tail, emitPage))];
     },
     [fitsMarkdown],
   );
@@ -293,9 +369,10 @@ export function ChapterFullscreenModal({
         probeResolveMapRef.current.delete(sample.id);
         resolve(measured);
       }
+      markPaginationProgress();
     });
     return () => cancelAnimationFrame(frame);
-  }, [contentWidth, fontSize, measurementSignature, mode, pageHeight, probeSample]);
+  }, [contentWidth, fontSize, markPaginationProgress, measurementSignature, mode, pageHeight, probeSample]);
 
   useEffect(() => {
     probeHeightCacheRef.current.clear();
@@ -304,11 +381,62 @@ export function ChapterFullscreenModal({
   useEffect(() => {
     let cancelled = false;
     const jobId = ++paginateJobRef.current;
+    let settled = false;
+    let nextPages: string[] = [];
+    let lastCommitSize = 0;
+    let lastYieldAt = Date.now();
+
+    const cachedPages =
+      getChapterFullscreenPaginationCache(paginationCacheKey)
+      ?? getChapterFullscreenPaginationSessionCache(paginationCacheKey);
+    if (cachedPages) {
+      setPaginationFailed(false);
+      setIsPaginating(false);
+      setPages(cachedPages.slice());
+      return () => {
+        cancelled = true;
+        settled = true;
+      };
+    }
 
     if (paginationTimeoutRef.current !== null) {
       window.clearTimeout(paginationTimeoutRef.current);
       paginationTimeoutRef.current = null;
     }
+    paginationProgressRef.current = Date.now();
+
+    const settlePagination = () => {
+      if (settled) return false;
+      settled = true;
+      if (paginationTimeoutRef.current !== null) {
+        window.clearTimeout(paginationTimeoutRef.current);
+        paginationTimeoutRef.current = null;
+      }
+      return true;
+    };
+
+    const commitProgress = async (force = false) => {
+      if (nextPages.length === 0) return;
+      const now = Date.now();
+      const shouldCommit =
+        force
+        || nextPages.length === 1
+        || nextPages.length - lastCommitSize >= PAGINATION_COMMIT_BATCH_SIZE
+        || now - lastYieldAt >= PAGINATION_FRAME_BUDGET_MS;
+      if (!shouldCommit) return;
+      lastCommitSize = nextPages.length;
+      lastYieldAt = now;
+      setPages(nextPages.slice());
+      markPaginationProgress();
+      await yieldToBrowser();
+    };
+
+    const emitPage: PaginationPageSink = async (page: string) => {
+      const normalized = page.trim();
+      if (!normalized || cancelled || jobId !== paginateJobRef.current || settled) return;
+      nextPages.push(normalized);
+      await commitProgress();
+    };
 
     const paginate = async () => {
       setIsPaginating(true);
@@ -321,24 +449,25 @@ export function ChapterFullscreenModal({
         }
 
         const blocks = splitParagraphs(normalized);
-        const nextPages: string[] = [];
         let current = "";
 
-        const flush = () => {
+        const flush = async () => {
           if (current.trim()) nextPages.push(current.trim());
           current = "";
+          await commitProgress();
         };
 
         for (const block of blocks) {
-          if (cancelled || jobId !== paginateJobRef.current) return;
+          if (cancelled || jobId !== paginateJobRef.current || settled) return;
           const normalizedBlock = block.trim();
           if (!normalizedBlock) continue;
 
           if (!current) {
             if (await fitsMarkdown(normalizedBlock)) {
               current = normalizedBlock;
+              markPaginationProgress();
             } else {
-              nextPages.push(...await splitMarkdownToFit(normalizedBlock));
+              await splitMarkdownToFit(normalizedBlock, emitPage);
             }
             continue;
           }
@@ -346,39 +475,60 @@ export function ChapterFullscreenModal({
           const candidate = `${current}\n\n${normalizedBlock}`;
           if (await fitsMarkdown(candidate)) {
             current = candidate;
+            markPaginationProgress();
             continue;
           }
 
-          flush();
+          await flush();
           if (await fitsMarkdown(normalizedBlock)) {
             current = normalizedBlock;
+            markPaginationProgress();
           } else {
-            nextPages.push(...await splitMarkdownToFit(normalizedBlock));
+            await splitMarkdownToFit(normalizedBlock, emitPage);
           }
         }
 
-        flush();
-        if (!cancelled && jobId === paginateJobRef.current) {
-          setPages(nextPages);
+        await flush();
+        await commitProgress(true);
+        if (settled) return;
+        if (!cancelled && jobId === paginateJobRef.current && settlePagination()) {
+          setChapterFullscreenPaginationCache(paginationCacheKey, nextPages);
+          setPages(nextPages.slice());
+          setPaginationFailed(false);
         }
       } finally {
         if (!cancelled && jobId === paginateJobRef.current) {
+          settlePagination();
           setIsPaginating(false);
         }
       }
     };
 
-    paginationTimeoutRef.current = window.setTimeout(() => {
-      if (cancelled || jobId !== paginateJobRef.current) return;
-      setPaginationFailed(true);
-      setPages(contentToRead.trim() ? [contentToRead.trim()] : []);
-      setIsPaginating(false);
-    }, PAGINATION_TIMEOUT_MS);
+    const scheduleWatchdog = () => {
+      paginationTimeoutRef.current = window.setTimeout(() => {
+        if (cancelled || jobId !== paginateJobRef.current || settled) return;
+        const stalledFor = Date.now() - paginationProgressRef.current;
+        if (stalledFor < paginationTimeoutMs) {
+          scheduleWatchdog();
+          return;
+        }
+        settled = true;
+        if (paginationTimeoutRef.current !== null) {
+          window.clearTimeout(paginationTimeoutRef.current);
+          paginationTimeoutRef.current = null;
+        }
+        setPaginationFailed(true);
+        setPages(nextPages.length > 0 ? nextPages.slice() : []);
+        setIsPaginating(false);
+      }, PAGINATION_WATCHDOG_TICK_MS);
+    };
+
+    scheduleWatchdog();
 
     void paginate().catch(() => {
-      if (!cancelled && jobId === paginateJobRef.current) {
+      if (!cancelled && jobId === paginateJobRef.current && settlePagination()) {
         setPaginationFailed(true);
-        setPages(contentToRead.trim() ? [contentToRead.trim()] : []);
+        setPages(nextPages.length > 0 ? nextPages.slice() : []);
         setIsPaginating(false);
       }
     });
@@ -388,9 +538,20 @@ export function ChapterFullscreenModal({
         window.clearTimeout(paginationTimeoutRef.current);
         paginationTimeoutRef.current = null;
       }
+      settled = true;
       resolveAllPendingMeasures(Number.POSITIVE_INFINITY);
     };
-  }, [contentToRead, fitsMarkdown, resolveAllPendingMeasures, splitMarkdownByRenderedHeight, splitMarkdownToFit]);
+  }, [
+    contentToRead,
+    fitsMarkdown,
+    markPaginationProgress,
+    paginationCacheKey,
+    paginationTimeoutMs,
+    resolveAllPendingMeasures,
+    splitMarkdownByRenderedHeight,
+    splitMarkdownToFit,
+    yieldToBrowser,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -414,6 +575,21 @@ export function ChapterFullscreenModal({
   useEffect(() => {
     setPageIndex((current) => Math.min(normalizePageIndex(current, mode), Math.max(0, pages.length - step)));
   }, [mode, pages.length, step]);
+
+  useLayoutEffect(() => {
+    const node = readerBodyRef.current;
+    if (!node) return;
+    const nextWidth = node.getBoundingClientRect().width;
+    const nextHeight = node.getBoundingClientRect().height;
+    if (!Number.isFinite(nextWidth) || !Number.isFinite(nextHeight)) return;
+    setReaderViewport((current) => {
+      const normalized = {
+        width: Math.max(720, Math.round(nextWidth)),
+        height: Math.max(560, Math.round(nextHeight)),
+      };
+      return normalized.width === current.width && normalized.height === current.height ? current : normalized;
+    });
+  }, []);
 
   useEffect(() => {
     const node = readerBodyRef.current;
@@ -519,7 +695,7 @@ export function ChapterFullscreenModal({
 
   const pageLabel = pages.length === 0
     ? "0 / 0"
-    : mode === "spread"
+    : mode === "spread" && renderedPageCount > 1
       ? `${currentPage + 1}-${Math.min(currentPage + 2, pages.length)} / ${pages.length}`
       : `${currentPage + 1} / ${pages.length}`;
   const fallbackContent = contentToRead.trim();
@@ -650,8 +826,8 @@ export function ChapterFullscreenModal({
                     className="flex h-full min-h-0 w-full items-stretch justify-center overflow-hidden"
                     style={{ perspective: "2200px" }}
                   >
-                    <div className="flex h-full min-h-0 w-full items-stretch justify-center gap-4 overflow-hidden">
-                      {Array.from({ length: step }).map((_, index) => {
+                    <div className={`flex h-full min-h-0 w-full items-stretch gap-4 overflow-hidden ${renderedPageCount === 1 ? "justify-center" : "justify-center"}`}>
+                      {Array.from({ length: renderedPageCount }).map((_, index) => {
                         const page = visiblePages[index];
                         const pageNumber = page ? currentPage + index + 1 : null;
                         return (
@@ -659,7 +835,7 @@ export function ChapterFullscreenModal({
                             key={`${currentPage}-${index}`}
                             style={currentPaperStyle}
                             className={`flex min-h-0 flex-none flex-col overflow-hidden rounded-3xl border bg-card/90 shadow-[0_20px_60px_rgba(0,0,0,0.12)] ${
-                              mode === "spread"
+                              mode === "spread" && renderedPageCount > 1
                                 ? index === 0
                                   ? "rounded-r-2xl border-r border-border/25"
                                   : "rounded-l-2xl border-l border-border/25"
@@ -667,7 +843,7 @@ export function ChapterFullscreenModal({
                             }`}
                           >
                             <div className="flex h-9 shrink-0 items-center justify-between border-b border-border/10 px-5 text-[11px] text-muted-foreground">
-                              <span>{mode === "spread" ? (index === 0 ? "左页" : "右页") : "正文页"}</span>
+                              <span>{mode === "spread" && renderedPageCount > 1 ? (index === 0 ? "左页" : "右页") : "正文页"}</span>
                               <span className="tabular-nums">{pageNumber ?? ""}</span>
                             </div>
                             <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-5 py-5">

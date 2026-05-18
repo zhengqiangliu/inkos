@@ -15,9 +15,7 @@ export function resolveChapterReaderSelectionState(args: {
   const selectedText = args.editing ? args.editorSelectedText : args.viewerSelectedText;
   const hasSelection = selectedText.trim().length > 0;
   const effectiveSelectionMode = args.selectionModeActive || hasSelection;
-  const showFloatingToolbar = args.editing
-    ? (args.selectionModeActive || hasSelection)
-    : (args.selectionModeActive || args.viewerIsSelecting || hasSelection);
+  const showFloatingToolbar = args.editing && (args.selectionModeActive || hasSelection);
 
   return {
     selectedText,

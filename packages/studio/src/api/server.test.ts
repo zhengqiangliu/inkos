@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -57,15 +57,32 @@ const extractChapterLimitFromOutlineMock = vi.fn((outline: string) => {
     return null;
   };
 
-  const total = outline.match(/(?:共|总(?:章数|计)|章节总数|总章节数)\s*([零〇一二三四五六七八九十两\d]+)\s*章?/);
-  if (total) {
-    return parseToken(total[1] ?? "");
+  const lines = outline.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const totalPattern = /(?:总章数|章节总数|总章节数|total(?:\s+chapters?)?|chapter(?:\s+count|\s+total)?)(?:\s*[:：]?\s*)([零〇一二三四五六七八九十两\d]+)(?:\s*章)?/i;
+  const chapterPattern = /(?:第\s*)?([零〇一二三四五六七八九十两\d]+)\s*章(?:\s*[-~–—至到]\s*(?:第\s*)?([零〇一二三四五六七八九十两\d]+)\s*章?)?/gi;
+
+  let maxChapter: number | null = null;
+  for (const line of lines) {
+    const total = line.match(totalPattern);
+    if (total) {
+      const parsed = parseToken(total[1] ?? "");
+      if (typeof parsed === "number" && parsed > 0) return parsed;
+    }
+
+    chapterPattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = chapterPattern.exec(line)) !== null) {
+      const start = parseToken(match[1] ?? "");
+      const end = parseToken(match[2] ?? "");
+      if (typeof start === "number" && start > 0) {
+        maxChapter = maxChapter === null ? start : Math.max(maxChapter, start);
+      }
+      if (typeof end === "number" && end > 0) {
+        maxChapter = maxChapter === null ? end : Math.max(maxChapter, end);
+      }
+    }
   }
-  const range = outline.match(/第\s*([零〇一二三四五六七八九十两\d]+)\s*[-~–—至到]\s*([零〇一二三四五六七八九十两\d]+)\s*章/);
-  if (range) {
-    return parseToken(range[2] ?? "");
-  }
-  return null;
+  return maxChapter;
 });
 const pipelineConfigs: unknown[] = [];
 const processProjectInteractionInputMock = vi.fn();
@@ -150,7 +167,21 @@ vi.mock("@actalk/inkos-core", () => {
     constructor(private readonly root: string) {}
 
     async listBooks(): Promise<string[]> {
-      return [];
+      try {
+        const entries = await readdir(join(this.root, "books"));
+        const bookIds: string[] = [];
+        for (const entry of entries) {
+          try {
+            await stat(join(this.root, "books", entry, "book.json"));
+            bookIds.push(entry);
+          } catch {
+            // ignore
+          }
+        }
+        return bookIds;
+      } catch {
+        return [];
+      }
     }
 
     async loadBookConfig(): Promise<never> {
@@ -185,6 +216,10 @@ vi.mock("@actalk/inkos-core", () => {
 
     bookDir(id: string): string {
       return join(this.root, "books", id);
+    }
+
+    stateDir(id: string): string {
+      return join(this.root, "books", id, "story", "state");
     }
   }
 
@@ -229,6 +264,31 @@ vi.mock("@actalk/inkos-core", () => {
   class MockChapterDesignAgent {
     constructor(_config: unknown) {}
 
+    async designBatch(input: { startChapter: number; count: number }): Promise<unknown[]> {
+      const now = "2026-04-07T00:00:00.000Z";
+      return Array.from({ length: input.count }, (_value, index) => {
+        const chapterNumber = input.startChapter + index;
+        return {
+          chapterNumber,
+          chapterName: `生成第${chapterNumber}章`,
+          highlight: `亮点${chapterNumber}`,
+          coreConflict: `冲突${chapterNumber}`,
+          plotAndConflict: `剧情${chapterNumber}`,
+          emotionalTone: "紧张",
+          endingHook: `钩子${chapterNumber}`,
+          status: "planned",
+          source: "auto",
+          version: 1,
+          needsReview: true,
+          anchorRefs: { worldRefs: [], characterRefs: [], emotionRefs: [], hookRefs: [] },
+          driftFlags: [],
+          lockedFields: [],
+          createdAt: now,
+          updatedAt: now,
+        };
+      });
+    }
+
     async analyzeAndDesignChapter(input: { chapterNumber: number }): Promise<unknown> {
       return {
         chapterNumber: input.chapterNumber,
@@ -247,6 +307,29 @@ vi.mock("@actalk/inkos-core", () => {
         lockedFields: [],
         createdAt: "2026-04-07T00:00:00.000Z",
         updatedAt: "2026-04-07T00:00:00.000Z",
+      };
+    }
+
+    async optimizePlan(input: {
+      chapterNumber: number;
+      instruction: string;
+      currentPlan: {
+        chapterName: string;
+        highlight: string;
+        coreConflict: string;
+        plotAndConflict: string;
+        emotionalTone: string;
+        endingHook: string;
+      };
+    }): Promise<unknown> {
+      return {
+        ...input.currentPlan,
+        chapterName: `${input.currentPlan.chapterName}-AI`,
+        highlight: `${input.currentPlan.highlight}（AI）`,
+        coreConflict: input.currentPlan.coreConflict,
+        plotAndConflict: input.currentPlan.plotAndConflict,
+        emotionalTone: input.currentPlan.emotionalTone,
+        endingHook: input.currentPlan.endingHook,
       };
     }
   }
@@ -1337,6 +1420,306 @@ describe("createStudioServer daemon lifecycle", () => {
         finalState: "passed",
       },
     });
+  });
+
+  it("creates and completes a background book task", async () => {
+    loadBookConfigMock.mockResolvedValue({ targetChapters: 6 });
+    getNextChapterNumberMock.mockResolvedValue(3);
+    writeNextChapterMock.mockResolvedValue({
+      chapterNumber: 3,
+      title: "Ch 3",
+      wordCount: 3000,
+      revised: false,
+      status: "ready-for-review",
+      auditResult: { passed: true, issues: [], summary: "ok" },
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestedChapters: 1 }),
+    });
+
+    expect(response.status).toBe(201);
+    const created = await response.json() as { task: { id: string; status: string; requestedChapters: number } };
+    expect(created.task).toMatchObject({
+      status: "queued",
+      requestedChapters: 1,
+    });
+
+    for (let i = 0; i < 20 && writeNextChapterMock.mock.calls.length < 1; i += 1) {
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
+
+    type TaskDetailPayload = { task: { status: string; completedChapters: number; requestedChapters: number } };
+    let detail: TaskDetailPayload | null = null;
+    for (let i = 0; i < 20; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        detail = await detailResponse.json() as TaskDetailPayload;
+        if (detail?.task.status === "succeeded") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(detail).not.toBeNull();
+    const completedDetail = detail as TaskDetailPayload;
+    expect(completedDetail.task).toMatchObject({
+      status: "succeeded",
+      completedChapters: 1,
+      requestedChapters: 1,
+    });
+  });
+
+  it("supports stopping a running book task", async () => {
+    loadBookConfigMock.mockResolvedValue({ targetChapters: 4 });
+    getNextChapterNumberMock.mockResolvedValue(3);
+
+    writeNextChapterMock.mockImplementationOnce(() => new Promise((resolve) => {
+      setTimeout(() => resolve({
+        chapterNumber: 3,
+        title: "Ch 3",
+        wordCount: 3000,
+        revised: false,
+        status: "ready-for-review",
+        auditResult: { passed: true, issues: [], summary: "ok" },
+      }), 25);
+    }));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const createResponse = await app.request("http://localhost/api/v1/books/demo-book/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestedChapters: 1 }),
+    });
+    expect(createResponse.status).toBe(201);
+    const created = await createResponse.json() as { task: { id: string } };
+
+    for (let i = 0; i < 20; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        const detail = await detailResponse.json() as { task: { status: string } };
+        if (detail.task.status === "running") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const stopResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}/stop`, {
+      method: "POST",
+    });
+    expect(stopResponse.status).toBe(200);
+
+    type TaskDetailPayload = { task: { status: string; stopRequestedAt: string | null } };
+    let detail: TaskDetailPayload | null = null;
+    for (let i = 0; i < 30; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        detail = await detailResponse.json() as TaskDetailPayload;
+        if (detail?.task.status === "cancelled") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(detail).not.toBeNull();
+    const cancelledDetail = detail as TaskDetailPayload;
+    expect(cancelledDetail.task.status).toBe("cancelled");
+    expect(cancelledDetail.task.stopRequestedAt).not.toBeNull();
+  });
+
+  it("resumes a paused book task", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-paused",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "paused",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: null,
+          nextChapterNumber: null,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          result: null,
+          error: "服务器重启后任务已暂停，请手动继续。",
+        },
+      ],
+    }, null, 2), "utf-8");
+    getNextChapterNumberMock.mockResolvedValue(3);
+    writeNextChapterMock.mockResolvedValue({
+      chapterNumber: 3,
+      title: "Ch 3",
+      wordCount: 3000,
+      revised: false,
+      status: "ready-for-review",
+      auditResult: { passed: true, issues: [], summary: "ok" },
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const resumeResponse = await app.request("http://localhost/api/v1/books/demo-book/tasks/task-paused/resume", {
+      method: "POST",
+    });
+    expect(resumeResponse.status).toBe(200);
+
+    let detail: { task: { status: string; completedChapters: number } } | null = null;
+    for (let i = 0; i < 20; i += 1) {
+      const detailResponse = await app.request("http://localhost/api/v1/books/demo-book/tasks/task-paused");
+      if (detailResponse.status === 200) {
+        detail = await detailResponse.json() as { task: { status: string; completedChapters: number } };
+        if (detail.task.status === "succeeded") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(detail).not.toBeNull();
+    expect(detail?.task.status).toBe("succeeded");
+    expect(detail?.task.completedChapters).toBe(1);
+    expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a paused book task immediately when stopped", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-paused",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "paused",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: null,
+          nextChapterNumber: null,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          result: null,
+          error: "服务器重启后任务已暂停，请手动继续。",
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const stopResponse = await app.request("http://localhost/api/v1/books/demo-book/tasks/task-paused/stop", {
+      method: "POST",
+    });
+    expect(stopResponse.status).toBe(200);
+
+    let detail: { task: { status: string; stopRequestedAt: string | null } } | null = null;
+    for (let i = 0; i < 20; i += 1) {
+      const detailResponse = await app.request("http://localhost/api/v1/books/demo-book/tasks/task-paused");
+      if (detailResponse.status === 200) {
+        detail = await detailResponse.json() as { task: { status: string; stopRequestedAt: string | null } };
+        if (detail.task.status === "cancelled") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(detail).not.toBeNull();
+    expect(detail?.task.status).toBe("cancelled");
+    expect(detail?.task.stopRequestedAt).not.toBeNull();
+  });
+
+  it("pauses an in-flight book task during recovery", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-running",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "running",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: 3,
+          nextChapterNumber: 4,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          result: null,
+          error: null,
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    let detail: { task: { status: string; error: string | null } } | null = null;
+    for (let i = 0; i < 20; i += 1) {
+      const detailResponse = await app.request("http://localhost/api/v1/books/demo-book/tasks/task-running");
+      if (detailResponse.status === 200) {
+        detail = await detailResponse.json() as { task: { status: string; error: string | null } };
+        if (detail.task.status === "paused") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(detail).not.toBeNull();
+    expect(detail?.task.status).toBe("paused");
+    expect(detail?.task.error).toContain("服务器重启后任务已暂停");
   });
 
   it("tests a single model connectivity with elapsed time", async () => {
@@ -2767,12 +3150,24 @@ describe("createStudioServer daemon lifecycle", () => {
     );
   });
 
-  it("parses Chinese chapter limits from volume outline during precheck generation", async () => {
-    const storyDir = join(root, "books", "demo-book", "story");
-    await mkdir(storyDir, { recursive: true });
+  it("uses book.json targetChapters for precheck generation truncation", async () => {
+    loadBookConfigMock.mockResolvedValue({
+      id: "demo-book",
+      title: "Demo Book",
+      genre: "urban",
+      platform: "qidian",
+      language: "zh",
+      targetChapters: 10,
+      chapterWordCount: 3000,
+      status: "outlining",
+      createdAt: "2026-04-07T00:00:00.000Z",
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    });
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
     await writeFile(
-      join(storyDir, "volume_outline.md"),
-      "# 卷纲\n\n### 第一卷：风起（1-十章）\n\n共十章推进主线。",
+      join(bookDir, "story", "volume_outline.md"),
+      "# ??\n\n### ???????1-???\n\n????????",
       "utf-8",
     );
 
@@ -2794,6 +3189,429 @@ describe("createStudioServer daemon lifecycle", () => {
         { chapterNumber: 9, hasPlan: false },
         { chapterNumber: 10, hasPlan: false },
       ],
+    });
+  });
+
+  it("ignores volume outline chapter counts when book.json has a different limit", async () => {
+    loadBookConfigMock.mockResolvedValue({
+      id: "demo-book",
+      title: "Demo Book",
+      genre: "urban",
+      platform: "qidian",
+      language: "zh",
+      targetChapters: 12,
+      chapterWordCount: 3000,
+      status: "outlining",
+      createdAt: "2026-04-07T00:00:00.000Z",
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    });
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "volume_outline.md"),
+      "**??????5??100??**\n\n??????????????1-20??",
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/precheck-generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 11, count: 4 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      startChapter: 11,
+      endChapter: 12,
+      count: 2,
+    });
+  });
+
+  it("flags existing chapter content as a generation conflict during precheck", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+    await mkdir(join(bookDir, "story"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "volume_outline.md"),
+      "# 卷纲\n\n总章数 10 章",
+      "utf-8",
+    );
+    await writeFile(
+      join(bookDir, "chapters", "0003_demo.md"),
+      "# 第3章\n\n已写正文。",
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/precheck-generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 1, count: 5 }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { hasConflict: boolean; chapters: Array<{ chapterNumber: number; hasContent: boolean }> };
+    expect(payload).toMatchObject({ hasConflict: true });
+    expect(payload.chapters).toEqual(expect.arrayContaining([
+      expect.objectContaining({ chapterNumber: 3, hasContent: true }),
+    ]));
+  });
+
+  it("rejects manual chapter-plan edits when the chapter already has content", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/3", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chapterName: "手工修改",
+        highlight: "不能保存",
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "该章已有正文，不允许手工修改分章设计。",
+    });
+  });
+
+  it("rejects AI chapter-plan optimization when the chapter already has content", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/3/optimize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "让结构更紧凑",
+        currentPlan: {
+          chapterName: "AI 修改",
+          highlight: "不能保存",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "该章已有正文，不允许 AI 修改分章设计。",
+    });
+  });
+
+  it("marks chapter plans as approved and clears review state when approving", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(join(bookDir, "story", "state", "chapter-plans.json"), JSON.stringify({
+      plans: [
+        {
+          chapterNumber: 3,
+          chapterName: "待通过",
+          highlight: "待通过",
+          coreConflict: "待通过",
+          plotAndConflict: "待通过",
+          emotionalTone: "待通过",
+          endingHook: "待通过",
+          status: "planned",
+          source: "manual",
+          version: 1,
+          needsReview: true,
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ],
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/3/approve", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+
+    const saved = JSON.parse(await readFile(join(bookDir, "story", "state", "chapter-plans.json"), "utf-8")) as {
+      plans: Array<{ chapterNumber: number; status: string; needsReview?: boolean }>;
+    };
+    expect(saved.plans.find((plan) => plan.chapterNumber === 3)).toMatchObject({
+      status: "approved",
+      needsReview: false,
+    });
+
+    const history = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "chapter-plans.history.json"), "utf-8"),
+    ) as { entries: Array<{ chapterNumber: number; version: number; action: string }> };
+    expect(history.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        chapterNumber: 3,
+        version: 2,
+        action: "approve",
+      }),
+    ]));
+  });
+
+  it("appends manual chapter-plan edits to history", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(join(bookDir, "story", "state", "chapter-plans.json"), JSON.stringify({
+      plans: [
+        {
+          chapterNumber: 4,
+          chapterName: "旧标题",
+          highlight: "旧亮点",
+          coreConflict: "旧冲突",
+          plotAndConflict: "旧剧情",
+          emotionalTone: "平静",
+          endingHook: "旧钩子",
+          status: "planned",
+          source: "auto",
+          version: 1,
+          needsReview: true,
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ],
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/4", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chapterName: "新标题",
+        highlight: "新亮点",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+
+    const history = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "chapter-plans.history.json"), "utf-8"),
+    ) as { entries: Array<{ chapterNumber: number; version: number; action: string }> };
+    expect(history.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        chapterNumber: 4,
+        version: 2,
+        action: "manual",
+      }),
+    ]));
+  });
+
+  it("appends ai chapter-plan edits to history", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(join(bookDir, "story", "state", "chapter-plans.json"), JSON.stringify({
+      plans: [
+        {
+          chapterNumber: 4,
+          chapterName: "旧标题",
+          highlight: "旧亮点",
+          coreConflict: "旧冲突",
+          plotAndConflict: "旧剧情",
+          emotionalTone: "平静",
+          endingHook: "旧钩子",
+          status: "planned",
+          source: "auto",
+          version: 1,
+          needsReview: true,
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ],
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/4", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chapterName: "AI 标题",
+        highlight: "AI 亮点",
+        source: "ai",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+
+    const history = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "chapter-plans.history.json"), "utf-8"),
+    ) as { entries: Array<{ chapterNumber: number; version: number; action: string }> };
+    expect(history.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        chapterNumber: 4,
+        version: 2,
+        action: "ai",
+      }),
+    ]));
+  });
+
+  it("appends generated chapter plans to history", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(join(bookDir, "story", "outline", "volume_map.md"), "# 卷纲\n\n总章数 10 章", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/generate-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 1, count: 1 }),
+    });
+
+    expect(response.status).toBe(200);
+    const history = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "chapter-plans.history.json"), "utf-8"),
+    ) as { entries: Array<{ chapterNumber: number; version: number; action: string }> };
+    expect(history.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        chapterNumber: 1,
+        version: 1,
+        action: "generate",
+      }),
+    ]));
+  });
+
+  it("appends backfilled chapter plans to history", async () => {
+    loadBookConfigMock.mockResolvedValue({
+      id: "demo-book",
+      title: "Demo Book",
+      genre: "urban",
+      platform: "qidian",
+      language: "zh",
+      targetChapters: 20,
+      chapterWordCount: 3000,
+      status: "outlining",
+      createdAt: "2026-04-07T00:00:00.000Z",
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    });
+
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "chapters"), { recursive: true });
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(join(bookDir, "story", "outline", "volume_map.md"), "# 卷纲\n\n总章数 10 章", "utf-8");
+    await writeFile(join(bookDir, "story", "state", "chapter-plans.json"), JSON.stringify({
+      plans: [
+        {
+          chapterNumber: 3,
+          chapterName: "旧标题",
+          highlight: "旧亮点",
+          coreConflict: "旧冲突",
+          plotAndConflict: "旧剧情",
+          emotionalTone: "平静",
+          endingHook: "旧钩子",
+          status: "planned",
+          source: "auto",
+          version: 1,
+          needsReview: false,
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ],
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    }, null, 2), "utf-8");
+    await writeFile(join(bookDir, "chapters", "0003_demo.md"), "# 第3章\n\n这一章已经写完。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/backfill-from-chapter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 3, endChapter: 3 }),
+    });
+
+    expect(response.status).toBe(200);
+    const history = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "chapter-plans.history.json"), "utf-8"),
+    ) as { entries: Array<{ chapterNumber: number; version: number; action: string }> };
+    expect(history.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        chapterNumber: 3,
+        version: 2,
+        action: "backfill",
+      }),
+    ]));
+  });
+
+  it("includes action labels in chapter-plan history responses", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(join(bookDir, "story", "state", "chapter-plans.json"), JSON.stringify({
+      plans: [
+        {
+          chapterNumber: 4,
+          chapterName: "历史标题",
+          highlight: "历史亮点",
+          coreConflict: "历史冲突",
+          plotAndConflict: "历史剧情",
+          emotionalTone: "平静",
+          endingHook: "历史钩子",
+          status: "planned",
+          source: "manual",
+          version: 2,
+          needsReview: true,
+          createdAt: "2026-04-07T00:00:00.000Z",
+          updatedAt: "2026-04-07T00:00:00.000Z",
+        },
+      ],
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    }, null, 2), "utf-8");
+    await writeFile(join(bookDir, "story", "state", "chapter-plans.history.json"), JSON.stringify({
+      entries: [
+        {
+          chapterNumber: 4,
+          version: 1,
+          action: "manual",
+          savedAt: "2026-04-07T00:00:00.000Z",
+          plan: {
+            chapterNumber: 4,
+            chapterName: "历史标题",
+            highlight: "历史亮点",
+            coreConflict: "历史冲突",
+            plotAndConflict: "历史剧情",
+            emotionalTone: "平静",
+            endingHook: "历史钩子",
+            status: "planned",
+            source: "manual",
+            version: 1,
+            needsReview: true,
+            createdAt: "2026-04-07T00:00:00.000Z",
+            updatedAt: "2026-04-07T00:00:00.000Z",
+          },
+        },
+      ],
+      updatedAt: "2026-04-07T00:00:00.000Z",
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/4/history");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      history: expect.arrayContaining([
+        expect.objectContaining({
+          chapterNumber: 4,
+          version: 1,
+          action: "manual",
+        }),
+      ]),
     });
   });
 

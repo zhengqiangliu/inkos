@@ -4,9 +4,11 @@ import { X, RotateCcw, Check, Lock, Eye, GitCompare } from "lucide-react";
 
 interface ChapterPlanVersion {
   version: number;
+  action?: string;
   chapterName: string;
   status: string;
   source: string;
+  chapterNumber?: number;
   lockedFields?: ReadonlyArray<string>;
   driftFlags?: ReadonlyArray<{ code: string; message: string }>;
   updatedAt: string;
@@ -283,6 +285,9 @@ export function VersionHistoryModal({ bookId, chapterNumber, currentPlan, onClos
                         v{ver.version}
                         {isCurrent && " 当前"}
                       </span>
+                      <span className="rounded-full bg-secondary/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        {actionLabel(ver.action)}
+                      </span>
                       <span className="text-[11px] font-medium text-foreground">
                         {ver.chapterName || "（未命名）"}
                       </span>
@@ -363,6 +368,20 @@ function FieldRow({ label, value, multiline }: { label: string; value: string; m
       </p>
     </div>
   );
+}
+
+function actionLabel(action?: string): string {
+  const map: Record<string, string> = {
+    manual: "手工",
+    ai: "AI",
+    approve: "复核",
+    generate: "生成",
+    "generate-replace": "生成覆盖",
+    backfill: "回填",
+    "fill-missing": "补全",
+    current: "当前",
+  };
+  return map[action ?? ""] ?? (action ?? "未知");
 }
 
 function DiffView({ diff, onRollback, restoring }: { diff: DiffResult; onRollback: (v: number) => void; restoring: number | null }) {
