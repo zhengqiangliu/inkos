@@ -471,6 +471,21 @@ async function collectSSEEvents(
   return collected;
 }
 
+async function removeWithRetry(path: string, attempts = 5): Promise<void> {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (i === attempts - 1 || (code !== "ENOTEMPTY" && code !== "EPERM" && code !== "EBUSY")) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
 describe("createStudioServer daemon lifecycle", () => {
   let root: string;
 
@@ -672,7 +687,7 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await removeWithRetry(root);
     await rm(join(tmpdir(), "inkos-global.env"), { force: true });
     if (initialDestructiveRewriteEnv === undefined) {
       delete process.env.INKOS_ENABLE_DESTRUCTIVE_REWRITE;
@@ -1440,7 +1455,7 @@ describe("createStudioServer daemon lifecycle", () => {
     const response = await app.request("http://localhost/api/v1/books/demo-book/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requestedChapters: 1 }),
+      body: JSON.stringify({ requestedChapters: 1, retryEnabled: false }),
     });
 
     expect(response.status).toBe(201);
@@ -1450,22 +1465,15 @@ describe("createStudioServer daemon lifecycle", () => {
       requestedChapters: 1,
     });
 
-    for (let i = 0; i < 20 && writeNextChapterMock.mock.calls.length < 1; i += 1) {
-      await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
-
     type TaskDetailPayload = { task: { status: string; completedChapters: number; requestedChapters: number } };
     let detail: TaskDetailPayload | null = null;
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 100; i += 1) {
       const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
       if (detailResponse.status === 200) {
         detail = await detailResponse.json() as TaskDetailPayload;
         if (detail?.task.status === "succeeded") break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
     expect(detail).not.toBeNull();
@@ -1475,21 +1483,106 @@ describe("createStudioServer daemon lifecycle", () => {
       completedChapters: 1,
       requestedChapters: 1,
     });
+    expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
   });
 
-  it("supports stopping a running book task", async () => {
-    loadBookConfigMock.mockResolvedValue({ targetChapters: 4 });
+  it("updates live word and token counts while a background task is running", async () => {
+    loadBookConfigMock.mockResolvedValue({ targetChapters: 6 });
     getNextChapterNumberMock.mockResolvedValue(3);
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
 
-    writeNextChapterMock.mockImplementationOnce(() => new Promise((resolve) => {
-      setTimeout(() => resolve({
+    let releaseWrite: (() => void) | null = null;
+    writeNextChapterMock.mockImplementationOnce(async () => {
+      const config = pipelineConfigs.at(-1) as {
+        onStreamProgress?: (progress: { status: "streaming" | "done"; elapsedMs: number; totalChars: number; chineseChars: number }) => void;
+      };
+      config.onStreamProgress?.({
+        status: "streaming",
+        elapsedMs: 1_000,
+        totalChars: 480,
+        chineseChars: 460,
+      });
+      await new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      return {
         chapterNumber: 3,
         title: "Ch 3",
         wordCount: 3000,
         revised: false,
         status: "ready-for-review",
         auditResult: { passed: true, issues: [], summary: "ok" },
-      }), 25);
+        tokenUsage: { promptTokens: 12, completionTokens: 34, totalTokens: 46 },
+      };
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestedChapters: 1, retryEnabled: false }),
+    });
+    expect(response.status).toBe(201);
+    const created = await response.json() as { task: { id: string } };
+
+    type TaskDetailPayload = { task: { status: string; writtenWords: number; tokenUsage: { totalTokens: number } | null } };
+    let detail: TaskDetailPayload | null = null;
+    for (let i = 0; i < 60; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        detail = await detailResponse.json() as TaskDetailPayload;
+        if (detail.task.status === "running" && detail.task.writtenWords > 0 && (detail.task.tokenUsage?.totalTokens ?? 0) > 0) {
+          break;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(detail).not.toBeNull();
+    expect(detail?.task.status).toBe("running");
+    expect(detail?.task.writtenWords).toBeGreaterThan(0);
+    expect(detail?.task.tokenUsage?.totalTokens).toBeGreaterThan(0);
+
+    (releaseWrite as unknown as () => void)();
+
+    let completed = false;
+    let finalDetail: TaskDetailPayload | null = null;
+    for (let i = 0; i < 60; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        finalDetail = await detailResponse.json() as TaskDetailPayload;
+        if (finalDetail.task.status === "succeeded") {
+          completed = true;
+          break;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(completed).toBe(true);
+    expect(finalDetail?.task.writtenWords).toBe(3000);
+    expect(finalDetail?.task.tokenUsage?.totalTokens).toBe(46);
+  });
+
+  it("supports stopping a running book task", async () => {
+    loadBookConfigMock.mockResolvedValue({ targetChapters: 4 });
+    getNextChapterNumberMock.mockResolvedValue(3);
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+
+    let releaseWrite: (() => void) | null = null;
+    writeNextChapterMock.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseWrite = () => {
+        resolve({
+          chapterNumber: 3,
+          title: "Ch 3",
+          wordCount: 3000,
+          revised: false,
+          status: "ready-for-review",
+          auditResult: { passed: true, issues: [], summary: "ok" },
+        });
+      };
     }));
 
     const { createStudioServer } = await import("./server.js");
@@ -1503,19 +1596,16 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(createResponse.status).toBe(201);
     const created = await createResponse.json() as { task: { id: string } };
 
-    for (let i = 0; i < 20; i += 1) {
-      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
-      if (detailResponse.status === 200) {
-        const detail = await detailResponse.json() as { task: { status: string } };
-        if (detail.task.status === "running") break;
-      }
+    for (let i = 0; i < 60 && writeNextChapterMock.mock.calls.length < 1; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
 
     const stopResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}/stop`, {
       method: "POST",
     });
     expect(stopResponse.status).toBe(200);
+    (releaseWrite as unknown as () => void)();
 
     type TaskDetailPayload = { task: { status: string; stopRequestedAt: string | null } };
     let detail: TaskDetailPayload | null = null;
@@ -1605,6 +1695,133 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
   });
 
+  it("updates runtime settings for a paused book task", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-paused",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "paused",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: null,
+          nextChapterNumber: null,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          result: null,
+          error: "服务器重启后任务已暂停，请手动继续。",
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const patchResponse = await app.request("http://localhost/api/v1/tasks/demo-book/task-paused", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        service: "openai",
+        model: "gpt-5.4",
+        quickMode: true,
+      }),
+    });
+
+    expect(patchResponse.status).toBe(200);
+    const payload = await patchResponse.json() as {
+      task: {
+        status: string;
+        options: { service: string | null; model: string | null; quickMode: boolean };
+      };
+    };
+    expect(payload.task.status).toBe("paused");
+    expect(payload.task.options).toMatchObject({
+      service: "openai",
+      model: "gpt-5.4",
+      quickMode: true,
+    });
+  });
+
+  it("rejects runtime setting changes while a task is running", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-running",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "running",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: 1,
+          nextChapterNumber: 2,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: "openai",
+            model: "gpt-5.4",
+          },
+          logs: [],
+          result: null,
+          error: null,
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { BookTaskController } = await import("./lib/book-task-controller.js");
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (bookId: string) => join(root, "books", bookId, "story", "state"),
+      } as never,
+      loadCurrentProjectConfig: async () => cloneProjectConfig() as never,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({ auditDraft: async () => ({ passed: true, issues: [], summary: "ok" }), writeNextChapter: async () => ({}) }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    await expect(controller.patch("demo-book", "task-running", {
+      options: {
+        quickMode: true,
+      },
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "BOOK_TASK_ACTIVE",
+    });
+  });
+
   it("cancels a paused book task immediately when stopped", async () => {
     await mkdir(join(root, "books", "demo-book"), { recursive: true });
     await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
@@ -1666,6 +1883,138 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(detail?.task.stopRequestedAt).not.toBeNull();
   });
 
+  it("deletes a paused book task", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-paused",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "paused",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: null,
+          nextChapterNumber: null,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          result: null,
+          error: "服务器重启后任务已暂停，请手动继续。",
+        },
+        {
+          id: "task-running",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "running",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: 1,
+          nextChapterNumber: 2,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          result: null,
+          error: null,
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const deletePaused = await app.request("http://localhost/api/v1/tasks/demo-book/task-paused", {
+      method: "DELETE",
+    });
+    expect(deletePaused.status).toBe(200);
+  });
+
+  it("rejects deleting a running book task", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-running",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "running",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: null,
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: 1,
+          nextChapterNumber: 2,
+          lastChapterNumber: null,
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          result: null,
+          error: null,
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { BookTaskController } = await import("./lib/book-task-controller.js");
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (bookId: string) => join(root, "books", bookId, "story", "state"),
+      } as never,
+      loadCurrentProjectConfig: async () => cloneProjectConfig() as never,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({ auditDraft: async () => ({ passed: true, issues: [], summary: "ok" }), writeNextChapter: async () => ({}) }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    await expect(controller.delete("demo-book", "task-running")).rejects.toMatchObject({
+      status: 409,
+      code: "BOOK_TASK_NOT_DELETABLE",
+    });
+  });
+
   it("pauses an in-flight book task during recovery", async () => {
     await mkdir(join(root, "books", "demo-book"), { recursive: true });
     await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book" }), "utf-8");
@@ -1720,6 +2069,315 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(detail).not.toBeNull();
     expect(detail?.task.status).toBe("paused");
     expect(detail?.task.error).toContain("服务器重启后任务已暂停");
+  });
+
+  it("exposes global task list with book titles and summary", async () => {
+    loadBookConfigMock.mockResolvedValue({ title: "Demo Book", targetChapters: 6 });
+    getNextChapterNumberMock.mockResolvedValue(3);
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+    writeNextChapterMock.mockResolvedValue({
+      chapterNumber: 3,
+      title: "Ch 3",
+      wordCount: 3000,
+      revised: false,
+      status: "ready-for-review",
+      auditResult: { passed: true, issues: [], summary: "ok" },
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestedChapters: 1, retryEnabled: false }),
+    });
+    expect(response.status).toBe(201);
+    const created = await response.json() as { task: { id: string } };
+
+    let completed = false;
+    for (let i = 0; i < 40; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        const detail = await detailResponse.json() as { task: { status: string } };
+        if (detail.task.status === "succeeded") {
+          completed = true;
+          break;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(completed).toBe(true);
+
+    const listResponse = await app.request("http://localhost/api/v1/tasks");
+    expect(listResponse.status).toBe(200);
+    const payload = await listResponse.json() as {
+      summary: { totalTasks: number; succeededTasks: number; totalWrittenChapters: number; totalTokenUsage: number };
+      tasks: Array<{ bookTitle: string | null; status: string }>;
+    };
+    expect(payload.summary.totalTasks).toBe(1);
+    expect(payload.summary.succeededTasks).toBe(1);
+    expect(payload.tasks[0]?.bookTitle).toBe("Demo Book");
+    expect(payload.tasks[0]?.status).toBe("succeeded");
+  });
+
+  it("surfaces audit revise and save sub-stages for auto-write tasks", async () => {
+    loadBookConfigMock.mockResolvedValue({ title: "Demo Book", targetChapters: 6 });
+    getNextChapterNumberMock.mockResolvedValue(3);
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+
+    let releaseWrite: (() => void) | undefined;
+    const holdWrite = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+
+    writeNextChapterMock.mockImplementation(async () => {
+      const config = pipelineConfigs[pipelineConfigs.length - 1] as {
+        onTaskSignal?: (signal: Record<string, unknown>) => void;
+      };
+      const emit = (signal: Record<string, unknown>) => config?.onTaskSignal?.(signal);
+      emit({ kind: "log", level: "info", message: "阶段：准备章节输入" });
+      emit({ kind: "log", level: "info", message: "阶段：撰写章节草稿" });
+      emit({ kind: "audit:start", bookId: "demo-book", chapterNumber: 3, round: 1, maxReviseRounds: 2, phase: "audit" });
+      emit({
+        kind: "audit:complete",
+        bookId: "demo-book",
+        chapterNumber: 3,
+        round: 1,
+        maxReviseRounds: 2,
+        phase: "audit",
+        passed: false,
+        issueCount: 2,
+        score: 64,
+        summary: "needs work",
+      });
+      emit({ kind: "revise:start", bookId: "demo-book", chapterNumber: 3, round: 1, maxReviseRounds: 2, phase: "revise", mode: "spot-fix" });
+      emit({
+        kind: "revise:complete",
+        bookId: "demo-book",
+        chapterNumber: 3,
+        round: 1,
+        maxReviseRounds: 2,
+        phase: "revise",
+        mode: "spot-fix",
+        wordCount: 1800,
+        applied: true,
+        summary: "revised",
+      });
+      emit({ kind: "log", level: "info", message: "阶段：落盘最终章节" });
+      emit({ kind: "log", level: "info", message: "阶段：生成最终真相文件" });
+      emit({ kind: "log", level: "info", message: "阶段：校验真相文件变更" });
+      emit({ kind: "log", level: "info", message: "阶段：同步记忆索引" });
+      emit({ kind: "log", level: "info", message: "阶段：更新章节索引与快照" });
+      await holdWrite;
+      return {
+        chapterNumber: 3,
+        title: "Rewritten Chapter",
+        wordCount: 1800,
+        revised: true,
+        status: "ready-for-review",
+        auditResult: { passed: true, issues: [], summary: "rewritten" },
+      };
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestedChapters: 1, retryEnabled: false }),
+    });
+    expect(response.status).toBe(201);
+    const created = await response.json() as { task: { id: string } };
+
+    let detail: { task: { stage: string; stageLabel: string | null; status: string } } | null = null;
+    for (let i = 0; i < 40; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        detail = await detailResponse.json() as { task: { stage: string; stageLabel: string | null; status: string } };
+        if (detail.task.stage === "saving_index") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(detail).not.toBeNull();
+    expect(detail?.task.status).toBe("running");
+    expect(detail?.task.stage).toBe("saving_index");
+    expect(detail?.task.stageLabel).toBe("索引更新");
+
+    releaseWrite?.();
+
+    let completed = false;
+    for (let i = 0; i < 40; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        const current = await detailResponse.json() as { task: { status: string } };
+        if (current.task.status === "succeeded") {
+          completed = true;
+          break;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(completed).toBe(true);
+  });
+
+  it("records exception logs when task fails", async () => {
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-failed",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "failed",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: "2026-05-19T00:00:00.000Z",
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: null,
+          nextChapterNumber: null,
+          lastChapterNumber: null,
+          retryCount: 0,
+          maxRetryAttempts: 0,
+          retryEnabled: false,
+          retryAt: null,
+          writtenChapters: 0,
+          writtenWords: 0,
+          tokenUsage: null,
+          lastErrorType: "timeout",
+          lastErrorCode: "task_timeout",
+          lastErrorStage: "pipeline",
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          exceptionLogs: [{ timestamp: "2026-05-19T00:00:01.000Z", level: "error", message: "timeout while calling provider" }],
+          result: null,
+          error: "timeout while calling provider",
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const detailResponse = await app.request("http://localhost/api/v1/tasks/demo-book/task-failed");
+    expect(detailResponse.status).toBe(200);
+    const detail = await detailResponse.json() as {
+      task: { exceptionLogs: Array<{ message: string }>; lastErrorType: string | null; error: string | null };
+    };
+
+    expect(detail.task.exceptionLogs.length).toBeGreaterThan(0);
+    expect(detail.task.exceptionLogs[0]?.message).toContain("timeout");
+    expect(detail.task.lastErrorType).toBe("timeout");
+    expect(detail.task.error).toContain("timeout");
+  });
+
+  it("retries a failed task", async () => {
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+    await writeFile(join(root, "books", "demo-book", "story", "state", "book-tasks.json"), JSON.stringify({
+      updatedAt: "2026-05-19T00:00:00.000Z",
+      tasks: [
+        {
+          id: "task-failed",
+          bookId: "demo-book",
+          type: "auto-write",
+          title: "自动写作至目标章节",
+          status: "failed",
+          createdAt: "2026-05-19T00:00:00.000Z",
+          updatedAt: "2026-05-19T00:00:00.000Z",
+          startedAt: "2026-05-19T00:00:00.000Z",
+          finishedAt: "2026-05-19T00:00:00.000Z",
+          stopRequestedAt: null,
+          stoppedAt: null,
+          requestedChapters: 1,
+          completedChapters: 0,
+          currentChapterNumber: null,
+          nextChapterNumber: null,
+          lastChapterNumber: null,
+          retryCount: 0,
+          maxRetryAttempts: 0,
+          retryEnabled: false,
+          retryAt: null,
+          writtenChapters: 0,
+          writtenWords: 0,
+          tokenUsage: null,
+          lastErrorType: "timeout",
+          lastErrorCode: "task_timeout",
+          lastErrorStage: "pipeline",
+          options: {
+            wordCount: null,
+            quickMode: false,
+            preferFastWriterModel: true,
+            service: null,
+            model: null,
+          },
+          logs: [],
+          exceptionLogs: [],
+          result: null,
+          error: "timeout while calling provider",
+        },
+      ],
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const retryResponse = await app.request("http://localhost/api/v1/tasks/demo-book/task-failed/retry", {
+      method: "POST",
+    });
+    expect(retryResponse.status).toBe(200);
+    const payload = await retryResponse.json() as { task: { status: string; retryCount: number } };
+    expect(payload.task.status).toBe("retry_waiting");
+    expect(payload.task.retryCount).toBe(1);
+  });
+
+  it("moves recoverable failures into retry_waiting when auto retry is enabled", async () => {
+    loadBookConfigMock.mockResolvedValue({ title: "Demo Book", targetChapters: 6 });
+    getNextChapterNumberMock.mockResolvedValue(3);
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+    writeNextChapterMock.mockRejectedValueOnce(new Error("temporary network error"));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestedChapters: 1, retryEnabled: true }),
+    });
+    expect(response.status).toBe(201);
+    const created = await response.json() as { task: { id: string } };
+
+    let retryWaiting = false;
+    for (let i = 0; i < 30; i += 1) {
+      const detailResponse = await app.request(`http://localhost/api/v1/books/demo-book/tasks/${created.task.id}`);
+      if (detailResponse.status === 200) {
+        const detail = await detailResponse.json() as { task: { status: string } };
+        if (detail.task.status === "retry_waiting") {
+          retryWaiting = true;
+          break;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(retryWaiting).toBe(true);
   });
 
   it("tests a single model connectivity with elapsed time", async () => {
@@ -4209,6 +4867,7 @@ describe("createStudioServer daemon lifecycle", () => {
         { role: "user", content: "continue" },
         { role: "assistant", content: "Completed write_next for demo-book." },
       ],
+      tokenUsage: { promptTokens: 12, completionTokens: 34, totalTokens: 46 },
     });
 
     const { createStudioServer } = await import("./server.js");
@@ -4224,6 +4883,7 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(response.json()).resolves.toMatchObject({
       response: "Completed write_next for demo-book.",
       runId: expect.any(String),
+      tokenUsage: { promptTokens: 12, completionTokens: 34, totalTokens: 46 },
       session: expect.objectContaining({
         sessionId: "agent-session-1",
       }),
@@ -4845,6 +5505,19 @@ describe("createStudioServer daemon lifecycle", () => {
   });
 
   it("routes audit chapter command through deterministic auditor execution", async () => {
+    let chapterIndex = [{
+      number: 19,
+      title: "Ch19",
+      status: "drafted",
+      wordCount: 3100,
+      createdAt: "2026-04-12T00:00:00.000Z",
+      updatedAt: "2026-04-12T00:00:00.000Z",
+      auditHistory: [],
+    }];
+    loadChapterIndexMock.mockImplementation(async () => chapterIndex);
+    saveChapterIndexMock.mockImplementation(async (_bookId: string, nextIndex: unknown) => {
+      chapterIndex = nextIndex as typeof chapterIndex;
+    });
     auditDraftMock.mockResolvedValueOnce({
       chapterNumber: 19,
       passed: true,
@@ -4872,6 +5545,16 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     expect(auditDraftMock).toHaveBeenCalledWith("demo-book", 19);
     expect(runAgentSessionMock).not.toHaveBeenCalled();
+    expect(chapterIndex[0]).toMatchObject({
+      status: "ready-for-review",
+      auditHistory: [
+        expect.objectContaining({
+          passed: true,
+          issueCount: 0,
+          score: 100,
+        }),
+      ],
+    });
   });
 
   it("routes bare audit command to latest chapter through deterministic auditor execution", async () => {
@@ -5515,6 +6198,52 @@ describe("createStudioServer daemon lifecycle", () => {
     const reviseRunId = "run-auto-audit-revise-1";
     const rewriteRunId = "run-auto-audit-rewrite-1";
 
+    writeNextChapterMock.mockResolvedValueOnce({
+      chapterNumber: 18,
+      title: "Written Chapter",
+      wordCount: 1800,
+      revised: false,
+      status: "ready-for-review",
+      auditResult: {
+        passed: true,
+        issues: [],
+        summary: "ok",
+      },
+      tokenUsage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+    });
+    reviseDraftMock.mockResolvedValueOnce({
+      chapterNumber: 12,
+      wordCount: 1900,
+      fixedIssues: ["focus restored"],
+      applied: true,
+      status: "audit-failed",
+      tokenUsage: { promptTokens: 12, completionTokens: 22, totalTokens: 34 },
+    });
+    auditDraftMock.mockResolvedValueOnce({
+      chapterNumber: 12,
+      passed: false,
+      issues: [
+        { severity: "warning", category: "节奏", description: "节奏偏平", suggestion: "补充起伏" },
+      ],
+      summary: "still weak",
+      tokenUsage: { promptTokens: 11, completionTokens: 21, totalTokens: 32 },
+    });
+    auditDraftMock.mockResolvedValueOnce({
+      chapterNumber: 12,
+      passed: true,
+      issues: [],
+      summary: "fixed",
+      tokenUsage: { promptTokens: 13, completionTokens: 23, totalTokens: 36 },
+    });
+    reviseDraftMock.mockResolvedValueOnce({
+      chapterNumber: 3,
+      wordCount: 1920,
+      fixedIssues: ["pacing fixed"],
+      applied: true,
+      status: "ready-for-review",
+      tokenUsage: { promptTokens: 14, completionTokens: 24, totalTokens: 38 },
+    });
+
     const writeResponse = await app.request("http://localhost/api/v1/agent", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5553,52 +6282,62 @@ describe("createStudioServer daemon lifecycle", () => {
 
     const events = await collectSSEEvents(
       eventsResponse,
-      ["audit:complete"],
-      { timeoutMs: 4_000, minCount: 3 },
+      ["audit:complete", "agent:usage", "agent:complete"],
+      { timeoutMs: 4_000, minCount: 9 },
     );
-    expect(events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          event: "audit:complete",
-          data: expect.objectContaining({
-            sessionId: "agent-session-1",
-            runId: writeRunId,
-            entry: "write-next",
-            chapter: 18,
-            passed: true,
-            score: 100,
-            issueCount: 0,
-            failureGate: "none",
-          }),
-        }),
-        expect.objectContaining({
-          event: "audit:complete",
-          data: expect.objectContaining({
-            sessionId: "agent-session-1",
-            runId: reviseRunId,
-            entry: "rewrite",
-            chapter: 12,
-            passed: false,
-            score: 53,
-            issueCount: 2,
-            failureGate: "critical",
-          }),
-        }),
-        expect.objectContaining({
-          event: "audit:complete",
-          data: expect.objectContaining({
-            sessionId: "agent-session-1",
-            runId: rewriteRunId,
-            entry: "rewrite",
-            chapter: 3,
-            passed: true,
-            score: 100,
-            issueCount: 0,
-            failureGate: "none",
-          }),
-        }),
-      ]),
-    );
+    const findEvent = (event: string, runId: string) => [...events].reverse().find((item) => {
+      const data = item.data as { sessionId?: unknown; runId?: unknown } | null;
+      return item.event === event && data?.sessionId === "agent-session-1" && data?.runId === runId;
+    });
+
+    const reviseComplete = findEvent("agent:complete", reviseRunId);
+    const rewriteComplete = findEvent("agent:complete", rewriteRunId);
+    const writeAudit = findEvent("audit:complete", writeRunId);
+    const reviseAudit = findEvent("audit:complete", reviseRunId);
+    const rewriteAudit = findEvent("audit:complete", rewriteRunId);
+
+    expect(reviseComplete).toBeDefined();
+    expect(rewriteComplete).toBeDefined();
+    expect(writeAudit).toBeDefined();
+    expect(reviseAudit).toBeDefined();
+    expect(rewriteAudit).toBeDefined();
+
+    const usageEvents = events.filter((event) => event.event === "agent:usage");
+    expect(usageEvents.length).toBeGreaterThan(0);
+    expect(
+      usageEvents.some((event) => ((event.data as { tokenUsage?: { totalTokens?: number } } | null)?.tokenUsage?.totalTokens ?? 0) > 0),
+    ).toBe(true);
+
+    expect(writeAudit?.data).toEqual(expect.objectContaining({
+      sessionId: "agent-session-1",
+      runId: writeRunId,
+      entry: "write-next",
+      chapter: 18,
+      passed: true,
+      score: 100,
+      issueCount: 0,
+      failureGate: "none",
+    }));
+    expect(reviseAudit?.data).toEqual(expect.objectContaining({
+      sessionId: "agent-session-1",
+      runId: reviseRunId,
+      entry: "rewrite",
+      chapter: 12,
+      passed: false,
+      score: 53,
+      issueCount: 2,
+      failureGate: "critical",
+    }));
+    expect(rewriteAudit?.data).toEqual(expect.objectContaining({
+      sessionId: "agent-session-1",
+      runId: rewriteRunId,
+      entry: "rewrite",
+      chapter: 3,
+      passed: true,
+      score: 100,
+      issueCount: 0,
+      failureGate: "none",
+    }));
   });
 
   it("emits write-target entry for deterministic 写第N章 audit events", async () => {
@@ -6664,10 +7403,11 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     expect(auditDraftMock).toHaveBeenNthCalledWith(1, "demo-book", 12);
     expect(auditDraftMock).toHaveBeenNthCalledWith(2, "demo-book", 13);
-    expect(saveChapterIndexMock).toHaveBeenCalledTimes(1);
-    const savedIndex = saveChapterIndexMock.mock.calls[0]?.[1] as Array<Record<string, unknown>>;
-    expect(savedIndex.find((item) => Number(item.number) === 12)?.reviewNote).toBeUndefined();
-    expect(savedIndex.find((item) => Number(item.number) === 13)?.reviewNote).toBeUndefined();
+    expect(saveChapterIndexMock).toHaveBeenCalledTimes(2);
+    const [auditSummaryIndex, clearedIndex] = saveChapterIndexMock.mock.calls.map((call) => call[1] as Array<Record<string, unknown>>);
+    expect(auditSummaryIndex.find((item) => Number(item.number) === 12)?.reviewNote).toContain("[rewrite-impact]");
+    expect(clearedIndex.find((item) => Number(item.number) === 12)?.reviewNote).toBeUndefined();
+    expect(clearedIndex.find((item) => Number(item.number) === 13)?.reviewNote).toBeUndefined();
     expect(runAgentSessionMock).not.toHaveBeenCalled();
   });
 

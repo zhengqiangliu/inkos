@@ -4,6 +4,7 @@ export type BookInstructionLanguage = "zh" | "en";
 interface ResolveBookInstructionOptions {
   readonly chapterNumber?: number;
   readonly brief?: string;
+  readonly auditReport?: string;
   readonly language?: BookInstructionLanguage;
 }
 
@@ -21,6 +22,11 @@ function normalizeBrief(input?: string): string {
   return value.length > 0 ? ` ${value}` : "";
 }
 
+function normalizeAuditReport(input?: string): string {
+  const value = input?.trim() ?? "";
+  return value.length > 0 ? value : "";
+}
+
 export function resolveBookAgentInstruction(
   intent: BookAgentIntent,
   options: ResolveBookInstructionOptions = {},
@@ -32,8 +38,14 @@ export function resolveBookAgentInstruction(
 
   const chapter = normalizeChapterNumber(options.chapterNumber);
   const briefSuffix = normalizeBrief(options.brief);
+  const auditReport = normalizeAuditReport(options.auditReport);
+  const auditReportSection = auditReport.length > 0
+    ? language === "en"
+      ? `\n\nLatest audit report:\n${auditReport}`
+      : `\n\n最新审计报告：\n${auditReport}`
+    : "";
   if (language === "en") {
-    return `rewrite chapter ${chapter}${briefSuffix}`;
+    return `rewrite chapter ${chapter}${briefSuffix}${auditReportSection}`;
   }
-  return `重写第${chapter}章${briefSuffix}`;
+  return `重写第${chapter}章${briefSuffix}${auditReportSection}`;
 }

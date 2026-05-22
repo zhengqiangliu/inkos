@@ -66,6 +66,15 @@ describe("deriveInvalidationPaths", () => {
     ]);
   });
 
+  it("refreshes global tasks after book task mutations", () => {
+    expect(deriveInvalidationPaths("/books/demo/tasks")).toEqual([
+      "/api/v1/books",
+      "/api/v1/books/demo",
+      "/api/v1/books/demo/tasks",
+      "/api/v1/tasks",
+    ]);
+  });
+
   it("refreshes daemon state after daemon mutations", () => {
     expect(deriveInvalidationPaths("/daemon/start")).toEqual(["/api/v1/daemon"]);
     expect(deriveInvalidationPaths("/daemon/stop")).toEqual(["/api/v1/daemon"]);

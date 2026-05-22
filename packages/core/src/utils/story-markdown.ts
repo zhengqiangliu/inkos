@@ -240,6 +240,11 @@ export function normalizeHookId(value: string | undefined): string {
   return normalized;
 }
 
+export function normalizeHookType(value: string | undefined): string {
+  const normalized = (value ?? "").trim();
+  return normalized.length > 0 ? normalized : "unspecified";
+}
+
 function parsePendingHookRow(row: ReadonlyArray<string | undefined>): StoredHook {
   const legacyShape = row.length < 8;
   const payoffTiming = legacyShape ? undefined : normalizeHookPayoffTiming(row[6]);
@@ -251,7 +256,7 @@ function parsePendingHookRow(row: ReadonlyArray<string | undefined>): StoredHook
   return {
     hookId: normalizeHookId(row[0]),
     startChapter: parseStrictChapterInteger(row[1]),
-    type: row[2] ?? "",
+    type: normalizeHookType(row[2]),
     status: row[3] ?? "open",
     lastAdvancedChapter: parseStrictChapterInteger(row[4]),
     expectedPayoff: row[5] ?? "",

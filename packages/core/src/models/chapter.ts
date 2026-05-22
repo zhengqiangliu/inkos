@@ -18,6 +18,24 @@ export const ChapterStatusSchema = z.enum([
 ]);
 export type ChapterStatus = z.infer<typeof ChapterStatusSchema>;
 
+export const ChapterAuditReportSchema = z.object({
+  auditedAt: z.string().datetime(),
+  passed: z.boolean(),
+  issueCount: z.number().int().min(0),
+  score: z.number().int().min(0).max(100),
+  summary: z.string().optional(),
+  report: z.string().optional(),
+  issues: z.array(z.string()).default([]),
+  severityCounts: z.object({
+    critical: z.number().int().min(0).default(0),
+    warning: z.number().int().min(0).default(0),
+    info: z.number().int().min(0).default(0),
+  }).optional(),
+  failureGate: z.enum(["none", "critical", "score"]).optional(),
+});
+
+export type ChapterAuditReport = z.infer<typeof ChapterAuditReportSchema>;
+
 export const ChapterMetaSchema = z.object({
   number: z.number().int().min(1),
   title: z.string(),
@@ -32,6 +50,7 @@ export const ChapterMetaSchema = z.object({
   detectionProvider: z.string().optional(),
   detectedAt: z.string().datetime().optional(),
   lengthTelemetry: LengthTelemetrySchema.optional(),
+  auditHistory: z.array(ChapterAuditReportSchema).optional(),
   tokenUsage: z.object({
     promptTokens: z.number().int().default(0),
     completionTokens: z.number().int().default(0),

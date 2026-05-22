@@ -55,6 +55,8 @@ import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
 import { BookTaskController } from "./lib/book-task-controller.js";
+import { persistChapterAuditSummary } from "./lib/chapter-audit-index.js";
+import type { BookTask } from "../shared/contracts.js";
 import { countChapterLengthByLanguage } from "../utils/chapter-length.js";
 import {
   AUDIT_PASS_SCORE_THRESHOLD,
@@ -184,6 +186,7 @@ function hasLogContextPrefix(message: string): boolean {
 function withLogContext(args: {
   readonly message: string;
   readonly runId?: string;
+  readonly bookId?: string;
   readonly chapterNumber?: number;
 }): { message: string; chapterNumber?: number } {
   const raw = args.message.trim();
@@ -198,6 +201,7 @@ function withLogContext(args: {
     ? Number(args.chapterNumber)
     : inferChapterNumberFromText(raw);
   const context = [
+    args.bookId ? `[book:${args.bookId}]` : null,
     args.runId ? `[run:${args.runId}]` : null,
     Number.isFinite(chapterNumber) && (chapterNumber ?? 0) > 0 ? `[chapter:${chapterNumber}]` : null,
   ].filter(Boolean).join("");
@@ -232,6 +236,48 @@ function extractToolUpdateText(partialResult: unknown): string | null {
     return text || null;
   }
   return null;
+}
+
+interface TokenUsageSnapshot {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+}
+
+function zeroTokenUsage(): TokenUsageSnapshot {
+  return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+function normalizeTokenUsage(value: unknown): TokenUsageSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const usage = value as {
+    promptTokens?: unknown;
+    completionTokens?: unknown;
+    totalTokens?: unknown;
+    input?: unknown;
+    output?: unknown;
+  };
+  const promptTokens = Number(usage.promptTokens ?? usage.input);
+  const completionTokens = Number(usage.completionTokens ?? usage.output);
+  const totalTokensRaw = Number(usage.totalTokens);
+  if (!Number.isFinite(promptTokens) || !Number.isFinite(completionTokens)) {
+    return null;
+  }
+  const totalTokens = Number.isFinite(totalTokensRaw) ? totalTokensRaw : promptTokens + completionTokens;
+  return {
+    promptTokens: Math.max(0, Math.trunc(promptTokens)),
+    completionTokens: Math.max(0, Math.trunc(completionTokens)),
+    totalTokens: Math.max(0, Math.trunc(totalTokens)),
+  };
+}
+
+function addTokenUsage(left: TokenUsageSnapshot, right?: TokenUsageSnapshot | null): TokenUsageSnapshot {
+  if (!right) return { ...left };
+  return {
+    promptTokens: left.promptTokens + right.promptTokens,
+    completionTokens: left.completionTokens + right.completionTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
 }
 
 type AuditSeverity = "critical" | "warning" | "info";
@@ -720,6 +766,7 @@ function resolveAutoReviewPolicy(config: ProjectConfig): {
 
 interface NormalizedAuditDraftSummary extends NormalizedReviseAuditSummary {
   readonly chapterNumber: number;
+  readonly tokenUsage?: TokenUsageSnapshot;
   readonly raw: PipelineAuditDraftResult;
 }
 
@@ -1376,6 +1423,7 @@ function normalizeAuditDraftSummary(
   const issueClassCounts = validClassCountsFromPayload ?? derivedClassCounts;
   const primaryIssueClass = normalizePrimaryIssueClass(payload.primaryIssueClass)
     ?? derivePrimaryIssueClassFromCounts(issueClassCounts);
+  const tokenUsage = normalizeTokenUsage((auditResult as { tokenUsage?: unknown }).tokenUsage) ?? undefined;
   return {
     chapterNumber,
     passed,
@@ -1397,6 +1445,7 @@ function normalizeAuditDraftSummary(
       severityCounts,
       failureGate,
     }),
+    ...(tokenUsage ? { tokenUsage } : {}),
     raw: auditResult,
   };
 }
@@ -1416,6 +1465,7 @@ async function runAuditWithAutoRevise(args: {
     round: number;
     maxReviseRounds: number;
     audit: NormalizedAuditDraftSummary;
+    tokenUsage?: TokenUsageSnapshot;
     latestRevisionMustFixOutcomes?: ReadonlyArray<{
       issueId: string;
       outcome: "resolved" | "partial" | "unresolved";
@@ -1436,6 +1486,7 @@ async function runAuditWithAutoRevise(args: {
     mode: AutoReviseMode;
     reviseResult: PipelineReviseDraftResult;
     reviseAudit: NormalizedReviseAuditSummary | null;
+    tokenUsage?: TokenUsageSnapshot;
   }) => void | Promise<void>;
 }): Promise<AutoAuditCycleResult> {
   const configuredMaxReviseRounds = Number.isFinite(Number(args.maxReviseRounds))
@@ -1476,6 +1527,7 @@ async function runAuditWithAutoRevise(args: {
     round: auditRound,
     maxReviseRounds: effectiveMaxReviseRounds,
     audit: currentAudit,
+    tokenUsage: currentAudit.tokenUsage,
   });
   if (currentAudit.passed) {
     return {
@@ -1619,6 +1671,7 @@ async function runAuditWithAutoRevise(args: {
       mode: reviseMode,
       reviseResult,
       reviseAudit,
+      tokenUsage: normalizeTokenUsage((reviseResult as { tokenUsage?: unknown }).tokenUsage) ?? undefined,
     });
 
     auditRound = reviseRound + 1;
@@ -1712,6 +1765,7 @@ async function runUnifiedReviewLoop(args: {
     round: number;
     maxReviseRounds: number;
     audit: NormalizedAuditDraftSummary;
+    tokenUsage?: TokenUsageSnapshot;
     latestRevisionMustFixOutcomes?: ReadonlyArray<{
       issueId: string;
       outcome: "resolved" | "partial" | "unresolved";
@@ -1732,6 +1786,7 @@ async function runUnifiedReviewLoop(args: {
     mode: AutoReviseMode;
     reviseResult: PipelineReviseDraftResult;
     reviseAudit: NormalizedReviseAuditSummary | null;
+    tokenUsage?: TokenUsageSnapshot;
   }) => void | Promise<void>;
 }): Promise<UnifiedReviewLoopResult> {
   const entry = args.entry ?? "rewrite";
@@ -1741,13 +1796,28 @@ async function runUnifiedReviewLoop(args: {
     const normalized = normalizeAuditDraftSummary(
       await args.pipeline.auditDraft(args.bookId, args.chapterNumber),
     );
-    await args.onAuditComplete?.({ round: 1, maxReviseRounds: 0, audit: normalized });
+    await args.onAuditComplete?.({ round: 1, maxReviseRounds: 0, audit: normalized, tokenUsage: normalized.tokenUsage });
     await persistAutoReviewTerminalNote({
       state: args.state,
       bookId: args.bookId,
       chapterNumber: normalized.chapterNumber,
       finalState: normalized.passed ? "passed" : "failed-single-audit",
       finalAudit: normalized,
+    });
+    await persistChapterAuditSummary({
+      state: args.state,
+      bookId: args.bookId,
+      chapterNumber: normalized.chapterNumber,
+      audit: {
+        passed: normalized.passed,
+        score: normalized.score,
+        issueCount: normalized.issueCount,
+        summary: normalized.summary,
+        report: normalized.report,
+        issues: normalized.issueTexts,
+        severityCounts: normalized.severityCounts,
+        failureGate: normalized.failureGate,
+      },
     });
     const autoReview: UnifiedReviewLoopAutoReviewPayload = {
       enabled: args.autoReviewPolicy.enabled,
@@ -1789,8 +1859,23 @@ async function runUnifiedReviewLoop(args: {
     finalState,
     ...(finalState === "failed-max-rounds"
       ? { stopReason: cycle.stopReason?.trim() || "达到自动修订轮次上限，仍未通过审计" }
-      : {}),
+      : {}), 
     finalAudit: cycle.finalAudit,
+  });
+  await persistChapterAuditSummary({
+    state: args.state,
+    bookId: args.bookId,
+    chapterNumber: cycle.finalAudit.chapterNumber,
+    audit: {
+      passed: cycle.finalAudit.passed,
+      score: cycle.finalAudit.score,
+      issueCount: cycle.finalAudit.issueCount,
+      summary: cycle.finalAudit.summary,
+      report: cycle.finalAudit.report,
+      issues: cycle.finalAudit.issueTexts,
+      severityCounts: cycle.finalAudit.severityCounts,
+      failureGate: cycle.finalAudit.failureGate,
+    },
   });
   const autoReview = buildUnifiedAutoReviewPayload({
     enabled: args.autoReviewPolicy.enabled,
@@ -5020,10 +5105,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   }
 
   async function buildPipelineConfig(
-    overrides?: Partial<Pick<PipelineConfig, "externalContext" | "client" | "model" | "defaultWriteNextQuickMode" | "writeStageHeartbeatMs">> & {
+    overrides?: Partial<Pick<PipelineConfig, "externalContext" | "client" | "model" | "defaultWriteNextQuickMode" | "writeStageHeartbeatMs" | "onStreamProgress">> & {
       readonly currentConfig?: ProjectConfig;
+      readonly bookId?: string;
       readonly sessionIdForSSE?: string;
       readonly runIdForSSE?: string;
+      readonly onTaskSignal?: PipelineConfig["onTaskSignal"];
       readonly onChapterDelta?: (payload: {
         previewType: "chapter" | "patch";
         chapterNumber?: number;
@@ -5038,6 +5125,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             if (shouldSuppressStageHeartbeatLog(entry.message)) return;
             const contextual = withLogContext({
               message: entry.message,
+              bookId: overrides.bookId,
               runId: overrides.runIdForSSE,
             });
             broadcast("log", {
@@ -5057,6 +5145,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             if (shouldSuppressStageHeartbeatLog(entry.message)) return;
             const contextual = withLogContext({
               message: entry.message,
+              bookId: overrides.bookId,
               runId: overrides.runIdForSSE,
             });
             const prefix = `[${entry.tag}]`;
@@ -5085,6 +5174,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           totalChars: progress.totalChars,
           chineseChars: progress.chineseChars,
         });
+        overrides?.onStreamProgress?.(progress);
       },
       onWriterTextDelta: (payload) => {
         const sequence = overrides?.runIdForSSE ? nextChapterDeltaSequence(overrides.runIdForSSE) : undefined;
@@ -5176,6 +5266,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           chapterNumber: payload.chapterNumber,
         });
       },
+      onTaskSignal: (signal) => {
+        overrides?.onTaskSignal?.(signal);
+      },
       onWriteNextAuditStart: (payload) => {
         broadcast("audit:start", {
           ...(overrides?.sessionIdForSSE ? { sessionId: overrides.sessionIdForSSE } : {}),
@@ -5185,6 +5278,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           chapter: payload.chapterNumber,
           round: payload.round,
           maxRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+        });
+        overrides?.onTaskSignal?.({
+          kind: "audit:start",
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          round: payload.round,
+          maxReviseRounds: payload.maxReviseRounds,
           phase: payload.phase,
         });
       },
@@ -5259,6 +5360,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           report,
           ...autoReviewState,
         });
+        overrides?.onTaskSignal?.({
+          kind: "audit:complete",
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          round: payload.round,
+          maxReviseRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+          passed: payload.audit.passed,
+          issueCount: payload.audit.issueCount,
+          score: payload.audit.score,
+          summary: payload.audit.summary,
+        });
       },
       onWriteNextReviseStart: (payload) => {
         broadcast("revise:start", {
@@ -5272,6 +5385,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           phase: payload.phase,
           mode: payload.mode,
           autoTriggeredByAudit: true,
+        });
+        overrides?.onTaskSignal?.({
+          kind: "revise:start",
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          round: payload.round,
+          maxReviseRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+          mode: payload.mode,
         });
       },
       onWriteNextReviseComplete: (payload) => {
@@ -5333,6 +5455,18 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           status: reviseStatus,
           applied: payload.applied,
           ...(reviseAudit ? { audit: reviseAudit } : {}),
+        });
+        overrides?.onTaskSignal?.({
+          kind: "revise:complete",
+          bookId: payload.bookId,
+          chapterNumber: payload.chapterNumber,
+          round: payload.round,
+          maxReviseRounds: payload.maxReviseRounds,
+          phase: payload.phase,
+          mode: payload.mode,
+          wordCount: payload.wordCount,
+          applied: payload.applied,
+          summary: payload.audit?.summary,
         });
       },
       externalContext: overrides?.externalContext,
@@ -5403,6 +5537,49 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       console.warn("[studio] book task recovery skipped:", error);
     }
   })();
+
+  async function loadGlobalTasks() {
+    const bookIds = await state.listBooks();
+    const books = await Promise.all(bookIds.map(async (bookId) => {
+      const [book, tasks] = await Promise.all([
+        state.loadBookConfig(bookId).catch(() => null),
+        bookTaskController.list(bookId).catch(() => []),
+      ]);
+      return {
+        bookId,
+        bookTitle: book?.title ?? null,
+        tasks,
+      };
+    }));
+
+    const tasks = books.flatMap((book) => book.tasks.map((task) => ({
+      ...task,
+      bookTitle: book.bookTitle,
+    })));
+
+    const summary = tasks.reduce((acc, task) => {
+      acc.totalTasks += 1;
+      if (task.status === "queued") acc.queuedTasks += 1;
+      if (task.status === "running" || task.status === "paused" || task.status === "stopping" || task.status === "retry_waiting" || task.status === "queued") acc.activeTasks += 1;
+      if (task.status === "failed") acc.failedTasks += 1;
+      if (task.status === "succeeded") acc.succeededTasks += 1;
+      acc.totalWrittenChapters += task.writtenChapters ?? task.completedChapters ?? 0;
+      acc.totalWrittenWords += task.writtenWords ?? 0;
+      acc.totalTokenUsage += task.tokenUsage?.totalTokens ?? 0;
+      return acc;
+    }, {
+      totalTasks: 0,
+      activeTasks: 0,
+      failedTasks: 0,
+      queuedTasks: 0,
+      succeededTasks: 0,
+      totalWrittenChapters: 0,
+      totalWrittenWords: 0,
+      totalTokenUsage: 0,
+    });
+
+    return { summary, tasks };
+  }
 
   // --- Books ---
 
@@ -5696,10 +5873,29 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return c.json({ tasks });
   });
 
+  app.get("/api/v1/tasks", async (c) => {
+    const globalTasks = await loadGlobalTasks();
+    return c.json(globalTasks);
+  });
+
+  app.get("/api/v1/tasks/:bookId/:taskId", async (c) => {
+    const bookId = c.req.param("bookId");
+    const taskId = c.req.param("taskId");
+    const task = await bookTaskController.get(bookId, taskId);
+    if (!task) {
+      return c.json({ error: `Task "${taskId}" not found` }, 404);
+    }
+    const book = await state.loadBookConfig(bookId).catch(() => null);
+    return c.json({ task: { ...task, bookTitle: book?.title ?? null } });
+  });
+
   app.post("/api/v1/books/:id/tasks", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json<{
+      type?: "write" | "audit";
       requestedChapters?: number;
+      auditChapterStart?: number;
+      auditChapterEnd?: number;
       wordCount?: number;
       quickMode?: boolean;
       preferFastWriterModel?: boolean;
@@ -5732,6 +5928,62 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const taskId = c.req.param("taskId");
     const task = await bookTaskController.resume(id, taskId);
     return c.json({ task });
+  });
+
+  app.patch("/api/v1/tasks/:bookId/:taskId", async (c) => {
+    const bookId = c.req.param("bookId");
+    const taskId = c.req.param("taskId");
+    const body = await c.req.json<{
+      retryEnabled?: boolean;
+      options?: {
+        service?: string | null;
+        model?: string | null;
+        quickMode?: boolean;
+      };
+      service?: string | null;
+      model?: string | null;
+      quickMode?: boolean;
+    }>().catch(() => null);
+    const mergedOptions = body ? {
+      ...(body.options ?? {}),
+      ...(body.service !== undefined ? { service: body.service } : {}),
+      ...(body.model !== undefined ? { model: body.model } : {}),
+      ...(body.quickMode !== undefined ? { quickMode: body.quickMode } : {}),
+    } : {};
+    const patch = body ? {
+      ...(typeof body.retryEnabled === "boolean" ? { retryEnabled: body.retryEnabled } : {}),
+      ...(Object.keys(mergedOptions).length > 0 ? { options: mergedOptions } : {}),
+    } : {};
+    const task = await bookTaskController.patch(bookId, taskId, patch as never);
+    const book = await state.loadBookConfig(bookId).catch(() => null);
+    return c.json({ task: { ...task, bookTitle: book?.title ?? null } });
+  });
+
+  app.delete("/api/v1/tasks/:bookId/:taskId", async (c) => {
+    const bookId = c.req.param("bookId");
+    const taskId = c.req.param("taskId");
+    const task = await bookTaskController.get(bookId, taskId);
+    if (!task) {
+      return c.json({ error: `Task "${taskId}" not found` }, 404);
+    }
+    await bookTaskController.delete(bookId, taskId);
+    return c.json({ ok: true, task });
+  });
+
+  app.post("/api/v1/tasks/:bookId/:taskId/retry", async (c) => {
+    const bookId = c.req.param("bookId");
+    const taskId = c.req.param("taskId");
+    const task = await bookTaskController.retry(bookId, taskId);
+    const book = await state.loadBookConfig(bookId).catch(() => null);
+    return c.json({ task: { ...task, bookTitle: book?.title ?? null } });
+  });
+
+  app.post("/api/v1/tasks/:bookId/:taskId/cancel", async (c) => {
+    const bookId = c.req.param("bookId");
+    const taskId = c.req.param("taskId");
+    const task = await bookTaskController.cancel(bookId, taskId);
+    const book = await state.loadBookConfig(bookId).catch(() => null);
+    return c.json({ task: { ...task, bookTitle: book?.title ?? null } });
   });
 
   // --- Actions ---
@@ -5795,6 +6047,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     // Fire and forget — progress/completion/errors pushed via SSE
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         currentConfig,
+        bookId: id,
         ...(selectedRuntime.client ? { client: selectedRuntime.client } : {}),
         ...(selectedRuntime.model ? { model: selectedRuntime.model } : {}),
         writeStageHeartbeatMs: resolveWriteStageHeartbeatMs(),
@@ -5859,6 +6112,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const pipeline = new PipelineRunner(await buildPipelineConfig({
       currentConfig,
+      bookId: id,
       ...(selectedRuntime.client ? { client: selectedRuntime.client } : {}),
       ...(selectedRuntime.model ? { model: selectedRuntime.model } : {}),
     }));
@@ -6876,6 +7130,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         client: pipelineClient,
         model: effectiveReqModel ?? config.llm.model,
         currentConfig: config,
+        bookId: activeBookId,
         sessionIdForSSE: bookSession.sessionId,
         runIdForSSE: runId,
         onChapterDelta: (payload) => {
@@ -7060,7 +7315,32 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       let result: {
         responseText: string;
         messages: Array<{ role: string; content: string; thinking?: string }>;
+        tokenUsage?: TokenUsageSnapshot;
       } | null = null;
+      let completedAgentTokenUsage = zeroTokenUsage();
+      let currentAgentTokenUsage: TokenUsageSnapshot | null = null;
+      let toolAgentTokenUsage = zeroTokenUsage();
+      let modelAgentTokenUsage = zeroTokenUsage();
+      let agentTokenUsage = zeroTokenUsage();
+      const emitAgentUsage = (
+        usage: TokenUsageSnapshot | null | undefined,
+        source: "model" | "tool" = "tool",
+      ): void => {
+        if (!usage) return;
+        if (source === "model") {
+          modelAgentTokenUsage = usage;
+        } else {
+          toolAgentTokenUsage = addTokenUsage(toolAgentTokenUsage, usage);
+        }
+        agentTokenUsage = addTokenUsage(modelAgentTokenUsage, toolAgentTokenUsage);
+        broadcast("agent:usage", {
+          instruction,
+          activeBookId,
+          sessionId,
+          runId,
+          tokenUsage: agentTokenUsage,
+        });
+      };
       if (deterministicAction && activeBookId) {
         const toolCallId = `det-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         const actionMeta = {
@@ -7177,10 +7457,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                     round,
                     maxReviseRounds,
                     audit,
+                    tokenUsage,
                     latestRevisionMustFixOutcomes,
                     latestRevisionMustFixTotalCount,
                     latestRevisionMustFixUnresolvedCount,
                   }) => {
+                    emitAgentUsage(tokenUsage);
                     const autoReviewState = buildAutoReviewAuditEventState({
                       round,
                       maxReviseRounds,
@@ -7223,7 +7505,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                       autoTriggeredByAudit: true,
                     });
                   },
-                onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+                onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit, tokenUsage }) => {
+                  emitAgentUsage(tokenUsage);
                   broadcast("revise:complete", {
                     sessionId: streamSessionId,
                     runId,
@@ -7450,10 +7733,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 round,
                 maxReviseRounds,
                 audit,
+                tokenUsage,
                 latestRevisionMustFixOutcomes,
                 latestRevisionMustFixTotalCount,
                 latestRevisionMustFixUnresolvedCount,
               }) => {
+                emitAgentUsage(tokenUsage);
                 const autoReviewState = buildAutoReviewAuditEventState({
                   round,
                   maxReviseRounds,
@@ -7518,7 +7803,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   partialResult: { content: [{ type: "text", text: reviseStartText }] },
                 });
               },
-              onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+              onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit, tokenUsage }) => {
+                emitAgentUsage(tokenUsage);
                 const reviseFinishText = `Auto revise round ${round}/${maxReviseRounds} complete for chapter ${chapterNumber}: ${reviseResult.applied ? "APPLIED" : "UNCHANGED"} (${reviseResult.status}).`;
                 emitDeterministicThinking(reviseFinishText, {
                   toolCallId,
@@ -7761,6 +8047,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               mode,
               userBrief ? { userBrief } : undefined,
             );
+            emitAgentUsage(normalizeTokenUsage((reviseResult as { tokenUsage?: unknown }).tokenUsage));
             const chapterFileName = await findChapterFileNameByNumber(state, activeBookId, chapterNumber);
             if (rewriteConsistencyBaseline) {
               await enforceNonDestructiveRewriteConsistency({
@@ -7881,10 +8168,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   round,
                   maxReviseRounds,
                   audit,
+                  tokenUsage,
                   latestRevisionMustFixOutcomes,
                   latestRevisionMustFixTotalCount,
                   latestRevisionMustFixUnresolvedCount,
                 }) => {
+                  emitAgentUsage(tokenUsage);
                   const autoReviewState = buildAutoReviewAuditEventState({
                     round,
                     maxReviseRounds,
@@ -7940,7 +8229,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                     autoTriggeredByAudit: true,
                   });
                 },
-                onReviseComplete: ({ round, maxReviseRounds, mode: autoMode, reviseResult: autoReviseResult, reviseAudit }) => {
+                onReviseComplete: ({ round, maxReviseRounds, mode: autoMode, reviseResult: autoReviseResult, reviseAudit, tokenUsage }) => {
+                  emitAgentUsage(tokenUsage);
                   broadcast("revise:complete", {
                     sessionId: streamSessionId,
                     runId,
@@ -9667,6 +9957,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                 rethrowWriteErrorAsApiError(error, chapterCount > 1 ? "连续写作" : "写作");
               }
               sawWriterToolSuccess = true;
+              emitAgentUsage(normalizeTokenUsage((writeResult as { tokenUsage?: unknown }).tokenUsage));
               const writeStatus = typeof writeResult.status === "string"
                 ? writeResult.status.trim().toLowerCase()
                 : "";
@@ -9903,10 +10194,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             throw error;
           }
           }
-        }
-        } finally {
-          closeDeterministicThinking(actionMeta);
-        }
+      }
+      } finally {
+        closeDeterministicThinking(actionMeta);
+      }
       } else {
         result = await runAgentSession(
           {
@@ -9920,6 +10211,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             signal: abortController.signal,
             onEvent: (event: any) => {
               if (event.type === "message_update") {
+                const usage = normalizeTokenUsage(
+                  (event.message as { usage?: unknown } | undefined)?.usage
+                  ?? (event.assistantMessageEvent as { partial?: { usage?: unknown } } | undefined)?.partial?.usage,
+                );
+                if (usage) {
+                  currentAgentTokenUsage = usage;
+                  const totalTokenUsage = addTokenUsage(completedAgentTokenUsage, currentAgentTokenUsage);
+                  emitAgentUsage(totalTokenUsage, "model");
+                }
                 const ame = event.assistantMessageEvent;
                 if (ame.type === "text_delta") {
                   sawDraftDelta = true;
@@ -9930,6 +10230,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   broadcast("thinking:start", { sessionId: streamSessionId, runId });
                 } else if (ame.type === "thinking_end") {
                   broadcast("thinking:end", { sessionId: streamSessionId, runId });
+                }
+              }
+              if (event.type === "message_end") {
+                const usage = normalizeTokenUsage((event.message as { usage?: unknown } | undefined)?.usage);
+                if (usage) {
+                  completedAgentTokenUsage = addTokenUsage(completedAgentTokenUsage, usage);
+                  currentAgentTokenUsage = null;
+                  emitAgentUsage(completedAgentTokenUsage, "model");
                 }
               }
               if (event.type === "tool_execution_start") {
@@ -10045,6 +10353,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   result: event.result,
                   isError: event.isError,
                 });
+                if (!event.isError) {
+                  const resultDetails = (event.result as { details?: { tokenUsage?: unknown } } | null)?.details;
+                  const toolUsage = normalizeTokenUsage(resultDetails?.tokenUsage)
+                    ?? normalizeTokenUsage((event.result as { tokenUsage?: unknown } | null)?.tokenUsage);
+                  emitAgentUsage(toolUsage);
+                }
                 if (event.toolName === "sub_agent") {
                   const maybeAgent = (
                     collectedToolExecs.find((t) => t.id === event.toolCallId)?.agent
@@ -10101,6 +10415,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           instruction,
           initialMessages,
         );
+        const finalRunTokenUsage = (result as { tokenUsage?: TokenUsageSnapshot } | null)?.tokenUsage;
+        modelAgentTokenUsage = finalRunTokenUsage
+          ?? (currentAgentTokenUsage ? addTokenUsage(completedAgentTokenUsage, currentAgentTokenUsage) : completedAgentTokenUsage);
+        agentTokenUsage = addTokenUsage(modelAgentTokenUsage, toolAgentTokenUsage);
       }
       if (!result) {
         throw new ApiError(500, "AGENT_INTERNAL_STATE", "内部错误：写作流程未产生响应。");
@@ -10432,6 +10750,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         activeBookId,
         sessionId: bookSession.sessionId,
         runId,
+        tokenUsage: agentTokenUsage,
         ...(writePersistence
           ? {
               effects: {
@@ -10483,6 +10802,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       return c.json({
         response: result.responseText,
         runId,
+        tokenUsage: agentTokenUsage,
         ...(destructiveInstructionRequested ? { destructive: true } : {}),
         ...(writePersistence
           ? {
@@ -10643,6 +10963,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           round,
           maxReviseRounds,
           audit,
+          tokenUsage,
           latestRevisionMustFixOutcomes,
           latestRevisionMustFixTotalCount,
           latestRevisionMustFixUnresolvedCount,
@@ -10694,7 +11015,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             autoTriggeredByAudit: true,
           });
         },
-        onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+        onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit, tokenUsage }) => {
           broadcast("revise:complete", {
             bookId: id,
             entry: "write-target",
@@ -10773,6 +11094,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
       const pipeline = new PipelineRunner(await buildPipelineConfig({
         externalContext: body.brief,
+        bookId: id,
       }));
       const result = await pipeline.reviseDraft(
         id,
@@ -11025,6 +11347,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const id = c.req.param("id");
     const bookDir = state.bookDir(id);
     try {
+      await bookTaskController.deleteBook(id);
       const { rm } = await import("node:fs/promises");
       await rm(bookDir, { recursive: true, force: true });
       broadcast("book:deleted", { bookId: id });
@@ -11147,6 +11470,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   round,
                   maxReviseRounds,
                   audit,
+                  tokenUsage,
                   latestRevisionMustFixOutcomes,
                   latestRevisionMustFixTotalCount,
                   latestRevisionMustFixUnresolvedCount,
@@ -11201,7 +11525,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                     autoTriggeredByAudit: true,
                   });
                 },
-                onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+                onReviseComplete: ({ round, maxReviseRounds, mode, reviseResult, reviseAudit, tokenUsage }) => {
                   broadcast("revise:complete", {
                     bookId: id,
                     entry: "rewrite",

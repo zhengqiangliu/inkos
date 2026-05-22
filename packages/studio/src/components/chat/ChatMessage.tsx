@@ -415,6 +415,11 @@ export function ChatMessage({
   const repairCommand = role === "assistant" ? extractRepairCommand(content) : null;
 
   const hasBookForm = toolCall?.name === "create_book" && onArgsChange && onConfirm;
+  const hasAssistantBody = content.trim().length > 0 || Boolean(parsedAuditReport) || Boolean(hasBookForm) || Boolean(repairCommand);
+
+  if (role === "assistant" && !hasAssistantBody) {
+    return null;
+  }
 
   return (
     <Message from={role} className={cn(role === "assistant" && "max-w-full")}>

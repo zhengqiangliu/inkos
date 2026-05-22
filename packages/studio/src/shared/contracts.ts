@@ -55,12 +55,29 @@ export interface ChapterSummary {
   readonly auditIssueCount: number;
   readonly updatedAt: string;
   readonly fileName: string | null;
+  readonly auditHistory?: ReadonlyArray<ChapterAuditReport>;
 }
 
 export interface ChapterDetail extends ChapterSummary {
   readonly auditIssues: ReadonlyArray<string>;
   readonly reviewNote?: string;
   readonly content: string;
+}
+
+export interface ChapterAuditReport {
+  readonly auditedAt: string;
+  readonly passed: boolean;
+  readonly issueCount: number;
+  readonly score: number;
+  readonly summary?: string;
+  readonly report?: string;
+  readonly issues: ReadonlyArray<string>;
+  readonly severityCounts?: {
+    readonly critical: number;
+    readonly warning: number;
+    readonly info: number;
+  };
+  readonly failureGate?: "none" | "critical" | "score";
 }
 
 export interface SaveChapterPayload {
@@ -135,24 +152,38 @@ export interface RunStreamEvent {
 
 // --- Book Tasks ---
 
-export type BookTaskType = "auto-write";
+export type BookTaskType = "write" | "audit";
 
 export type BookTaskStatus =
   | "queued"
   | "running"
   | "paused"
   | "stopping"
+  | "retry_waiting"
   | "cancelled"
   | "failed"
   | "succeeded";
 
 export interface BookTaskCreatePayload {
+  readonly type?: BookTaskType;
   readonly requestedChapters?: number;
+  readonly auditChapterStart?: number | null;
+  readonly auditChapterEnd?: number | null;
   readonly wordCount?: number;
   readonly quickMode?: boolean;
   readonly preferFastWriterModel?: boolean;
+  readonly retryEnabled?: boolean;
   readonly service?: string;
   readonly model?: string;
+}
+
+export interface BookTaskPatchPayload {
+  readonly retryEnabled?: boolean;
+  readonly options?: {
+    readonly service?: string | null;
+    readonly model?: string | null;
+    readonly quickMode?: boolean;
+  };
 }
 
 export interface BookTask {
@@ -161,6 +192,14 @@ export interface BookTask {
   readonly type: BookTaskType;
   readonly title: string;
   readonly status: BookTaskStatus;
+  readonly stage: string;
+  readonly stageLabel: string | null;
+  readonly stageDetail: string | null;
+  readonly stageStartedAt: string | null;
+  readonly stageUpdatedAt: string | null;
+  readonly lastHeartbeatAt: string | null;
+  readonly chapterStartedAt: string | null;
+  readonly chapterFinishedAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly startedAt: string | null;
@@ -168,10 +207,26 @@ export interface BookTask {
   readonly stopRequestedAt: string | null;
   readonly stoppedAt: string | null;
   readonly requestedChapters: number;
+  readonly auditChapterStart: number | null;
+  readonly auditChapterEnd: number | null;
   readonly completedChapters: number;
   readonly currentChapterNumber: number | null;
   readonly nextChapterNumber: number | null;
   readonly lastChapterNumber: number | null;
+  readonly retryCount: number;
+  readonly maxRetryAttempts: number;
+  readonly retryEnabled: boolean;
+  readonly retryAt: string | null;
+  readonly writtenChapters: number;
+  readonly writtenWords: number;
+  readonly tokenUsage: {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+  } | null;
+  readonly lastErrorType: string | null;
+  readonly lastErrorCode: string | null;
+  readonly lastErrorStage: string | null;
   readonly options: {
     readonly wordCount: number | null;
     readonly quickMode: boolean;
@@ -180,12 +235,33 @@ export interface BookTask {
     readonly model: string | null;
   };
   readonly logs: ReadonlyArray<RunLogEntry>;
+  readonly exceptionLogs: ReadonlyArray<RunLogEntry>;
   readonly result: unknown | null;
   readonly error: string | null;
 }
 
 export interface BookTaskListResponse {
   readonly tasks: ReadonlyArray<BookTask>;
+}
+
+export interface GlobalBookTaskSummary {
+  readonly totalTasks: number;
+  readonly activeTasks: number;
+  readonly failedTasks: number;
+  readonly queuedTasks: number;
+  readonly succeededTasks: number;
+  readonly totalWrittenChapters: number;
+  readonly totalWrittenWords: number;
+  readonly totalTokenUsage: number;
+}
+
+export interface GlobalBookTaskItem extends BookTask {
+  readonly bookTitle: string | null;
+}
+
+export interface GlobalBookTaskListResponse {
+  readonly summary: GlobalBookTaskSummary;
+  readonly tasks: ReadonlyArray<GlobalBookTaskItem>;
 }
 
 export interface BookTaskDetailResponse {

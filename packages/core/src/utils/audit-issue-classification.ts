@@ -88,8 +88,6 @@ export const STRUCTURAL_AUDIT_SIGNALS = [
   "资源账本",
   "ledger",
   "状态卡",
-  "评分门禁",
-  "score gate",
 ] as const;
 
 function normalizeAuditSignalText(value: string): string {

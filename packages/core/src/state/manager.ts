@@ -156,6 +156,10 @@ export class StateManager {
     return join(this.projectRoot, "books");
   }
 
+  get projectRootDir(): string {
+    return this.projectRoot;
+  }
+
   bookDir(bookId: string): string {
     return join(this.booksDir, bookId);
   }
@@ -313,7 +317,7 @@ export class StateManager {
     const stateDir = join(bookDir, "story", "state");
     const snapshotStateDir = join(snapshotDir, "state");
     try {
-      const stateFiles = await readdir(stateDir);
+      const stateFiles = (await readdir(stateDir)).filter((fileName) => fileName !== "book-tasks.json");
       if (stateFiles.length > 0) {
         await mkdir(snapshotStateDir, { recursive: true });
         await Promise.all(
@@ -393,7 +397,7 @@ export class StateManager {
       let restoredStructuredState = false;
       try {
         const snapshotStateDir = join(snapshotDir, "state");
-        const stateFiles = await readdir(snapshotStateDir);
+        const stateFiles = (await readdir(snapshotStateDir)).filter((fileName) => fileName !== "book-tasks.json");
         if (stateFiles.length > 0) {
           restoredStructuredState = true;
           await mkdir(stateDir, { recursive: true });

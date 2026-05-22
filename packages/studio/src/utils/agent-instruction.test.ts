@@ -11,5 +11,10 @@ describe("agent-instruction", () => {
     expect(resolveBookAgentInstruction("rewrite", { chapterNumber: 12, language: "zh" })).toBe("重写第12章");
     expect(resolveBookAgentInstruction("rewrite", { chapterNumber: 12, language: "en" })).toBe("rewrite chapter 12");
     expect(resolveBookAgentInstruction("rewrite", { chapterNumber: 12, language: "zh", brief: "聚焦主线" })).toBe("重写第12章 聚焦主线");
+    expect(resolveBookAgentInstruction("rewrite", {
+      chapterNumber: 12,
+      language: "zh",
+      auditReport: "审计通过，发现2项问题。",
+    })).toContain("最新审计报告：");
   });
 });

@@ -12,8 +12,30 @@ import { writeExportArtifact } from "../interaction/export-artifact.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
-function textResult(text: string): AgentToolResult<undefined> {
-  return { content: [{ type: "text", text }], details: undefined };
+interface TokenUsageSummary {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+function zeroTokenUsage(): TokenUsageSummary {
+  return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+function addTokenUsage(left: TokenUsageSummary, right?: TokenUsageSummary | null): TokenUsageSummary {
+  if (!right) return { ...left };
+  return {
+    promptTokens: left.promptTokens + right.promptTokens,
+    completionTokens: left.completionTokens + right.completionTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
+}
+
+function textResult(
+  text: string,
+  details?: { tokenUsage?: TokenUsageSummary },
+): AgentToolResult<undefined> {
+  return { content: [{ type: "text", text }], details } as unknown as AgentToolResult<undefined>;
 }
 
 interface AuditIssueView {
@@ -359,10 +381,11 @@ export function createSubAgentTool(
               progress(
                 `Detected chapter-revision instruction; rerouting to reviser for chapter ${resolvedChapterNumber} (${reroutedMode}).`,
               );
-              await pipeline.reviseDraft(resolvedBookId, resolvedChapterNumber, reroutedMode);
+              const reroutedResult = await pipeline.reviseDraft(resolvedBookId, resolvedChapterNumber, reroutedMode);
               progress(`Revision complete for "${resolvedBookId}".`);
               return textResult(
                 `Revision (${reroutedMode}) complete for "${resolvedBookId}" chapter ${resolvedChapterNumber}.`,
+                { tokenUsage: (reroutedResult as any).tokenUsage },
               );
             }
             const batchCount = Math.max(1, resolvedChapterCount ?? 1);
@@ -373,6 +396,7 @@ export function createSubAgentTool(
               return textResult(
                 `Chapter written for "${resolvedBookId}". ` +
                 `Word count: ${(result as any).wordCount ?? "unknown"}.`,
+                { tokenUsage: (result as any).tokenUsage },
               );
             }
 
@@ -381,9 +405,11 @@ export function createSubAgentTool(
             let firstChapterNumber: number | null = null;
             let lastChapterNumber: number | null = null;
             let totalWords = 0;
+            let totalTokenUsage = zeroTokenUsage();
             while (completed < batchCount) {
               try {
                 const result = await pipeline.writeNextChapter(resolvedBookId, chapterWordCount);
+                totalTokenUsage = addTokenUsage(totalTokenUsage, (result as any).tokenUsage);
                 completed += 1;
                 const chapterNum = Number((result as any).chapterNumber ?? 0);
                 const words = Number((result as any).wordCount ?? 0);
@@ -409,6 +435,7 @@ export function createSubAgentTool(
               `Batch write complete for "${resolvedBookId}": ${completed} chapters` +
               (firstChapterNumber && lastChapterNumber ? ` (chapter ${firstChapterNumber}-${lastChapterNumber})` : "") +
               (totalWords > 0 ? `, ${totalWords} words total.` : "."),
+              { tokenUsage: totalTokenUsage },
             );
           }
 
@@ -423,16 +450,19 @@ export function createSubAgentTool(
               passed: audit.passed,
               summary: audit.summary,
               issues: auditIssues,
-            }));
+            }), { tokenUsage: (audit as any).tokenUsage });
           }
 
           case "reviser": {
             if (!resolvedBookId) return textResult("Error: bookId is required for the reviser agent.");
             const resolvedMode: ReviseMode = (mode as ReviseMode) ?? "spot-fix";
             progress(`Revising "${resolvedBookId}" chapter ${resolvedChapterNumber ?? "latest"} in ${resolvedMode} mode...`);
-            await pipeline.reviseDraft(resolvedBookId, resolvedChapterNumber, resolvedMode);
+            const result = await pipeline.reviseDraft(resolvedBookId, resolvedChapterNumber, resolvedMode);
             progress(`Revision complete for "${resolvedBookId}".`);
-            return textResult(`Revision (${resolvedMode}) complete for "${resolvedBookId}" chapter ${resolvedChapterNumber ?? "latest"}.`);
+            return textResult(
+              `Revision (${resolvedMode}) complete for "${resolvedBookId}" chapter ${resolvedChapterNumber ?? "latest"}.`,
+              { tokenUsage: (result as any).tokenUsage },
+            );
           }
 
           case "exporter": {

@@ -499,7 +499,7 @@ describe("runChapterReviewCycle", () => {
     });
 
     expect(result.auditResult.passed).toBe(false);
-    expect(result.auditResult.issues.some((issue) => issue.category === "评分门禁")).toBe(false);
+    expect(result.auditResult.issues.some((issue) => issue.category === "评分门禁")).toBe(true);
   });
 
   it("uses rewrite on first round when score-gated warning-heavy issues need broader repair", async () => {

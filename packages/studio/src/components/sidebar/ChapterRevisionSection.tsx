@@ -26,6 +26,7 @@ export function ChapterRevisionSection({
 }: ChapterRevisionSectionProps) {
   const hasSelection = selectedText.trim().length > 0;
   const modeMeta = getChapterRevisionDisplayMeta(selectedText, selectionModeActive);
+  const waitingForSelection = selectionModeActive && !hasSelection;
   const [brief, setBrief] = useState("");
   const [sending, setSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -41,7 +42,7 @@ export function ChapterRevisionSection({
   }, [brief]);
 
   const handleRevise = useCallback(async () => {
-    if (!brief.trim() || sending) return;
+    if (!brief.trim() || sending || waitingForSelection) return;
     setSending(true);
     try {
       let sessionId = activeSessionId;
@@ -61,67 +62,32 @@ export function ChapterRevisionSection({
       setSending(false);
       setBrief("");
     }
-  }, [activeSessionId, bookId, chapterNumber, brief, createDraftSession, modeMeta.mode, onRevisionComplete, selectedText, sendMessage, sending]);
+  }, [activeSessionId, bookId, chapterNumber, brief, createDraftSession, modeMeta.mode, onRevisionComplete, selectedText, sendMessage, sending, waitingForSelection]);
 
-  const canRevise = brief.trim().length > 0 && !sending;
-
-  if (selectionModeActive) {
-    return (
-      <div className="border-t border-border/40 bg-secondary/25 px-4 py-3">
-        <div className={`rounded-2xl border px-3 py-3 shadow-sm ring-1 ring-black/5 ${modeMeta.panelClassName}`}>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-foreground/90">AI 选择模式</span>
-                <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide ${modeMeta.chipClassName}`}>
-                  {modeMeta.label}
-                </span>
-              </div>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
-                {modeMeta.hint}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onToggleSelectionMode}
-              className="shrink-0 rounded-lg border border-border/40 bg-background/75 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
-            >
-              退出选择模式
-            </button>
-          </div>
-
-          <div className="mt-3 rounded-xl border border-dashed border-primary/20 bg-background/65 px-3 py-2">
-            <p className="text-xs leading-5 text-muted-foreground/80">
-              请在正文中拖选需要修改的片段，右上角会同步弹出 AI 修改弹窗。
-            </p>
-          </div>
-
-          {hasSelection && (
-            <div className="mt-3 rounded-xl border border-primary/25 bg-primary/10 px-3 py-2">
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-primary/80">
-                  已选文本
-                </span>
-                <span className="text-[10px] text-muted-foreground/60 tabular-nums">
-                  {selectedText.length} 字
-                </span>
-              </div>
-              <p className="text-xs leading-5 text-foreground/95">
-                {selectedText}
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
+  const canRevise = brief.trim().length > 0 && !sending && !waitingForSelection;
+  const submitLabel = sending
+    ? "发送中..."
+    : waitingForSelection
+      ? "等待选区"
+      : "提交";
+  const submitPlaceholder = waitingForSelection
+    ? "先在正文中选中文本，再输入修改要求..."
+    : hasSelection
+      ? "输入选中文本的修改要求..."
+      : "输入全文修改要求...";
+  const selectedTextPreviewStyle = {
+    display: "-webkit-box",
+    WebkitBoxOrient: "vertical",
+    WebkitLineClamp: 3,
+    overflow: "hidden",
+  } as const;
 
   return (
-    <div className="border-t border-border/40 bg-secondary/25 px-4 py-3">
+    <div className="border-t border-border/40 bg-secondary/25 -mx-4 px-4 py-3">
       <div className={`rounded-2xl border px-3 py-3 shadow-sm ring-1 ring-black/5 ${modeMeta.panelClassName}`}>
         <div className="mb-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-foreground/90">AI 修订</span>
+            <span className="text-xs font-semibold text-foreground/90">{selectionModeActive ? "AI 选择模式" : "AI 修订"}</span>
             <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide ${modeMeta.chipClassName}`}>
               {modeMeta.label}
             </span>
@@ -139,7 +105,7 @@ export function ChapterRevisionSection({
         <div className={`mb-3 h-1 rounded-full ${modeMeta.mode === "selected" ? "bg-primary/70" : "bg-border/60"}`} />
 
         {hasSelection ? (
-          <div className="mb-2 rounded-xl border border-primary/25 bg-primary/10 px-3 py-2">
+          <div className="mb-2 h-[88px] overflow-hidden rounded-xl border border-primary/25 bg-primary/10 px-3 py-2">
             <div className="mb-1 flex items-center justify-between gap-2">
               <div className="text-[10px] uppercase tracking-wider text-primary/80">
                 选中内容
@@ -148,8 +114,17 @@ export function ChapterRevisionSection({
                 {selectedText.length} 字
               </div>
             </div>
-            <p className="text-xs leading-5 text-foreground/95">
+            <p className="text-xs leading-5 text-foreground/95" style={selectedTextPreviewStyle}>
               {selectedText}
+            </p>
+          </div>
+        ) : selectionModeActive ? (
+          <div className="mb-2 rounded-xl border border-dashed border-primary/20 bg-background/65 px-3 py-2">
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground/70">
+              等待正文选区
+            </div>
+            <p className="text-xs leading-5 text-muted-foreground/80">
+              请先在正文中选中需要修改的片段，底部面板会直接按选区提交。
             </p>
           </div>
         ) : (
@@ -167,13 +142,13 @@ export function ChapterRevisionSection({
           ref={textareaRef}
           value={brief}
           onChange={(e) => setBrief(e.target.value)}
-          placeholder={hasSelection ? "输入选中文本的修订说明..." : "输入全文修订说明..."}
+          placeholder={submitPlaceholder}
           disabled={sending}
           rows={2}
           className="w-full rounded-lg border border-border/40 bg-background/85 px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/40 resize-none disabled:opacity-50"
         />
 
-        <div className="mt-2">
+        <div className="mt-2 flex justify-end">
           <button
             type="button"
             onClick={handleRevise}
@@ -185,7 +160,7 @@ export function ChapterRevisionSection({
             ) : (
               <Send size={12} />
             )}
-            {sending ? "发送中..." : "发送至聊天面板"}
+            {submitLabel}
           </button>
         </div>
       </div>

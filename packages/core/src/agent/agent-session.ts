@@ -21,6 +21,12 @@ import { createBookContextTransform } from "./context-transform.js";
 // Types
 // ---------------------------------------------------------------------------
 
+export interface TokenUsageSummary {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface AgentSessionConfig {
   /** Unique session identifier (typically the BookSession id). */
   sessionId: string;
@@ -47,6 +53,8 @@ export interface AgentSessionResult {
   responseText: string;
   /** Full conversation history for persistence. */
   messages: Array<{ role: string; content: string; thinking?: string }>;
+  /** Aggregate usage across all assistant model calls in the run. */
+  tokenUsage: TokenUsageSummary;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +140,42 @@ function extractThinkingFromAssistant(msg: AssistantMessage): string {
     .filter((c: any) => c.type === "thinking")
     .map((c: any) => c.thinking ?? "")
     .join("");
+}
+
+function zeroTokenUsage(): TokenUsageSummary {
+  return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+function normalizeTokenUsage(value: unknown): TokenUsageSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const usage = value as {
+    promptTokens?: unknown;
+    completionTokens?: unknown;
+    totalTokens?: unknown;
+    input?: unknown;
+    output?: unknown;
+  };
+  const promptTokens = Number(usage.promptTokens ?? usage.input);
+  const completionTokens = Number(usage.completionTokens ?? usage.output);
+  const totalTokensRaw = Number(usage.totalTokens);
+  if (!Number.isFinite(promptTokens) || !Number.isFinite(completionTokens)) {
+    return null;
+  }
+  const totalTokens = Number.isFinite(totalTokensRaw) ? totalTokensRaw : promptTokens + completionTokens;
+  return {
+    promptTokens: Math.max(0, Math.trunc(promptTokens)),
+    completionTokens: Math.max(0, Math.trunc(completionTokens)),
+    totalTokens: Math.max(0, Math.trunc(totalTokens)),
+  };
+}
+
+function addTokenUsage(left: TokenUsageSummary, right?: TokenUsageSummary | null): TokenUsageSummary {
+  if (!right) return { ...left };
+  return {
+    promptTokens: left.promptTokens + right.promptTokens,
+    completionTokens: left.completionTokens + right.completionTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+  };
 }
 
 /**
@@ -289,6 +333,7 @@ export async function runAgentSession(
 
   cached.lastActive = Date.now();
   const { agent } = cached;
+  let totalTokenUsage = zeroTokenUsage();
 
   // ----- Subscribe to events (for SSE streaming to frontend) -----
   let unsubscribe: (() => void) | undefined;
@@ -323,8 +368,14 @@ export async function runAgentSession(
   const allMessages = agent.state.messages;
   const responseText = extractResponseText(allMessages);
   const plainMessages = agentMessagesToPlain(allMessages);
+  for (const msg of allMessages) {
+    if (!msg || typeof msg !== "object" || (msg as { role?: unknown }).role !== "assistant") continue;
+    const usage = normalizeTokenUsage((msg as AssistantMessage).usage);
+    if (!usage) continue;
+    totalTokenUsage = addTokenUsage(totalTokenUsage, usage);
+  }
 
-  return { responseText, messages: plainMessages };
+  return { responseText, messages: plainMessages, tokenUsage: totalTokenUsage };
 }
 
 /**

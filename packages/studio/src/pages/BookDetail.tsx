@@ -13,6 +13,8 @@ import { ChapterPlansSection, EditPlanModal } from "../components/sidebar/Chapte
 import { ChapterPlanReader } from "../components/sidebar/ChapterPlanReader";
 import { VersionHistoryModal } from "../components/sidebar/VersionHistoryModal";
 import { ASSET_MENU_ITEMS, GUIDE_MENU_ITEMS, TRUTH_MENU_ITEMS, getArtifactLabel } from "../utils/book-artifacts";
+import type { ChapterAuditReport } from "../shared/contracts";
+import { resolveLatestChapterAuditReport } from "../utils/chapter-audit";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -46,6 +48,7 @@ interface BookData {
     readonly title: string;
     readonly status: string;
     readonly wordCount: number;
+    readonly auditHistory?: ReadonlyArray<ChapterAuditReport>;
   }>;
   readonly nextChapter?: number;
 }
@@ -90,6 +93,7 @@ interface ChapterMeta {
   readonly title: string;
   readonly status: string;
   readonly wordCount: number;
+  readonly auditHistory?: ReadonlyArray<ChapterAuditReport>;
 }
 
 interface BookDetailProps {
@@ -213,6 +217,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
         title: firstChapter.title,
         status: firstChapter.status,
         wordCount: firstChapter.wordCount,
+        ...(Array.isArray(firstChapter.auditHistory) ? { auditHistory: firstChapter.auditHistory } : {}),
       },
     });
   }, [artifactChapter, data, openChapterArtifact, readerMode]);
@@ -355,6 +360,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
           title: firstChapter.title,
           status: firstChapter.status,
           wordCount: firstChapter.wordCount,
+          ...(Array.isArray(firstChapter.auditHistory) ? { auditHistory: firstChapter.auditHistory } : {}),
         },
       });
     }
@@ -407,13 +413,14 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     setPlanEditorChapter(null);
   }, [bookId, planEditorChapter, refetchChapterPlans]);
 
-  if (loading) return <div className="flex flex-1 items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-primary/20 border-t-primary" /></div>;
-  if (error) return <div className="p-6 text-destructive">{error}</div>;
+  if (loading && !data) return <div className="flex flex-1 items-center justify-center"><div className="h-8 w-8 animate-spin rounded-full border-2 border-primary/20 border-t-primary" /></div>;
+  if (error && !data) return <div className="p-6 text-destructive">{error}</div>;
   if (!data) return null;
 
   const { book, chapters } = data;
   const nextChapter = Math.max(1, Number(data.nextChapter ?? chapters.length + 1));
   const latestChapterNumber = chapters[chapters.length - 1]?.number ?? null;
+  const latestChapterAuditReport = resolveLatestChapterAuditReport(chapters[chapters.length - 1] ?? null);
   const targetChapters = Math.max(1, Number(book.targetChapters ?? 1));
   const totalWords = chapters.reduce((sum, ch) => sum + (ch.wordCount ?? 0), 0);
   const designSelected = readerMode === "design";
@@ -632,8 +639,10 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
             sse={sse}
             width={rightWidth}
             latestChapterNumber={latestChapterNumber}
+            latestChapterAuditReport={latestChapterAuditReport}
             nextChapter={nextChapter}
             targetChapters={targetChapters}
+            chapterWordCount={book.chapterWordCount}
           />
         </div>
       </main>

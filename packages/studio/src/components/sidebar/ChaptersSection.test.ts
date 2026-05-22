@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   describeAutoReviewState,
   extractAutoReviewFinalReason,
+  extractChapterNumberFromPayload,
   extractRewriteReviewReason,
+  isAuditTaskCompletionForBook,
   normalizeAuditSummary,
   resolveChapterAuditScore,
   shouldCarryForwardAuditSummary,
@@ -43,6 +45,25 @@ describe("resolveChapterAuditScore", () => {
         "[warning] pacing too fast",
       ],
     })).toBe(53);
+  });
+});
+
+describe("normalizeAuditSummary", () => {
+  it("forces low-score audits to fail even when upstream marked them as passed", () => {
+    expect(
+      normalizeAuditSummary({
+        chapter: 20,
+        passed: true,
+        issueCount: 2,
+        score: 40,
+        failureGate: "none",
+      }),
+    ).toMatchObject({
+      chapter: 20,
+      passed: false,
+      score: 40,
+      failureGate: "score",
+    });
   });
 });
 
@@ -117,6 +138,57 @@ describe("sliceUnprocessedSseMessages", () => {
     const old = msg("rewrite:complete", 10);
     const messages = [msg("rewrite:complete", 11), msg("audit:complete", 12)];
     expect(sliceUnprocessedSseMessages(messages, old)).toEqual(messages);
+  });
+});
+
+describe("isAuditTaskCompletionForBook", () => {
+  it("detects audit task completion for the matching book", () => {
+    const msg: SSEMessage = {
+      event: "book-task:complete",
+      timestamp: 1,
+      data: {
+        bookId: "alpha",
+        task: {
+          type: "audit",
+        },
+      },
+    };
+
+    expect(isAuditTaskCompletionForBook(msg, "alpha")).toBe(true);
+    expect(isAuditTaskCompletionForBook(msg, "beta")).toBe(false);
+  });
+
+  it("ignores non-audit task completion events", () => {
+    const msg: SSEMessage = {
+      event: "book-task:complete",
+      timestamp: 1,
+      data: {
+        bookId: "alpha",
+        task: {
+          type: "write",
+        },
+      },
+    };
+
+    expect(isAuditTaskCompletionForBook(msg, "alpha")).toBe(false);
+  });
+});
+
+describe("extractChapterNumberFromPayload", () => {
+  it("accepts nested task payloads", () => {
+    expect(extractChapterNumberFromPayload({
+      task: {
+        currentChapterNumber: 47,
+      },
+    })).toBe(47);
+
+    expect(extractChapterNumberFromPayload({
+      task: {
+        result: {
+          chapterNumber: "48",
+        },
+      },
+    })).toBe(48);
   });
 });
 

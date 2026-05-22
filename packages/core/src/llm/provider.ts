@@ -29,21 +29,29 @@ export type OnStreamProgress = (progress: StreamProgress) => void;
 
 export function createStreamMonitor(
   onProgress?: OnStreamProgress,
-  intervalMs: number = 12000,
+  intervalMs: number = 500,
 ): { readonly onChunk: (text: string) => void; readonly stop: () => void } {
   let totalChars = 0;
   let chineseChars = 0;
   const startTime = Date.now();
+  const chunkEmitIntervalMs = Math.max(100, Math.min(intervalMs, 500));
+  let lastEmitAt = startTime - chunkEmitIntervalMs;
   let timer: ReturnType<typeof setInterval> | undefined;
+
+  const emitProgress = (status: StreamProgress["status"]): void => {
+    if (!onProgress) return;
+    lastEmitAt = Date.now();
+    onProgress({
+      elapsedMs: Date.now() - startTime,
+      totalChars,
+      chineseChars,
+      status,
+    });
+  };
 
   if (onProgress) {
     timer = setInterval(() => {
-      onProgress({
-        elapsedMs: Date.now() - startTime,
-        totalChars,
-        chineseChars,
-        status: "streaming",
-      });
+      emitProgress("streaming");
     }, intervalMs);
   }
 
@@ -51,18 +59,17 @@ export function createStreamMonitor(
     onChunk(text: string): void {
       totalChars += text.length;
       chineseChars += (text.match(/[\u4e00-\u9fff]/g) || []).length;
+      const now = Date.now();
+      if (onProgress && now - lastEmitAt >= chunkEmitIntervalMs) {
+        emitProgress("streaming");
+      }
     },
     stop(): void {
       if (timer !== undefined) {
         clearInterval(timer);
         timer = undefined;
       }
-      onProgress?.({
-        elapsedMs: Date.now() - startTime,
-        totalChars,
-        chineseChars,
-        status: "done",
-      });
+      emitProgress("done");
     },
   };
 }

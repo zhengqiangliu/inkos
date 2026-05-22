@@ -31,6 +31,34 @@ describe("hash route", () => {
       expect(parseHash("#/services")).toEqual({ page: "services" });
     });
 
+    it("parses tasks route", () => {
+      expect(parseHash("#/tasks")).toEqual({ page: "tasks" });
+    });
+
+    it("parses logs route", () => {
+      expect(parseHash("#/logs")).toEqual({ page: "logs" });
+    });
+
+    it("parses genres route", () => {
+      expect(parseHash("#/genres")).toEqual({ page: "genres" });
+    });
+
+    it("parses style route", () => {
+      expect(parseHash("#/style")).toEqual({ page: "style" });
+    });
+
+    it("parses import route", () => {
+      expect(parseHash("#/import")).toEqual({ page: "import" });
+    });
+
+    it("parses radar route", () => {
+      expect(parseHash("#/radar")).toEqual({ page: "radar" });
+    });
+
+    it("parses doctor route", () => {
+      expect(parseHash("#/doctor")).toEqual({ page: "doctor" });
+    });
+
     it("parses service-detail", () => {
       expect(parseHash("#/services/openai")).toEqual({ page: "service-detail", serviceId: "openai" });
     });
@@ -79,6 +107,34 @@ describe("hash route", () => {
       expect(routeToHash({ page: "services" })).toBe("#/services");
     });
 
+    it("tasks -> #/tasks", () => {
+      expect(routeToHash({ page: "tasks" })).toBe("#/tasks");
+    });
+
+    it("logs -> #/logs", () => {
+      expect(routeToHash({ page: "logs" })).toBe("#/logs");
+    });
+
+    it("genres -> #/genres", () => {
+      expect(routeToHash({ page: "genres" })).toBe("#/genres");
+    });
+
+    it("style -> #/style", () => {
+      expect(routeToHash({ page: "style" })).toBe("#/style");
+    });
+
+    it("import -> #/import", () => {
+      expect(routeToHash({ page: "import" })).toBe("#/import");
+    });
+
+    it("radar -> #/radar", () => {
+      expect(routeToHash({ page: "radar" })).toBe("#/radar");
+    });
+
+    it("doctor -> #/doctor", () => {
+      expect(routeToHash({ page: "doctor" })).toBe("#/doctor");
+    });
+
     it("service-detail -> #/services/{id}", () => {
       expect(routeToHash({ page: "service-detail", serviceId: "openai" })).toBe("#/services/openai");
     });
@@ -101,9 +157,8 @@ describe("hash route", () => {
       expect(decodeURIComponent(hash)).toContain("自定义");
     });
 
-    it("non-hash pages return empty string", () => {
+    it("daemon returns empty string", () => {
       expect(routeToHash({ page: "daemon" })).toBe("");
-      expect(routeToHash({ page: "logs" })).toBe("");
     });
   });
 });

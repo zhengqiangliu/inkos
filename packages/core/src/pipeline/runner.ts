@@ -41,7 +41,7 @@ import {
   resolveStateDegradedBaseStatus,
   retrySettlementAfterValidationFailure,
 } from "./chapter-state-recovery.js";
-import { persistChapterArtifacts } from "./chapter-persistence.js";
+import { buildChapterAuditHistoryEntry, persistChapterArtifacts } from "./chapter-persistence.js";
 import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir } from "./persisted-governed-plan.js";
@@ -128,6 +128,23 @@ export interface PipelineConfig {
   readonly onAuditorThinkingEnd?: (payload: {
     readonly bookId: string;
     readonly chapterNumber: number;
+  }) => void;
+  readonly onTaskSignal?: (signal: {
+    readonly kind: "log" | "audit:start" | "audit:complete" | "revise:start" | "revise:complete";
+    readonly level?: "info" | "warn";
+    readonly message?: string;
+    readonly bookId?: string;
+    readonly chapterNumber?: number;
+    readonly round?: number;
+    readonly maxReviseRounds?: number;
+    readonly phase?: "audit" | "revise";
+    readonly mode?: ReviseMode;
+    readonly passed?: boolean;
+    readonly issueCount?: number;
+    readonly score?: number;
+    readonly wordCount?: number;
+    readonly applied?: boolean;
+    readonly summary?: string;
   }) => void;
   readonly onWriteNextAuditStart?: (payload: {
     readonly bookId: string;
@@ -262,6 +279,7 @@ export interface WriteNextChapterOptions {
   readonly skipStateValidation?: boolean;
   readonly deferMemorySync?: boolean;
   readonly deferSnapshotSync?: boolean;
+  readonly allowPendingAuditFailure?: boolean;
 }
 
 // Atomic operation results
@@ -322,6 +340,7 @@ export interface ReviseAuditSummary {
   readonly primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
   readonly summary?: string;
   readonly issues: ReadonlyArray<AuditIssue>;
+  readonly report?: string;
 }
 
 export interface ReviseDraftOptions {
@@ -448,7 +467,35 @@ function buildReviseAuditSummaryFromResult(
       : {}),
     summary: auditResult.summary?.trim() ? auditResult.summary.trim() : undefined,
     issues: auditResult.issues,
+    report: buildAuditReportText(auditResult, severityCounts, issueCount),
   };
+}
+
+function buildAuditReportText(
+  auditResult: AuditResult,
+  severityCounts: Readonly<{ critical: number; warning: number; info: number }>,
+  issueCount: number,
+): string {
+  const score = estimateAuditScore(severityCounts);
+  const lines = [
+    auditResult.passed
+      ? issueCount > 0
+        ? `审计通过，发现${issueCount}项非阻断问题。`
+        : "审计通过。"
+      : `审计未通过，共${issueCount}项问题。`,
+    `审计评分：${score}/100（严重 ${severityCounts.critical} / 警告 ${severityCounts.warning} / 提示 ${severityCounts.info}）`,
+  ];
+  const summary = auditResult.summary?.trim();
+  if (summary) {
+    lines.push(`审计报告：${summary}`);
+  }
+  if (auditResult.issues.length > 0) {
+    lines.push("问题清单：");
+    for (const [index, issue] of auditResult.issues.entries()) {
+      lines.push(`${index + 1}. [${issue.severity}] ${issue.category} - ${issue.description}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 function buildAutoReviewFinalNote(args: {
@@ -899,17 +946,21 @@ export class PipelineRunner {
   }
 
   private logStage(language: LengthLanguage, message: { zh: string; en: string }): void {
-    this.config.logger?.info(
-      `${this.localize(language, { zh: "阶段：", en: "Stage: " })}${this.localize(language, message)}`,
-    );
+    const text = `${this.localize(language, { zh: "阶段：", en: "Stage: " })}${this.localize(language, message)}`;
+    this.config.logger?.info(text);
+    this.config.onTaskSignal?.({ kind: "log", level: "info", message: text });
   }
 
   private logInfo(language: LengthLanguage, message: { zh: string; en: string }): void {
-    this.config.logger?.info(this.localize(language, message));
+    const text = this.localize(language, message);
+    this.config.logger?.info(text);
+    this.config.onTaskSignal?.({ kind: "log", level: "info", message: text });
   }
 
   private logWarn(language: LengthLanguage, message: { zh: string; en: string }): void {
-    this.config.logger?.warn(this.localize(language, message));
+    const text = this.localize(language, message);
+    this.config.logger?.warn(text);
+    this.config.onTaskSignal?.({ kind: "log", level: "warn", message: text });
   }
 
   private nowMs(): number {
@@ -1610,11 +1661,15 @@ export class PipelineRunner {
       onThinkingDelta: (text) => {
         this.config.onAuditorTextDelta?.({ bookId, chapterNumber: targetChapter, text });
       },
-      onThinkingEnd: () => {
-        this.config.onAuditorThinkingEnd?.({ bookId, chapterNumber: targetChapter });
-      },
+        onThinkingEnd: () => {
+          this.config.onAuditorThinkingEnd?.({ bookId, chapterNumber: targetChapter });
+        },
     });
-    const result: AuditResult = evaluation.auditResult;
+    const result: AuditResult = this.enforceAuditScoreRequirement({
+      auditResult: evaluation.auditResult,
+      language,
+      scoreIssues: evaluation.revisionBlockingIssues,
+    });
 
     // Update index with audit result
     const updated = index.map((ch) =>
@@ -1682,6 +1737,11 @@ export class PipelineRunner {
         wordCount: number,
         auditResult?: AuditResult,
       ): Promise<void> => {
+        const updatedAt = new Date().toISOString();
+        const auditSummary = auditResult ? this.buildReviseAuditSummary(auditResult) : null;
+        const historyEntry = auditResult
+          ? buildChapterAuditHistoryEntry(auditResult, updatedAt, auditSummary?.report)
+          : null;
         const updatedIndex = index.map((ch) =>
           ch.number === targetChapter
             ? {
@@ -1690,10 +1750,15 @@ export class PipelineRunner {
                   ? {
                       status: (auditResult.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
                       auditIssues: auditResult.issues.map((issue) => `[${issue.severity}] ${issue.description}`),
+                      ...(historyEntry
+                        ? {
+                            auditHistory: [...(Array.isArray(ch.auditHistory) ? ch.auditHistory : []), historyEntry],
+                          }
+                        : {}),
                     }
                   : {}),
                 wordCount,
-                updatedAt: new Date().toISOString(),
+                updatedAt,
               }
             : ch,
         );
@@ -2114,16 +2179,26 @@ export class PipelineRunner {
       }
 
       // Update index
+      const updatedAt = new Date().toISOString();
+      const reviseAuditSummary = this.buildReviseAuditSummary(effectivePostRevision.auditResult);
       const updatedIndex = index.map((ch) =>
         ch.number === targetChapter
           ? {
               ...ch,
               status: (effectivePostRevision.auditResult.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
               wordCount: normalizedRevision.wordCount,
-              updatedAt: new Date().toISOString(),
+              updatedAt,
               auditIssues: effectivePostRevision.auditResult.issues.map((i) => `[${i.severity}] ${i.description}`),
               lengthWarnings,
               lengthTelemetry,
+              auditHistory: [
+                ...(Array.isArray(ch.auditHistory) ? ch.auditHistory : []),
+                buildChapterAuditHistoryEntry(
+                  effectivePostRevision.auditResult,
+                  updatedAt,
+                  reviseAuditSummary.report,
+                ),
+              ],
             }
           : ch,
       );
@@ -2280,9 +2355,9 @@ export class PipelineRunner {
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     await this.assertNoPendingStateRepair(bookId);
-    await this.assertNoPendingAuditFailure(bookId);
-    const chapterNumber = await this.state.getNextChapterNumber(bookId);
     const stageLanguage = await this.resolveBookLanguage(book);
+    await this.assertNoPendingAuditFailure(bookId, stageLanguage, options?.allowPendingAuditFailure ?? false);
+    const chapterNumber = await this.state.getNextChapterNumber(bookId);
     this.logStage(stageLanguage, { zh: "准备章节输入", en: "preparing chapter inputs" });
     const inputPrepStartedAt = this.nowMs();
     const writeInput = await this.prepareWriteInput(
@@ -2773,6 +2848,7 @@ export class PipelineRunner {
       chapterTitle: persistenceOutput.title,
       status: resolvedStatus,
       auditResult,
+      auditReport: writeNextFinalAudit.report,
       finalWordCount,
       lengthWarnings,
       lengthTelemetry,
@@ -3646,10 +3722,18 @@ ${matrix}`,
     );
   }
 
-  private async assertNoPendingAuditFailure(bookId: string): Promise<void> {
+  private async assertNoPendingAuditFailure(bookId: string, language: LengthLanguage, allowContinue: boolean): Promise<void> {
     const existingIndex = await this.state.loadChapterIndex(bookId);
     const latestChapter = [...existingIndex].sort((left, right) => right.number - left.number)[0];
     if (latestChapter?.status !== "audit-failed") {
+      return;
+    }
+
+    if (allowContinue) {
+      this.logWarn(language, {
+        zh: `最新章节 ${latestChapter.number} 审计未通过，继续写作并等待后续修订。`,
+        en: `Latest chapter ${latestChapter.number} failed audit; continuing write-next and leaving revision for later.`,
+      });
       return;
     }
 

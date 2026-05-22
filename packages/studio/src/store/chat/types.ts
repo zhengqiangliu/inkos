@@ -5,6 +5,12 @@ export interface ToolCall {
   readonly arguments: Record<string, unknown>;
 }
 
+export interface TokenUsageSummary {
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly totalTokens: number;
+}
+
 export interface AuditSeverityCounts {
   readonly critical: number;
   readonly warning: number;
@@ -137,6 +143,7 @@ export interface AgentResponse {
   readonly response?: string;
   readonly error?: string | { code?: string; message?: string };
   readonly quickMode?: boolean;
+  readonly tokenUsage?: TokenUsageSummary;
   readonly details?: {
     readonly draftRaw?: string;
     readonly toolCall?: ToolCall;
@@ -187,6 +194,21 @@ export interface ArtifactChapterMeta {
   readonly wordCount: number;
   readonly auditIssues?: ReadonlyArray<string>;
   readonly audit?: MessageAuditSummary;
+  readonly auditHistory?: ReadonlyArray<{
+    readonly auditedAt: string;
+    readonly passed: boolean;
+    readonly issueCount: number;
+    readonly score: number;
+    readonly summary?: string;
+    readonly report?: string;
+    readonly issues: ReadonlyArray<string>;
+    readonly severityCounts?: {
+      readonly critical: number;
+      readonly warning: number;
+      readonly info: number;
+    };
+    readonly failureGate?: "none" | "critical" | "score";
+  }>;
 }
 
 export interface SessionRuntime {

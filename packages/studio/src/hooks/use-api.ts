@@ -66,7 +66,12 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
 
   const taskAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/tasks(?:\/[^/]+(?:\/stop)?)?$/);
   if (taskAction) {
-    return ["/api/v1/books", `/api/v1/books/${taskAction[1]}`, `/api/v1/books/${taskAction[1]}/tasks`];
+    return ["/api/v1/books", `/api/v1/books/${taskAction[1]}`, `/api/v1/books/${taskAction[1]}/tasks`, "/api/v1/tasks"];
+  }
+
+  const globalTaskAction = normalized.match(/^\/api\/v1\/tasks(?:\/[^/]+\/[^/]+(?:\/(stop|resume|retry))?)?$/);
+  if (globalTaskAction) {
+    return ["/api/v1/tasks"];
   }
 
   if (/^\/api\/v1\/daemon\/(start|stop)$/.test(normalized)) {
@@ -232,6 +237,24 @@ export async function putApi<T>(path: string, body?: unknown): Promise<T> {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
+  });
+  invalidateApiPaths(deriveInvalidationPaths(path));
+  return result;
+}
+
+export async function patchApi<T>(path: string, body?: unknown): Promise<T> {
+  const result = await fetchJson<T>(path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  invalidateApiPaths(deriveInvalidationPaths(path));
+  return result;
+}
+
+export async function deleteApi<T>(path: string): Promise<T> {
+  const result = await fetchJson<T>(path, {
+    method: "DELETE",
   });
   invalidateApiPaths(deriveInvalidationPaths(path));
   return result;

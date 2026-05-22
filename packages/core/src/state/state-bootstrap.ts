@@ -18,6 +18,7 @@ import {
   isCurrentChapterLabel,
   isStateTableHeaderRow,
   normalizeHookId,
+  normalizeHookType,
   parseChapterSummariesMarkdown,
   parseInteger,
   parseMarkdownTableRows,
@@ -435,7 +436,7 @@ function parsePendingHooksStateMarkdown(markdown: string, warnings: string[]) {
         return {
           hookId,
           startChapter: parseStrictIntegerWithWarning(row[1], warnings, `${hookId}:startChapter`),
-          type: row[2] ?? "unspecified",
+          type: normalizeHookType(row[2]),
           status: normalizeHookStatus(row[3], warnings, hookId),
           lastAdvancedChapter: parseStrictIntegerWithWarning(row[4], warnings, `${hookId}:lastAdvancedChapter`),
           expectedPayoff: row[5] ?? "",

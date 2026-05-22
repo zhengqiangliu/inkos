@@ -889,6 +889,56 @@ describe("StateManager", () => {
       expect(currentState).toContain("\"chapter\": 3");
     });
 
+    it("normalizes empty hook types when bootstrapping structured runtime state from markdown", async () => {
+      const bookId = "runtime-state-empty-hook-type-book";
+      const storyDir = join(manager.bookDir(bookId), "story");
+      await mkdir(storyDir, { recursive: true });
+      await Promise.all([
+        writeFile(
+          join(storyDir, "current_state.md"),
+          [
+            "# Current State",
+            "",
+            "| Field | Value |",
+            "| --- | --- |",
+            "| Current Chapter | 1 |",
+            "| Current Goal | Keep the vault sealed |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(
+          join(storyDir, "pending_hooks.md"),
+          [
+            "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| vault-seal | 1 |  | open | 1 | 3 | Missing type should be normalized |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+        writeFile(
+          join(storyDir, "chapter_summaries.md"),
+          [
+            "| chapter | title | characters | events | stateChanges | hookActivity | mood | chapterType |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| 1 | Vault Door | Lin Yue | He seals the vault | Lock engages | vault-seal seeded | tense | opening |",
+            "",
+          ].join("\n"),
+          "utf-8",
+        ),
+      ]);
+
+      await manager.ensureRuntimeState(bookId, 1);
+
+      const hooks = JSON.parse(
+        await readFile(join(manager.stateDir(bookId), "hooks.json"), "utf-8"),
+      ) as { hooks: Array<{ hookId: string; type: string }> };
+
+      expect(hooks.hooks[0]?.hookId).toBe("vault-seal");
+      expect(hooks.hooks[0]?.type).toBe("unspecified");
+    });
+
     it("does not treat future hook start chapters as lastAppliedChapter during bootstrap", async () => {
       const bookId = "runtime-state-future-hooks-book";
       const storyDir = join(manager.bookDir(bookId), "story");

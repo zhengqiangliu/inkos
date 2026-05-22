@@ -39,7 +39,7 @@ vi.mock("@mariozechner/pi-agent-core", async () => {
         provider: "anthropic",
         model: "fake",
         usage: {
-          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          input: 3, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 7,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         stopReason: "stop",
@@ -97,7 +97,13 @@ describe("runAgentSession cache — bookId switch", () => {
       { sessionId: "s1", bookId: "book-a", language: "zh", pipeline, projectRoot, model },
       "earlier question about book A",
     );
+    expect(agentInstances.at(-1)?.state.messages.at(-1)?.usage?.totalTokens).toBe(7);
     expect(agentInstances).toHaveLength(1);
+    const sessionResult = await runAgentSession(
+      { sessionId: "s1", bookId: "book-a", language: "zh", pipeline, projectRoot, model },
+      "follow-up",
+    );
+    expect(sessionResult.tokenUsage.totalTokens).toBeGreaterThan(0);
 
     await runAgentSession(
       { sessionId: "s1", bookId: "book-b", language: "zh", pipeline, projectRoot, model },

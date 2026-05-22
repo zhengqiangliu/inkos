@@ -134,30 +134,21 @@ function applyScoreGateToAuditResult(params: {
   const score = estimateAuditScore(severityCounts);
   if (score >= MIN_AUDIT_PASS_SCORE) return params.auditResult;
 
-  // Score gate is a convergence guard, not a second auditor.
-  // Only block when the chapter still has materially actionable risk signals;
-  // keep low-warning chapters from being over-penalized by the score threshold.
-  const hasBlockingSignal = severityCounts.critical > 0 || severityCounts.warning >= 4;
-  if (!hasBlockingSignal) {
-    return params.auditResult;
-  }
-
-  // Trend-aware tolerance: if the chapter is clearly improving and has no
-  // critical issues, keep the pass to avoid oscillating around the threshold.
-  const hasCritical = severityCounts.critical > 0;
-  if (!hasCritical && typeof params.previousScore === "number" && score > params.previousScore) {
-    return params.auditResult;
-  }
-
   // Remove any existing score gate issues — they are not useful revision targets.
   const filteredIssues = params.auditResult.issues.filter(
     (issue) => issue.category !== "评分门禁" && issue.category !== "Score Gate",
   );
+  const scoreGateIssue: AuditIssue = {
+    severity: "warning",
+    category: "评分门禁",
+    description: `审计评分低于通过阈值（${score}/${MIN_AUDIT_PASS_SCORE}）。`,
+    suggestion: "请优先修复警告项并提升章节质量后再审计。",
+  };
 
   return {
     ...params.auditResult,
     passed: false,
-    issues: filteredIssues,
+    issues: [...filteredIssues, scoreGateIssue],
   };
 }
 

@@ -1,0 +1,447 @@
+import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProjectConfig } from "@actalk/inkos-core";
+import { BookTaskController } from "./book-task-controller.js";
+import { BookTaskStore } from "./book-task-store.js";
+import type { BookTask } from "../../shared/contracts.js";
+
+describe("BookTaskController audit gating", () => {
+  const tempRoots: string[] = [];
+
+  afterEach(async () => {
+    while (tempRoots.length > 0) {
+      const root = tempRoots.pop();
+      if (root) await rm(root, { recursive: true, force: true });
+    }
+  });
+
+
+  it("allows runtime setting edits after a task is failed or cancelled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const state = {
+      stateDir: (id: string) => join(root, "books", id, "story", "state"),
+      loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+      loadChapterIndex: async () => [],
+      getNextChapterNumber: async () => 1,
+    } as never;
+
+    const controller = new BookTaskController({
+      state,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft: async () => ({}),
+        reviseDraft: async () => ({}),
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+    const store = new BookTaskStore(state);
+
+    const failedTask = await store.create(bookId, {
+      type: "write",
+      requestedChapters: 1,
+      title: "Failed task",
+      retryEnabled: false,
+      service: "svc-a",
+      model: "model-a",
+      quickMode: false,
+    });
+    await store.setStatus(bookId, failedTask.id, "failed", {
+      finishedAt: new Date().toISOString(),
+      stage: "failed",
+      stageLabel: "失败",
+      stageDetail: "任务执行失败",
+    });
+    const failed = await controller.patch(bookId, failedTask.id, { options: { model: "model-b", service: "svc-b", quickMode: true } });
+    expect(failed.status).toBe("failed");
+    expect(failed.options).toMatchObject({ model: "model-b", service: "svc-b", quickMode: true });
+
+    const cancelledTask = await store.create(bookId, {
+      type: "write",
+      requestedChapters: 1,
+      title: "Cancelled task",
+      retryEnabled: false,
+      service: "svc-c",
+      model: "model-c",
+      quickMode: false,
+    });
+    await store.setStatus(bookId, cancelledTask.id, "cancelled", {
+      finishedAt: new Date().toISOString(),
+      stage: "cancelled",
+      stageLabel: "已取消",
+      stageDetail: "任务已取消",
+    });
+    const cancelled = await controller.patch(bookId, cancelledTask.id, { options: { model: "model-d" } });
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.options.model).toBe("model-d");
+
+    const activeTask = await store.create(bookId, {
+      type: "write",
+      requestedChapters: 1,
+      title: "Active task",
+      retryEnabled: false,
+      service: "svc-e",
+      model: "model-e",
+      quickMode: false,
+    });
+    await store.setStatus(bookId, activeTask.id, "running", {
+      finishedAt: null,
+      stage: "running",
+      stageLabel: "运行中",
+      stageDetail: "任务运行中",
+    });
+    await expect(controller.patch(bookId, activeTask.id, { options: { model: "model-f" } })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("allows deleting any non-running task but blocks running ones", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const state = {
+      stateDir: (id: string) => join(root, "books", id, "story", "state"),
+      loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+      loadChapterIndex: async () => [],
+      getNextChapterNumber: async () => 1,
+    } as never;
+
+    const controller = new BookTaskController({
+      state,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft: async () => ({}),
+        reviseDraft: async () => ({}),
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+    const store = new BookTaskStore(state);
+
+    const makeTask = async (status: BookTask["status"], title: string, targetBookId: string): Promise<BookTask> => {
+      const task = await store.create(targetBookId, {
+        type: "write",
+        requestedChapters: 1,
+        title,
+        retryEnabled: false,
+        service: "svc-a",
+        model: "model-a",
+        quickMode: false,
+      });
+      await store.setStatus(targetBookId, task.id, status, {
+        finishedAt: status === "running" || status === "stopping" || status === "retry_waiting" ? null : new Date().toISOString(),
+        stage: status,
+        stageLabel: status,
+        stageDetail: title,
+      });
+      return task;
+    };
+
+    const makeBook = async (suffix: string): Promise<string> => {
+      const id = `${bookId}-${suffix}`;
+      await mkdir(join(root, "books", id, "story", "state"), { recursive: true });
+      await writeFile(join(root, "books", id, "book.json"), JSON.stringify({ id, title: `Demo Book ${suffix}` }), "utf-8");
+      return id;
+    };
+
+    const failedBookId = await makeBook("failed");
+    const cancelledBookId = await makeBook("cancelled");
+    const succeededBookId = await makeBook("succeeded");
+    const pausedBookId = await makeBook("paused");
+    const queuedBookId = await makeBook("queued");
+    const retryBookId = await makeBook("retry");
+    const runningBookId = await makeBook("running");
+    const stoppingBookId = await makeBook("stopping");
+
+    await controller.delete(failedBookId, (await makeTask("failed", "failed task", failedBookId)).id);
+    await controller.delete(cancelledBookId, (await makeTask("cancelled", "cancelled task", cancelledBookId)).id);
+    await controller.delete(succeededBookId, (await makeTask("succeeded", "succeeded task", succeededBookId)).id);
+    await controller.delete(pausedBookId, (await makeTask("paused", "paused task", pausedBookId)).id);
+    await controller.delete(queuedBookId, (await makeTask("queued", "queued task", queuedBookId)).id);
+    await controller.delete(retryBookId, (await makeTask("retry_waiting", "retry task", retryBookId)).id);
+
+    const runningTask = await makeTask("running", "running task", runningBookId);
+    await expect(controller.delete(runningBookId, runningTask.id)).rejects.toMatchObject({ status: 409 });
+    const stoppingTask = await makeTask("stopping", "stopping task", stoppingBookId);
+    await controller.delete(stoppingBookId, stoppingTask.id);
+  });
+
+  it("updates live token usage for audit-stage progress", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const state = {
+      stateDir: (id: string) => join(root, "books", id, "story", "state"),
+      loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+      loadChapterIndex: async () => [],
+      getNextChapterNumber: async () => 1,
+    } as never;
+
+    const broadcasts: Array<{ event: string; data: unknown }> = [];
+    const controller = new BookTaskController({
+      state,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft: async () => ({}),
+        reviseDraft: async () => ({}),
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: (event, data) => {
+        broadcasts.push({ event, data });
+      },
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+    const store = new BookTaskStore(state);
+    const task = await store.create(bookId, {
+      type: "audit",
+      requestedChapters: 1,
+      title: "Audit task",
+      retryEnabled: false,
+      service: "svc-a",
+      model: "model-a",
+      quickMode: false,
+    });
+    await store.setStatus(bookId, task.id, "running", {
+      finishedAt: null,
+      stage: "audit",
+      stageLabel: "审计中",
+      stageDetail: "正在审计第 1 章",
+      currentChapterNumber: 1,
+      chapterFinishedAt: null,
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    });
+
+    const updated = await (controller as unknown as {
+      updateLiveTaskMetrics: (
+        bookId: string,
+        taskId: string,
+        baseWords: number,
+        baseTokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number },
+        progress: { totalChars: number; elapsedMs: number; chineseChars: number; status: string },
+        language: string | null | undefined,
+        activeChapterNumber: number | null,
+      ) => Promise<BookTask | null>;
+    }).updateLiveTaskMetrics(
+      bookId,
+      task.id,
+      1234,
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      { totalChars: 200, elapsedMs: 1000, chineseChars: 200, status: "streaming" },
+      "zh",
+      1,
+    );
+
+    expect(updated?.tokenUsage?.totalTokens).toBeGreaterThan(0);
+    expect(updated?.writtenWords).toBe(0);
+    expect(broadcasts.some((item) => item.event === "book-task:update")).toBe(true);
+    expect(broadcasts.some((item) => item.event === "book-task:progress")).toBe(true);
+  });
+
+  it("revises audit chapters when the latest audit score is below 80 even if status is approved", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const chapterIndex = [{
+      number: 3,
+      title: "Ch 3",
+      status: "ready-for-review",
+      wordCount: 2400,
+      auditIssueCount: 1,
+      updatedAt: "2026-05-20T00:00:00.000Z",
+      fileName: "ch03.md",
+      auditHistory: [{
+        auditedAt: "2026-05-20T00:00:00.000Z",
+        passed: true,
+        issueCount: 1,
+        score: 40,
+        summary: "low score pass",
+        issues: ["[warning] pacing"],
+      }],
+    }];
+
+    const auditDraft = vi.fn().mockResolvedValue({
+      passed: true,
+      issues: [],
+      summary: "audit ok",
+    });
+    const reviseDraft = vi.fn().mockResolvedValue({
+      status: "ready-for-review",
+      applied: true,
+      audit: {
+        passed: true,
+        score: 92,
+        issueCount: 0,
+        severityCounts: { critical: 0, warning: 0, info: 0 },
+        summary: "repaired",
+        issues: [],
+      },
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+        loadChapterIndex: async () => chapterIndex,
+        getNextChapterNumber: async () => 4,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft,
+        reviseDraft,
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "audit",
+      requestedChapters: 1,
+      auditChapterStart: 3,
+      auditChapterEnd: 3,
+      retryEnabled: false,
+    });
+
+    let finalTask = task;
+    for (let i = 0; i < 80; i += 1) {
+      const current = await controller.get(bookId, task.id);
+      if (current) {
+        finalTask = current;
+        if (current.status === "succeeded") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(auditDraft).toHaveBeenCalledTimes(1);
+    expect(reviseDraft).toHaveBeenCalledTimes(1);
+    expect(reviseDraft).toHaveBeenCalledWith(bookId, 3);
+    expect(finalTask.status).toBe("succeeded");
+    expect(finalTask.result).toMatchObject({
+      auditedChapters: 1,
+      passedChapters: 1,
+      failedChapters: 0,
+      auditPassRate: 100,
+    });
+  });
+
+  it("broadcasts chapter-level audit completion when audit tasks succeed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    let chapterIndex = [{
+      number: 3,
+      title: "Ch 3",
+      status: "drafted",
+      wordCount: 2400,
+      auditIssueCount: 2,
+      updatedAt: "2026-05-20T00:00:00.000Z",
+      fileName: "ch03.md",
+      auditHistory: [],
+    }];
+
+    const broadcasts: Array<{ event: string; data: unknown }> = [];
+    const auditDraft = vi.fn().mockResolvedValue({
+      passed: true,
+      issues: [],
+      summary: "audit ok",
+    });
+    const loadChapterIndex = vi.fn(async () => chapterIndex);
+    const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
+      chapterIndex = nextIndex as typeof chapterIndex;
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+        loadChapterIndex,
+        saveChapterIndex,
+        getNextChapterNumber: async () => 4,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft,
+        reviseDraft: async () => ({}),
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: (event, data) => {
+        broadcasts.push({ event, data });
+      },
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "audit",
+      requestedChapters: 1,
+      auditChapterStart: 3,
+      auditChapterEnd: 3,
+      retryEnabled: false,
+    });
+
+    let finalTask = task;
+    for (let i = 0; i < 80; i += 1) {
+      const current = await controller.get(bookId, task.id);
+      if (current) {
+        finalTask = current;
+        if (current.status === "succeeded") break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    expect(auditDraft).toHaveBeenCalledTimes(1);
+    expect(loadChapterIndex).toHaveBeenCalled();
+    expect(saveChapterIndex).toHaveBeenCalled();
+    expect(finalTask.status).toBe("succeeded");
+    const auditComplete = broadcasts.find((item) => item.event === "audit:complete");
+    expect(auditComplete).toBeTruthy();
+    expect(auditComplete?.data).toMatchObject({
+      bookId,
+      chapterNumber: 3,
+      passed: true,
+      score: 100,
+      issueCount: 0,
+      status: "ready-for-review",
+    });
+    expect(chapterIndex[0]).toMatchObject({
+      status: "ready-for-review",
+      auditIssueCount: 0,
+      auditHistory: [
+        expect.objectContaining({
+          passed: true,
+          issueCount: 0,
+          score: 100,
+        }),
+      ],
+    });
+    expect(broadcasts.some((item) => item.event === "book-task:complete")).toBe(true);
+  });
+});

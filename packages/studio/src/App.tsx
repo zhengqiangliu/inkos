@@ -10,6 +10,7 @@ import { ServiceDetailPage } from "./pages/ServiceDetailPage";
 import { TruthFiles } from "./pages/TruthFiles";
 import { DaemonControl } from "./pages/DaemonControl";
 import { LogViewer } from "./pages/LogViewer";
+import { TaskCenterPage } from "./pages/TaskCenterPage";
 import { GenreManager } from "./pages/GenreManager";
 import { StyleManager } from "./pages/StyleManager";
 import { ImportManager } from "./pages/ImportManager";
@@ -31,6 +32,12 @@ export type { HashRoute as Route } from "./hooks/use-hash-route";
 export function deriveActiveBookId(route: HashRoute): string | undefined {
   if ("bookId" in route) return route.bookId;
   return undefined;
+}
+
+export function deriveSidebarActivePage(route: HashRoute): string {
+  if ("bookId" in route) return `book:${route.bookId}`;
+  if (route.page === "service-detail") return "services";
+  return route.page;
 }
 
 export function App() {
@@ -83,6 +90,7 @@ export function App() {
     toTruth: (bookId: string) => setRoute({ page: "truth", bookId }),
     toDaemon: () => setRoute({ page: "daemon" }),
     toLogs: () => setRoute({ page: "logs" }),
+    toTasks: () => setRoute({ page: "tasks" }),
     toGenres: () => setRoute({ page: "genres" }),
     toStyle: () => setRoute({ page: "style" }),
     toImport: () => setRoute({ page: "import" }),
@@ -91,12 +99,7 @@ export function App() {
   };
 
   const activeBookId = deriveActiveBookId(route);
-  const activePage =
-    activeBookId
-      ? `book:${activeBookId}`
-      : route.page === "service-detail"
-        ? "services"
-        : route.page;
+  const activePage = deriveSidebarActivePage(route);
 
   if (!ready) {
     return (
@@ -232,6 +235,11 @@ export function App() {
           {route.page === "logs" && (
             <div className="max-w-4xl mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in">
               <LogViewer nav={nav} theme={theme} t={t} />
+            </div>
+          )}
+          {route.page === "tasks" && (
+            <div className="max-w-[2040px] mx-auto px-6 py-12 md:px-12 lg:py-16 fade-in">
+              <TaskCenterPage nav={nav} theme={theme} t={t} sse={sse} />
             </div>
           )}
           {route.page === "genres" && (

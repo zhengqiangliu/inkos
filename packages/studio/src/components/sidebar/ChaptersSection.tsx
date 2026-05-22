@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchJson } from "../../hooks/use-api";
+import { fetchJson, invalidateApiPaths } from "../../hooks/use-api";
 import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
 import { useChatStore } from "../../store/chat";
 import type { MessageAuditSummary } from "../../store/chat/types";
+import type { ChapterAuditReport } from "../../shared/contracts";
 import { SidebarCard } from "./SidebarCard";
 import { cn } from "../../lib/utils";
 import { estimateAuditScoreFromIssueTexts, scoreBadgeClass } from "../../utils/audit-score";
 import { describeChapterAutoReview } from "../../utils/auto-review-display";
 import { resolveBookAgentInstruction } from "../../utils/agent-instruction";
+import { resolveLatestChapterAuditReport } from "../../utils/chapter-audit";
 import { dispatchWriteNextInstruction } from "../../utils/write-next";
-import { Check, Loader2, Pencil, RotateCcw, ShieldCheck, Trash2, Wrench, Zap } from "lucide-react";
+import { AUDIT_PASS_SCORE_THRESHOLD } from "../../utils/audit-score";
+import { Check, Clock3, Loader2, Pencil, RotateCcw, ShieldCheck, Trash2, Wrench, Zap } from "lucide-react";
 
 interface ChapterMeta {
   number: number;
@@ -20,6 +23,7 @@ interface ChapterMeta {
   auditIssues?: ReadonlyArray<string>;
   audit?: MessageAuditSummary;
   reviewNote?: string;
+  auditHistory?: ReadonlyArray<ChapterAuditReport>;
 }
 
 const AUDIT_ACTION_TIMEOUT_MS = 600000;
@@ -77,6 +81,24 @@ function parsePositiveChapterNumber(raw: unknown): number | null {
   return chapter;
 }
 
+export function extractChapterNumberFromPayload(data: unknown): number | null {
+  if (!data || typeof data !== "object") return null;
+  const payload = data as Record<string, unknown>;
+  const candidates = [
+    payload.chapterNumber,
+    payload.chapter,
+    payload.task && typeof payload.task === "object" ? (payload.task as { chapterNumber?: unknown }).chapterNumber : undefined,
+    payload.task && typeof payload.task === "object" ? (payload.task as { currentChapterNumber?: unknown }).currentChapterNumber : undefined,
+    payload.task && typeof payload.task === "object" ? (payload.task as { lastChapterNumber?: unknown }).lastChapterNumber : undefined,
+    payload.task && typeof payload.task === "object" ? (payload.task as { result?: { chapterNumber?: unknown } }).result?.chapterNumber : undefined,
+  ];
+  for (const candidate of candidates) {
+    const chapter = parsePositiveChapterNumber(candidate);
+    if (chapter !== null) return chapter;
+  }
+  return null;
+}
+
 function applyTemplate(template: string, replacements: Record<string, string>): string {
   let output = template;
   for (const [key, value] of Object.entries(replacements)) {
@@ -116,6 +138,28 @@ function normalizeAuditFailureGate(raw: unknown): MessageAuditSummary["failureGa
   return undefined;
 }
 
+function historyEntryToAuditSummary(entry: ChapterAuditReport | undefined, chapter: number): MessageAuditSummary | undefined {
+  if (!entry) return undefined;
+  const passed = entry.passed && Math.trunc(entry.score) >= AUDIT_PASS_SCORE_THRESHOLD;
+  return {
+    chapter,
+    passed,
+    issueCount: entry.issueCount,
+    score: entry.score,
+    ...(entry.severityCounts ? { severityCounts: entry.severityCounts } : {}),
+    ...(passed ? { failureGate: entry.failureGate } : { failureGate: entry.failureGate === "critical" ? "critical" : "score" }),
+    ...(typeof entry.summary === "string" && entry.summary.trim() ? { summary: entry.summary.trim() } : {}),
+    ...(typeof entry.report === "string" && entry.report.trim() ? { report: entry.report.trim() } : {}),
+    ...(Array.isArray(entry.issues) && entry.issues.length > 0 ? { issues: entry.issues } : {}),
+  };
+}
+
+export function isAuditTaskCompletionForBook(message: SSEMessage, bookId: string): boolean {
+  if (message.event !== "book-task:complete") return false;
+  const payload = message.data as { bookId?: unknown; task?: { type?: unknown } } | null;
+  return payload?.bookId === bookId && payload?.task?.type === "audit";
+}
+
 export function normalizeAuditSummary(raw: unknown, chapterHint?: number): MessageAuditSummary | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const payload = raw as {
@@ -142,13 +186,14 @@ export function normalizeAuditSummary(raw: unknown, chapterHint?: number): Messa
   const issueCount = Number.isFinite(issueCountRaw)
     ? Math.max(0, Math.trunc(issueCountRaw))
     : issues.length;
+  const passed = Boolean(payload.passed) && Math.trunc(scoreRaw) >= AUDIT_PASS_SCORE_THRESHOLD;
   return {
     chapter,
-    passed: Boolean(payload.passed),
+    passed,
     issueCount,
     score: Math.max(0, Math.min(100, Math.trunc(scoreRaw))),
     ...(severityCounts ? { severityCounts } : {}),
-    ...(failureGate ? { failureGate } : {}),
+    ...(passed ? { failureGate } : { failureGate: failureGate === "critical" ? "critical" : "score" }),
     ...(typeof payload.summary === "string" && payload.summary.trim()
       ? { summary: payload.summary.trim() }
       : {}),
@@ -179,18 +224,25 @@ function areIssueListsEqual(left: ReadonlyArray<string>, right: ReadonlyArray<st
   return true;
 }
 
+function shouldKeepAuditSummaryForStatus(status: string, audit: MessageAuditSummary): boolean {
+  if (audit.passed) {
+    return status === "ready-for-review" || status === "approved";
+  }
+  return status === "audit-failed";
+}
+
 export function shouldCarryForwardAuditSummary(args: {
   previous: ChapterMeta;
   incoming: ChapterMeta;
 }): boolean {
   if (args.previous.number !== args.incoming.number) return false;
-  if (args.previous.status !== args.incoming.status) return false;
   const previousScore = Number(args.previous.audit?.score);
   if (Number.isFinite(previousScore)) {
     // Keep the last structured audit result when index refresh has no structured
     // audit payload (index.json currently stores issue texts, not audit.score).
-    return true;
+    return shouldKeepAuditSummaryForStatus(args.incoming.status, args.previous.audit!);
   }
+  if (args.previous.status !== args.incoming.status) return false;
   const previousIssues = Array.isArray(args.previous.auditIssues) ? args.previous.auditIssues : [];
   const incomingIssues = Array.isArray(args.incoming.auditIssues) ? args.incoming.auditIssues : [];
   return areIssueListsEqual(previousIssues, incomingIssues);
@@ -271,6 +323,7 @@ export function ChaptersSection({
   const [deletingChapters, setDeletingChapters] = useState<ReadonlyArray<number>>([]);
   const [approvingChapters, setApprovingChapters] = useState<ReadonlyArray<number>>([]);
   const [repairingChapters, setRepairingChapters] = useState<ReadonlyArray<number>>([]);
+  const [expandedAuditHistoryChapters, setExpandedAuditHistoryChapters] = useState<ReadonlyArray<number>>([]);
   const [auditingImpacted, setAuditingImpacted] = useState(false);
   const rewriteFallbackTimers = useRef<Map<number, number>>(new Map());
   const auditFallbackTimers = useRef<Map<number, number>>(new Map());
@@ -279,6 +332,7 @@ export function ChaptersSection({
   const refreshRequestSeqRef = useRef(0);
   const lastProcessedSseMessageRef = useRef<SSEMessage | null>(null);
   const latestAuditSummaryByChapterRef = useRef<Map<number, MessageAuditSummary>>(new Map());
+  const auditRefreshTimerRef = useRef<number | null>(null);
   const openChapterArtifact = useChatStore((s) => s.openChapterArtifact);
   const activeChapterNumber = useChatStore((s) => s.artifactChapter);
   const bumpBookDataVersion = useChatStore((s) => s.bumpBookDataVersion);
@@ -307,10 +361,11 @@ export function ChaptersSection({
             previousByChapter.set(chapter.number, chapter);
           });
           return data.chapters.map((chapter) => {
+            const auditHistory = Array.isArray(chapter.auditHistory) ? chapter.auditHistory : [];
             const normalized = normalizeAuditSummary(
               (chapter as { audit?: unknown }).audit,
               chapter.number,
-            );
+            ) ?? historyEntryToAuditSummary(auditHistory[auditHistory.length - 1], chapter.number);
             if (normalized) {
               latestAuditSummaryByChapterRef.current.set(chapter.number, normalized);
               return mergeAuditSummary(chapter, normalized);
@@ -345,6 +400,27 @@ export function ChaptersSection({
 
   useEffect(() => {
     latestAuditSummaryByChapterRef.current.clear();
+  }, [bookId]);
+
+  useEffect(() => () => {
+    if (auditRefreshTimerRef.current !== null) {
+      window.clearTimeout(auditRefreshTimerRef.current);
+      auditRefreshTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleRefreshChapters = useCallback((delay = 400) => {
+    if (auditRefreshTimerRef.current !== null) {
+      window.clearTimeout(auditRefreshTimerRef.current);
+    }
+    auditRefreshTimerRef.current = window.setTimeout(() => {
+      auditRefreshTimerRef.current = null;
+      refreshChapters();
+    }, delay);
+  }, [refreshChapters]);
+
+  useEffect(() => {
+    setExpandedAuditHistoryChapters([]);
   }, [bookId]);
 
   useEffect(
@@ -399,6 +475,14 @@ export function ChaptersSection({
       window.clearTimeout(timerId);
       deleteFallbackTimers.current.delete(chapterNum);
     }
+  }, []);
+
+  const toggleAuditHistory = useCallback((chapterNum: number) => {
+    setExpandedAuditHistoryChapters((previous) => (
+      previous.includes(chapterNum)
+        ? previous.filter((n) => n !== chapterNum)
+        : [...previous, chapterNum]
+    ));
   }, []);
 
   const pushActionStartMessage = useCallback(
@@ -616,12 +700,7 @@ export function ChaptersSection({
   );
 
   const chapterNumFromEventData = useCallback((data: unknown): number | null => {
-    const payload = data as { chapter?: unknown; chapterNumber?: unknown } | null;
-    const chapterFromNumber = parsePositiveChapterNumber(payload?.chapterNumber);
-    if (chapterFromNumber !== null) return chapterFromNumber;
-    const chapterFromAlias = parsePositiveChapterNumber(payload?.chapter);
-    if (chapterFromAlias !== null) return chapterFromAlias;
-    return null;
+    return extractChapterNumberFromPayload(data);
   }, []);
 
   const ensureBookSessionId = useCallback(async (): Promise<string> => {
@@ -857,8 +936,7 @@ export function ChaptersSection({
         );
         return { artifactChapterMeta: merged };
       });
-      bumpBookDataVersion();
-      refreshChapters();
+      scheduleRefreshChapters();
       // Chat /agent 审计会在主对话里返回完整报告；侧栏不重复追加消息。
       if (typeof data?.runId === "string" && data.runId.trim().length > 0) {
         return;
@@ -931,6 +1009,13 @@ export function ChaptersSection({
       if (activeSessionId) {
         appendAssistantMessage(activeSessionId, data?.error ?? t("sidebar.chapter.auditActionFailed"));
       }
+        return;
+      }
+
+    if (isAuditTaskCompletionForBook(message, bookId)) {
+      invalidateApiPaths([`/api/v1/books/${bookId}`]);
+      bumpBookDataVersion();
+      scheduleRefreshChapters(900);
       return;
     }
 
@@ -977,14 +1062,12 @@ export function ChaptersSection({
     // Deterministic /agent commands (e.g. "审计第19章") may not go through the
     // sidebar action handlers. Refresh after agent completion as a safe fallback.
     if (message.event === "agent:complete") {
-      bumpBookDataVersion();
-      refreshChapters();
+      scheduleRefreshChapters(900);
     }
   }, [
     activeSessionId,
     appendAssistantMessage,
     bookId,
-    bumpBookDataVersion,
     chapterNumFromEventData,
     clearAuditFallback,
     clearApproveFallback,
@@ -995,6 +1078,7 @@ export function ChaptersSection({
     pushActionFailedMessage,
     refreshChapters,
     scheduleAuditFallback,
+    scheduleRefreshChapters,
     t,
   ]);
 
@@ -1012,8 +1096,15 @@ export function ChaptersSection({
       handleSseEvent(message);
     }
 
+    const hasAuditCompletion = pendingMessages.some((message) =>
+      message.event === "audit:complete" || message.event === "book-task:complete",
+    );
+    if (hasAuditCompletion) {
+      scheduleRefreshChapters();
+    }
+
     lastProcessedSseMessageRef.current = messages[messages.length - 1] ?? null;
-  }, [handleSseEvent, sse.messages]);
+  }, [handleSseEvent, scheduleRefreshChapters, sse.messages]);
 
   const handleOpenChapterEditor = (ch: ChapterMeta) => {
     openChapterArtifact(ch.number, {
@@ -1025,6 +1116,7 @@ export function ChaptersSection({
         wordCount: ch.wordCount ?? 0,
         auditIssues: Array.isArray(ch.auditIssues) ? ch.auditIssues : [],
         ...(ch.audit ? { audit: ch.audit } : {}),
+        ...(Array.isArray(ch.auditHistory) ? { auditHistory: ch.auditHistory } : {}),
       },
     });
   };
@@ -1039,6 +1131,7 @@ export function ChaptersSection({
         wordCount: ch.wordCount ?? 0,
         auditIssues: Array.isArray(ch.auditIssues) ? ch.auditIssues : [],
         ...(ch.audit ? { audit: ch.audit } : {}),
+        ...(Array.isArray(ch.auditHistory) ? { auditHistory: ch.auditHistory } : {}),
       },
     });
   };
@@ -1047,6 +1140,7 @@ export function ChaptersSection({
     const brief = window.prompt(t("sidebar.chapter.rewritePrompt"), "");
     if (brief === null) return;
     const actionLabel = t("book.rewrite");
+    const chapter = chapters.find((item) => item.number === chapterNum);
     setRewritingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
     scheduleRewriteFallback(chapterNum);
     try {
@@ -1054,6 +1148,7 @@ export function ChaptersSection({
       const instruction = resolveBookAgentInstruction("rewrite", {
         chapterNumber: chapterNum,
         brief,
+        auditReport: resolveLatestChapterAuditReport(chapter) ?? undefined,
         language,
       });
       await dispatchAgentInstruction(instruction);
@@ -1243,12 +1338,21 @@ export function ChaptersSection({
             const auditing = auditingChapters.includes(ch.number);
             const deleting = deletingChapters.includes(ch.number);
             const approving = approvingChapters.includes(ch.number);
+            const auditHistory = Array.isArray(ch.auditHistory) ? ch.auditHistory : [];
+            const latestAuditHistory = auditHistory[auditHistory.length - 1];
+            const latestStructuredAudit = ch.audit ?? historyEntryToAuditSummary(latestAuditHistory, ch.number);
             const chapterIssues = Array.isArray(ch.auditIssues) ? ch.auditIssues : [];
             const degradedReason = extractDegradedReason(ch.status, chapterIssues);
             const rewriteReviewReason = extractRewriteReviewReason(ch.reviewNote);
             const persistedAutoReviewReason = extractAutoReviewFinalReason(ch.reviewNote);
-            const showAuditScore = ch.status === "audit-failed" || ch.status === "ready-for-review" || ch.status === "approved" || typeof ch.audit?.score === "number";
-            const auditScore = resolveChapterAuditScore(ch);
+            const showAuditScore = ch.status === "audit-failed"
+              || ch.status === "ready-for-review"
+              || ch.status === "approved"
+              || typeof latestStructuredAudit?.score === "number";
+            const auditScore = resolveChapterAuditScore({
+              audit: latestStructuredAudit,
+              auditIssues: chapterIssues,
+            });
             const autoReviewDisplay = describeChapterAutoReview(autoReviewStateByChapter[ch.number]);
             const autoReviewHint = autoReviewDisplay?.text ?? persistedAutoReviewReason;
             const autoReviewToneClass = autoReviewDisplay?.tone === "danger"
@@ -1257,6 +1361,11 @@ export function ChaptersSection({
                 ? "text-emerald-700/90"
                 : "text-sky-700/90";
             const isSelected = activeChapterNumber === ch.number;
+            const latestAuditSummaryText = latestStructuredAudit?.summary?.trim() ?? latestStructuredAudit?.report?.split("\n")[0]?.trim() ?? "";
+            const auditHistoryExpanded = expandedAuditHistoryChapters.includes(ch.number);
+            const latestAuditToneClass = latestStructuredAudit?.passed === false
+              ? "text-red-700/90"
+              : "text-emerald-700/90";
             return (
               <li
                 key={`${ch.number}-${ch.title ?? ""}`}
@@ -1311,6 +1420,20 @@ export function ChaptersSection({
                     {autoReviewHint && (
                       <div className={cn("mt-0.5 truncate text-[10px]", autoReviewToneClass)} title={autoReviewHint}>
                         {autoReviewHint}
+                      </div>
+                    )}
+                    {(latestStructuredAudit || auditHistory.length > 0) && (
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px]">
+                        {latestStructuredAudit && (
+                          <span className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 font-medium", latestAuditToneClass === "text-red-700/90" ? "bg-red-500/10 text-red-700" : "bg-emerald-500/10 text-emerald-700")}>
+                            最近审计 {latestStructuredAudit.passed ? "通过" : "未通过"} · 评分 {latestStructuredAudit.score}
+                          </span>
+                        )}
+                        {latestAuditSummaryText && (
+                          <span className="truncate text-muted-foreground/80" title={latestAuditSummaryText}>
+                            {latestAuditSummaryText}
+                          </span>
+                        )}
                       </div>
                     )}
                   </button>
@@ -1388,9 +1511,72 @@ export function ChaptersSection({
                       >
                         {auditing ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
                       </button>
+                      {auditHistory.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            toggleAuditHistory(ch.number);
+                          }}
+                          className="inline-flex h-5 items-center gap-1 rounded-md border border-border/60 bg-background/70 px-1.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                          title={auditHistoryExpanded ? "收起历史审计" : "展开历史审计"}
+                        >
+                          <Clock3 size={10} />
+                          {auditHistoryExpanded ? "收起" : `历史 ${auditHistory.length}`}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
+                {auditHistoryExpanded && auditHistory.length > 0 && (
+                  <div className="mt-2 rounded-md border border-border/40 bg-background/60 p-2">
+                    <div className="mb-1 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                      <span>审计历史</span>
+                      <span>{auditHistory.length} 条记录</span>
+                    </div>
+                    <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
+                      {auditHistory.map((entry, index) => {
+                        const timeText = (() => {
+                          const date = new Date(entry.auditedAt);
+                          return Number.isNaN(date.getTime()) ? entry.auditedAt : date.toLocaleString();
+                        })();
+                        const reportText = entry.report?.trim() || entry.summary?.trim() || "";
+                        const severityText = entry.severityCounts
+                          ? `严重 ${entry.severityCounts.critical} / 警告 ${entry.severityCounts.warning} / 提示 ${entry.severityCounts.info}`
+                          : null;
+                        return (
+                          <div
+                            key={`${entry.auditedAt}-${index}`}
+                            className="rounded-md border border-border/30 bg-card/80 p-2 text-[10px] text-muted-foreground shadow-sm"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 font-medium", entry.passed ? "bg-emerald-500/10 text-emerald-700" : "bg-red-500/10 text-red-700")}>
+                                {entry.passed ? "通过" : "未通过"} · 评分 {entry.score}
+                              </span>
+                              <span>问题 {entry.issueCount}</span>
+                              <span className="inline-flex items-center gap-1" title={entry.auditedAt}>
+                                <Clock3 size={10} />
+                                {timeText}
+                              </span>
+                              {severityText && <span>{severityText}</span>}
+                            </div>
+                            {entry.summary && (
+                              <div className="mt-1 text-[10px] text-foreground/80">
+                                摘要：{entry.summary}
+                              </div>
+                            )}
+                            {reportText && (
+                              <pre className="mt-1 whitespace-pre-wrap rounded bg-secondary/30 p-2 text-[10px] leading-5 text-foreground/80">
+                                {reportText}
+                              </pre>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </li>
             );
           })}

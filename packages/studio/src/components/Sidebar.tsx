@@ -35,7 +35,7 @@ import {
   FileInput,
   TrendingUp,
   Stethoscope,
-  FolderOpen,
+  ListTodo,
   ChevronRight,
   Loader2,
   MoreHorizontal,
@@ -60,6 +60,7 @@ interface Nav {
   toServices: () => void;
   toDaemon: () => void;
   toLogs: () => void;
+  toTasks: () => void;
   toGenres: () => void;
   toStyle: () => void;
   toImport: () => void;
@@ -74,6 +75,20 @@ interface SidebarProps {
   t: TFunction;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
+}
+
+export function getBookBadgeInitial(title: string): string {
+  const normalized = title.normalize("NFKC").trim();
+  if (!normalized) return "?";
+  const stripped = normalized.replace(/^[\s"'“”‘’《》【】()（）\[\]{}·—\-_,.!?：:；;、/\\|]+/u, "");
+  const chars = Array.from(stripped || normalized);
+  for (const char of chars) {
+    if (/\p{L}/u.test(char) || /\p{N}/u.test(char) || /\p{Script=Han}/u.test(char)) {
+      return /[a-z]/i.test(char) ? char.toUpperCase() : char;
+    }
+  }
+  const fallback = chars[0] ?? "?";
+  return /[a-z]/i.test(fallback) ? fallback.toUpperCase() : fallback;
 }
 
 export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCollapsed }: SidebarProps) {
@@ -167,38 +182,42 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
     <TooltipProvider delay={120}>
       <aside className={`group/sidebar relative ${collapsed ? "w-[72px]" : "w-[260px]"} shrink-0 border-r border-border bg-background/80 backdrop-blur-md flex flex-col h-full overflow-hidden select-none transition-all duration-200`}>
         <Tooltip>
-          <TooltipTrigger>
-            <button
-              type="button"
-              onClick={() => onToggleCollapsed?.()}
-              className="absolute right-[-10px] top-4 z-30 flex h-7 w-7 items-center justify-center rounded-full border border-border/70 bg-background text-muted-foreground shadow-md transition-all hover:bg-secondary hover:text-foreground"
-              aria-label={collapsed ? "展开侧边栏" : "折叠侧边栏"}
-            >
-              {collapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
-            </button>
-          </TooltipTrigger>
+          <TooltipTrigger
+            render={(
+              <button
+                type="button"
+                onClick={() => onToggleCollapsed?.()}
+                className="absolute right-[-10px] top-4 z-30 flex h-7 w-7 items-center justify-center rounded-full border border-border/70 bg-background text-muted-foreground shadow-md transition-all hover:bg-secondary hover:text-foreground"
+                aria-label={collapsed ? "展开侧边栏" : "折叠侧边栏"}
+              >
+                {collapsed ? <PanelLeftOpen size={12} /> : <PanelLeftClose size={12} />}
+              </button>
+            )}
+          />
           <TooltipContent side="right">{collapsed ? "展开侧边栏" : "折叠侧边栏"}</TooltipContent>
         </Tooltip>
 
         <div className={`${collapsed ? "px-2 py-5" : "px-6 py-8"}`}>
           <Tooltip>
-            <TooltipTrigger>
-              <button
-                onClick={nav.toDashboard}
-                className={`group flex items-center ${collapsed ? "mx-auto justify-center" : "gap-2"} hover:opacity-80 transition-all duration-300`}
-                aria-label="返回首页"
-              >
-                <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground shadow-lg shadow-primary/20 group-hover:scale-105 transition-transform">
-                  <ScrollText size={18} />
-                </div>
-                {!collapsed && (
-                  <div className="flex flex-col">
-                    <span className="font-serif text-xl leading-none italic font-medium">InkOS</span>
-                    <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground font-bold mt-1">Studio</span>
+            <TooltipTrigger
+              render={(
+                <button
+                  onClick={nav.toDashboard}
+                  className={`group flex items-center ${collapsed ? "mx-auto justify-center" : "gap-2"} hover:opacity-80 transition-all duration-300`}
+                  aria-label="返回首页"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground shadow-lg shadow-primary/20 group-hover:scale-105 transition-transform">
+                    <ScrollText size={18} />
                   </div>
-                )}
-              </button>
-            </TooltipTrigger>
+                  {!collapsed && (
+                    <div className="flex flex-col">
+                      <span className="font-serif text-xl leading-none italic font-medium">InkOS</span>
+                      <span className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground font-bold mt-1">Studio</span>
+                    </div>
+                  )}
+                </button>
+              )}
+            />
             {collapsed && <TooltipContent side="right">返回首页</TooltipContent>}
           </Tooltip>
         </div>
@@ -221,16 +240,18 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
             {collapsed && (
               <div className="mb-3 grid w-full place-items-center">
                 <Tooltip>
-                  <TooltipTrigger>
-                    <button
-                      type="button"
-                      onClick={nav.toBookCreate}
-                      className="grid h-10 w-10 place-items-center rounded-lg border border-transparent text-muted-foreground transition-colors hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
-                      aria-label="新建书籍"
-                    >
-                      <Plus size={16} />
-                    </button>
-                  </TooltipTrigger>
+                  <TooltipTrigger
+                    render={(
+                      <button
+                        type="button"
+                        onClick={nav.toBookCreate}
+                        className="grid h-10 w-10 place-items-center rounded-lg border border-transparent text-muted-foreground transition-colors hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
+                        aria-label="新建书籍"
+                      >
+                        <Plus size={16} />
+                      </button>
+                    )}
+                  />
                   <TooltipContent side="right">新建书籍</TooltipContent>
                 </Tooltip>
               </div>
@@ -241,23 +262,34 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                 const bookSessions = sessionsByBook[book.id] ?? [];
                 const isActiveBook = activePage === `book:${book.id}`;
                 const isExpanded = expandedBooks.has(book.id);
+                const initial = getBookBadgeInitial(book.title);
 
                 return (
                   <div key={book.id}>
                     {collapsed ? (
                       <Tooltip>
-                        <TooltipTrigger>
-                          <button
-                            type="button"
-                            onClick={() => nav.toBook(book.id)}
-                            className={`grid h-10 w-10 place-items-center rounded-lg border transition-colors ${
-                              isActiveBook ? "border-primary bg-primary/10 text-primary" : "border-transparent text-muted-foreground hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
-                            }`}
-                            aria-label={book.title}
-                          >
-                            <FolderOpen size={16} className="shrink-0" />
-                          </button>
-                        </TooltipTrigger>
+                        <TooltipTrigger
+                          render={(
+                            <button
+                              type="button"
+                              onClick={() => nav.toBook(book.id)}
+                              className={`grid h-10 w-10 place-items-center rounded-full border transition-colors ${
+                                isActiveBook ? "border-primary bg-primary/10 text-primary" : "border-transparent text-muted-foreground hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
+                              }`}
+                              aria-label={book.title}
+                            >
+                              <span
+                                className={`grid h-7 w-7 place-items-center rounded-full text-[11px] font-semibold leading-none ${
+                                  isActiveBook
+                                    ? "bg-primary/10 text-primary"
+                                    : "bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60 group-hover:text-foreground"
+                                }`}
+                              >
+                                {initial}
+                              </span>
+                            </button>
+                          )}
+                        />
                         <TooltipContent side="right">{book.title}</TooltipContent>
                       </Tooltip>
                     ) : (
@@ -274,7 +306,15 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                               size={12}
                               className={`shrink-0 text-muted-foreground/60 transition-transform ${isExpanded ? "rotate-90" : ""}`}
                             />
-                            <FolderOpen size={14} className="shrink-0 text-muted-foreground/60" />
+                            <span
+                              className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px] font-semibold leading-none ${
+                                isActiveBook
+                                  ? "border-primary/30 bg-primary/10 text-primary"
+                                  : "border-border/60 bg-secondary/40 text-muted-foreground"
+                              }`}
+                            >
+                              {initial}
+                            </span>
                             <span className="truncate flex-1 text-left">{book.title}</span>
                           </button>
                         </div>
@@ -358,9 +398,10 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
               </div>
             )}
             <div className="space-y-1">
-              <SidebarItem collapsed={collapsed} label={t("create.genre")} icon={<Boxes size={16} />} active={activePage === "genres"} onClick={nav.toGenres} />
-              <SidebarItem collapsed={collapsed} label={t("nav.config")} icon={<Settings size={16} />} active={activePage === "services"} onClick={nav.toServices} />
-              <SidebarItem collapsed={collapsed} label={t("nav.logs")} icon={<Terminal size={16} />} active={activePage === "logs"} onClick={nav.toLogs} />
+              <SidebarItem collapsed={collapsed} label={t("create.genre")} icon={<Boxes size={16} />} active={activePage === "genres"} onClick={nav.toGenres} href="#/genres" />
+              <SidebarItem collapsed={collapsed} label={t("nav.config")} icon={<Settings size={16} />} active={activePage === "services"} onClick={nav.toServices} href="#/services" />
+              <SidebarItem collapsed={collapsed} label="任务中心" icon={<ListTodo size={16} />} active={activePage === "tasks"} onClick={nav.toTasks} href="#/tasks" />
+              <SidebarItem collapsed={collapsed} label={t("nav.logs")} icon={<Terminal size={16} />} active={activePage === "logs"} onClick={nav.toLogs} href="#/logs" />
             </div>
           </div>
 
@@ -371,10 +412,10 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
               </div>
             )}
             <div className="space-y-1">
-              <SidebarItem collapsed={collapsed} label={t("nav.style")} icon={<Wand2 size={16} />} active={activePage === "style"} onClick={nav.toStyle} />
-              <SidebarItem collapsed={collapsed} label={t("nav.import")} icon={<FileInput size={16} />} active={activePage === "import"} onClick={nav.toImport} />
-              <SidebarItem collapsed={collapsed} label={t("nav.radar")} icon={<TrendingUp size={16} />} active={activePage === "radar"} onClick={nav.toRadar} />
-              <SidebarItem collapsed={collapsed} label={t("nav.doctor")} icon={<Stethoscope size={16} />} active={activePage === "doctor"} onClick={nav.toDoctor} />
+              <SidebarItem collapsed={collapsed} label={t("nav.style")} icon={<Wand2 size={16} />} active={activePage === "style"} onClick={nav.toStyle} href="#/style" />
+              <SidebarItem collapsed={collapsed} label={t("nav.import")} icon={<FileInput size={16} />} active={activePage === "import"} onClick={nav.toImport} href="#/import" />
+              <SidebarItem collapsed={collapsed} label={t("nav.radar")} icon={<TrendingUp size={16} />} active={activePage === "radar"} onClick={nav.toRadar} href="#/radar" />
+              <SidebarItem collapsed={collapsed} label={t("nav.doctor")} icon={<Stethoscope size={16} />} active={activePage === "doctor"} onClick={nav.toDoctor} href="#/doctor" />
             </div>
           </div>
         </div>
@@ -483,6 +524,7 @@ function SidebarItem({
   icon,
   active,
   onClick,
+  href,
   badge,
   badgeColor,
   collapsed = false,
@@ -491,20 +533,19 @@ function SidebarItem({
   icon: React.ReactNode;
   active: boolean;
   onClick: () => void;
+  href?: string;
   badge?: string;
   badgeColor?: string;
   collapsed?: boolean;
 }) {
-  const button = (
-    <button
-      onClick={onClick}
-      className={`group flex items-center text-sm transition-all duration-200 ${
-        collapsed
-          ? `grid h-10 w-10 place-items-center rounded-lg border ${active ? "border-primary bg-secondary/80 text-foreground shadow-sm" : "border-transparent text-foreground hover:border-border/60 hover:bg-secondary/50"}`
-          : `w-full gap-3 px-3 py-2 rounded-lg ${active ? "bg-secondary text-foreground font-medium shadow-sm border border-border" : "text-foreground font-medium hover:text-foreground hover:bg-secondary/50"}`
-      }`}
-      aria-label={label}
-    >
+  const commonClassName = `group flex items-center text-sm transition-all duration-200 ${
+    collapsed
+      ? `grid h-10 w-10 place-items-center rounded-lg border ${active ? "border-primary bg-secondary/80 text-foreground shadow-sm" : "border-transparent text-foreground hover:border-border/60 hover:bg-secondary/50"}`
+      : `w-full gap-3 px-3 py-2 rounded-lg ${active ? "bg-secondary text-foreground font-medium shadow-sm border border-border" : "text-foreground font-medium hover:text-foreground hover:bg-secondary/50"}`
+  }`;
+
+  const content = (
+    <>
       <span className={`transition-colors ${active ? "text-primary" : "text-muted-foreground group-hover:text-foreground"}`}>
         {icon}
       </span>
@@ -514,13 +555,32 @@ function SidebarItem({
           {badge}
         </span>
       )}
+    </>
+  );
+
+  const control = href ? (
+    <a
+      href={href}
+      className={commonClassName}
+      aria-label={label}
+    >
+      {content}
+    </a>
+  ) : (
+    <button
+      type="button"
+      onClick={onClick}
+      className={commonClassName}
+      aria-label={label}
+    >
+      {content}
     </button>
   );
 
-  if (!collapsed) return button;
+  if (!collapsed) return control;
   return (
     <Tooltip>
-      <TooltipTrigger>{button}</TooltipTrigger>
+      <TooltipTrigger render={control} />
       <TooltipContent side="right">{label}</TooltipContent>
     </Tooltip>
   );

@@ -142,26 +142,57 @@ describe("createStreamMonitor", () => {
     }, 1000);
 
     monitor.onChunk("hello");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.totalChars).toBe(5);
+    expect(calls[0]!.chineseChars).toBe(0);
+    expect(calls[0]!.status).toBe("streaming");
+
     monitor.onChunk("世界你好");
 
     // Advance past one interval
     vi.advanceTimersByTime(1000);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.totalChars).toBe(9); // 5 + 4
-    expect(calls[0]!.chineseChars).toBe(4);
-    expect(calls[0]!.status).toBe("streaming");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.totalChars).toBe(9); // 5 + 4
+    expect(calls[1]!.chineseChars).toBe(4);
+    expect(calls[1]!.status).toBe("streaming");
 
     // More chunks
     monitor.onChunk("abc");
     vi.advanceTimersByTime(1000);
-    expect(calls).toHaveLength(2);
-    expect(calls[1]!.totalChars).toBe(12);
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.totalChars).toBe(12);
 
     monitor.stop();
     // stop() emits a final "done" event
+    expect(calls).toHaveLength(4);
+    expect(calls[3]!.status).toBe("done");
+    expect(calls[3]!.totalChars).toBe(12);
+  });
+
+  it("emits progress immediately on chunk after the throttle window", () => {
+    const calls: Array<{ totalChars: number; chineseChars: number; status: string }> = [];
+    const monitor = createStreamMonitor((progress) => {
+      calls.push({
+        totalChars: progress.totalChars,
+        chineseChars: progress.chineseChars,
+        status: progress.status,
+      });
+    }, 500);
+
+    monitor.onChunk("abc");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.totalChars).toBe(3);
+    expect(calls[0]!.status).toBe("streaming");
+
+    monitor.onChunk("def");
+    expect(calls).toHaveLength(1);
+
+    vi.advanceTimersByTime(500);
+    expect(calls).toHaveLength(2);
+
+    monitor.stop();
     expect(calls).toHaveLength(3);
     expect(calls[2]!.status).toBe("done");
-    expect(calls[2]!.totalChars).toBe(12);
   });
 
   it("works without onProgress (undefined)", () => {
