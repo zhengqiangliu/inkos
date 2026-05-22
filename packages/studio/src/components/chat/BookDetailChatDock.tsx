@@ -78,6 +78,66 @@ function resolveLatestAgentRunId(
   return null;
 }
 
+function isLiveTaskStatus(status: unknown): boolean {
+  return status === "running" || status === "stopping";
+}
+
+function resolveLatestBookTaskTokenSummary(messages: ReadonlyArray<SSEMessage>, bookId: string, nowTick: number): string | null {
+  let liveTaskId: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || (message.event !== "book-task:update" && message.event !== "book-task:progress")) continue;
+    const payload = message.data as {
+      bookId?: unknown;
+      task?: {
+        id?: unknown;
+        status?: unknown;
+      };
+    } | null;
+    if (payload?.bookId !== bookId) continue;
+    const taskId = typeof payload.task?.id === "string" && payload.task.id.trim() ? payload.task.id : null;
+    if (!taskId) continue;
+    if (!isLiveTaskStatus(payload.task?.status)) continue;
+    liveTaskId = taskId;
+    break;
+  }
+
+  if (!liveTaskId) return null;
+
+  const samples: TaskTokenSample[] = [];
+  let latestUsage: TokenUsageSnapshot | null = null;
+
+  for (const message of messages) {
+    if (message.event !== "book-task:update" && message.event !== "book-task:progress") continue;
+    const payload = message.data as {
+      bookId?: unknown;
+      task?: {
+        id?: unknown;
+        tokenUsage?: unknown;
+      };
+      progress?: {
+        tokenUsage?: unknown;
+      };
+    } | null;
+    if (payload?.bookId !== bookId) continue;
+    const taskId = typeof payload.task?.id === "string" && payload.task.id.trim() ? payload.task.id : null;
+    if (taskId !== liveTaskId) continue;
+
+    const usage = normalizeTokenUsage(payload.task?.tokenUsage) ?? normalizeTokenUsage(payload.progress?.tokenUsage);
+    if (!usage) continue;
+    latestUsage = usage;
+    samples.push({
+      at: message.timestamp,
+      totalTokens: usage.totalTokens,
+    });
+  }
+
+  const liveRate = samples.length > 1 ? getTaskLiveTokenRatePerSecond(samples, nowTick) : null;
+  const totalTokens = latestUsage?.totalTokens ?? samples.at(-1)?.totalTokens ?? null;
+  if (totalTokens === null && liveRate === null) return null;
+  return `Token：实时 ${formatOptionalTokenRate(liveRate)} · 总计 ${totalTokens === null ? "—" : totalTokens.toLocaleString()}`;
+}
+
 export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, latestChapterNumber = null, latestChapterAuditReport = null, nextChapter = 1, targetChapters = 1, chapterWordCount = 0 }: BookDetailChatDockProps) {
   const activeSession = useChatStore(chatSelectors.activeSession);
   const messages = useChatStore(chatSelectors.activeMessages);
@@ -310,6 +370,11 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
     if (totalTokens === null && liveRate === null) return null;
     return `Token：实时 ${formatOptionalTokenRate(liveRate)} · 总计 ${totalTokens === null ? "—" : totalTokens.toLocaleString()}`;
   }, [activeSession, nowTick, sse.messages]);
+  const taskTokenSummary = useMemo(
+    () => resolveLatestBookTaskTokenSummary(sse.messages, bookId, nowTick),
+    [bookId, nowTick, sse.messages],
+  );
+  const tokenSummary = taskTokenSummary ?? sessionTokenSummary;
 
   return (
     <aside
@@ -353,9 +418,9 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
             ) : (
               <button onClick={nav.toServices} className="text-xs text-muted-foreground hover:text-primary">配置模型</button>
             )}
-            {sessionTokenSummary ? (
+            {tokenSummary ? (
               <div className="max-w-[220px] text-[11px] leading-4 tabular-nums text-muted-foreground">
-                {sessionTokenSummary}
+                {tokenSummary}
               </div>
             ) : null}
           </div>

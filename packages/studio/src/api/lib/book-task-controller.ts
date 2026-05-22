@@ -684,8 +684,9 @@ export class BookTaskController {
   ): Promise<BookTask | null> {
     const current = await this.requireTask(bookId, taskId).catch(() => null);
     if (!current || current.status !== "running") return null;
-    if (activeChapterNumber === null) return null;
-    if (activeChapterNumber !== null && current.currentChapterNumber !== activeChapterNumber) return null;
+    const resolvedChapterNumber = current.currentChapterNumber ?? activeChapterNumber;
+    if (resolvedChapterNumber === null) return null;
+    if (activeChapterNumber !== null && resolvedChapterNumber !== activeChapterNumber) return null;
     if (current.chapterFinishedAt) return null;
 
     const isWritingStage = current.stage === "write_chapter";
@@ -1103,6 +1104,7 @@ export class BookTaskController {
         readonly passed: boolean;
         readonly issues: ReadonlyArray<{ readonly severity?: string; readonly category?: string; readonly description?: string }>;
         readonly summary?: string;
+        readonly report?: string;
       };
       clearHeartbeat();
       await this.drainTaskSignals(bookId, taskId);
@@ -1144,6 +1146,7 @@ export class BookTaskController {
             score: auditScore,
             issueCount: result.issues.length,
             summary: result.summary ?? null,
+            report: result.report ?? null,
             issues: issueTexts,
             severityCounts,
           },
@@ -1186,6 +1189,7 @@ export class BookTaskController {
           score: auditScore,
           issueCount: result.issues.length,
           summary: result.summary ?? null,
+          report: result.report ?? null,
           issues: result.issues,
           status: "ready-for-review",
         });
@@ -1208,7 +1212,23 @@ export class BookTaskController {
       const reviseResult = await pipeline.reviseDraft(bookId, chapterNumber) as {
         readonly status?: string;
         readonly applied?: boolean;
-        readonly audit?: { readonly passed?: boolean; readonly score?: number; readonly issueCount?: number; readonly summary?: string };
+        readonly audit?: {
+          readonly passed?: boolean;
+          readonly score?: number;
+          readonly issueCount?: number;
+          readonly summary?: string;
+          readonly report?: string;
+          readonly severityCounts?: Readonly<{
+            critical: number;
+            warning: number;
+            info: number;
+          }>;
+          readonly issues?: ReadonlyArray<{
+            readonly severity?: string;
+            readonly category?: string;
+            readonly description?: string;
+          }>;
+        };
       };
       await this.drainTaskSignals(bookId, taskId);
 
@@ -1255,17 +1275,38 @@ export class BookTaskController {
           : `第 ${chapterNumber} 章自动修订后仍未通过审计。`,
       );
       if (revisionPassed) {
+        const reviseAudit = reviseResult.audit;
+        const reviseSeverityCounts = reviseAudit?.severityCounts ?? countAuditIssueSeverities(reviseAudit?.issues ?? []);
+        const reviseAuditScore = typeof reviseAudit?.score === "number"
+          ? reviseAudit.score
+          : estimateAuditScore(reviseSeverityCounts);
+        const reviseIssueTexts = reviseAudit?.issues ? normalizeAuditIssueTexts(reviseAudit.issues) : [];
+        await persistChapterAuditSummary({
+          state: this.deps.state,
+          bookId,
+          chapterNumber,
+          audit: {
+            passed: true,
+            score: reviseAuditScore,
+            issueCount: typeof reviseAudit?.issueCount === "number"
+              ? reviseAudit.issueCount
+              : reviseIssueTexts.length,
+            summary: reviseAudit?.summary ?? result.summary ?? null,
+            report: reviseAudit?.report ?? null,
+            issues: reviseIssueTexts,
+            severityCounts: reviseSeverityCounts,
+          },
+        });
         this.broadcastAuditComplete({
           task: latest,
           chapterNumber,
           passed: true,
-          score: typeof reviseResult?.audit?.score === "number"
-            ? reviseResult.audit.score
-            : refreshedSnapshot?.score ?? null,
+          score: reviseAuditScore,
           issueCount: typeof reviseResult?.audit?.issueCount === "number"
             ? reviseResult.audit.issueCount
             : result.issues.length,
           summary: reviseResult?.audit?.summary ?? result.summary ?? null,
+          report: reviseAudit?.report ?? null,
           status: "ready-for-review",
         });
       }

@@ -60,6 +60,8 @@ interface ChaptersSectionProps {
   readonly className?: string;
   readonly listClassName?: string;
   readonly filter?: "all" | "pending-review" | "failed";
+  readonly onOpenAuditHistory?: (chapterNum: number) => void;
+  readonly hidePassedAuditSummary?: boolean;
 }
 
 export function sliceUnprocessedSseMessages(
@@ -248,6 +250,14 @@ export function shouldCarryForwardAuditSummary(args: {
   return areIssueListsEqual(previousIssues, incomingIssues);
 }
 
+export function shouldShowChapterAuditSummary(
+  audit: MessageAuditSummary | undefined,
+  hidePassedAuditSummary: boolean,
+): boolean {
+  if (!audit) return false;
+  return !audit.passed || !hidePassedAuditSummary;
+}
+
 export function resolveChapterAuditScore(chapter: {
   audit?: MessageAuditSummary;
   auditIssues?: ReadonlyArray<string>;
@@ -315,6 +325,8 @@ export function ChaptersSection({
   className,
   listClassName,
   filter = "all",
+  onOpenAuditHistory,
+  hidePassedAuditSummary = false,
 }: ChaptersSectionProps) {
   const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
   const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<number>>([]);
@@ -1366,6 +1378,8 @@ export function ChaptersSection({
             const latestAuditToneClass = latestStructuredAudit?.passed === false
               ? "text-red-700/90"
               : "text-emerald-700/90";
+            const showAuditSummary = shouldShowChapterAuditSummary(latestStructuredAudit, hidePassedAuditSummary);
+            const hasAuditHistoryModal = typeof onOpenAuditHistory === "function";
             return (
               <li
                 key={`${ch.number}-${ch.title ?? ""}`}
@@ -1422,7 +1436,7 @@ export function ChaptersSection({
                         {autoReviewHint}
                       </div>
                     )}
-                    {(latestStructuredAudit || auditHistory.length > 0) && (
+                    {showAuditSummary && (
                       <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[10px]">
                         {latestStructuredAudit && (
                           <span className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 font-medium", latestAuditToneClass === "text-red-700/90" ? "bg-red-500/10 text-red-700" : "bg-emerald-500/10 text-emerald-700")}>
@@ -1512,22 +1526,26 @@ export function ChaptersSection({
                         {auditing ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
                       </button>
                       {auditHistory.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            toggleAuditHistory(ch.number);
-                          }}
-                          className="inline-flex h-5 items-center gap-1 rounded-md border border-border/60 bg-background/70 px-1.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                          title={auditHistoryExpanded ? "收起历史审计" : "展开历史审计"}
-                        >
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          if (hasAuditHistoryModal) {
+                            onOpenAuditHistory(ch.number);
+                            return;
+                          }
+                          toggleAuditHistory(ch.number);
+                        }}
+                        className="inline-flex h-5 items-center gap-1 rounded-md border border-border/60 bg-background/70 px-1.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+                        title={hasAuditHistoryModal ? "查看审计历史" : (auditHistoryExpanded ? "收起历史审计" : "展开历史审计")}
+                      >
                           <Clock3 size={10} />
-                          {auditHistoryExpanded ? "收起" : `历史 ${auditHistory.length}`}
-                        </button>
-                      )}
-                    </div>
+                          {hasAuditHistoryModal ? `历史 ${auditHistory.length}` : (auditHistoryExpanded ? "收起" : `历史 ${auditHistory.length}`)}
+                      </button>
+                    )}
                   </div>
+                </div>
                 </div>
                 {auditHistoryExpanded && auditHistory.length > 0 && (
                   <div className="mt-2 rounded-md border border-border/40 bg-background/60 p-2">

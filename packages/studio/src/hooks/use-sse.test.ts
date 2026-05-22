@@ -29,6 +29,7 @@ describe("STUDIO_SSE_EVENTS", () => {
       "rewrite:risk",
       "book-task:created",
       "book-task:update",
+      "book-task:progress",
       "book-task:stage",
       "book-task:log",
       "book-task:complete",

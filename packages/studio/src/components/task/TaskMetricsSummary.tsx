@@ -47,7 +47,8 @@ export function TaskMetricsSummary({
   const auditPassRate = getTaskAuditPassRate(task);
   const averageChapterDuration = getTaskAverageChapterDurationMs(task, nowTick);
   const tokenRate = getTaskTokenRatePerSecond(task, nowTick);
-  const liveTokenRate = task.status === "running" && tokenSamples && tokenSamples.length > 0
+  const isLiveTokenStatus = task.status === "running" || task.status === "stopping";
+  const liveTokenRate = isLiveTokenStatus && tokenSamples && tokenSamples.length > 0
     ? getTaskLiveTokenRatePerSecond(tokenSamples, nowTick)
     : null;
   const rateTone = auditPassRate === null
@@ -102,11 +103,11 @@ export function TaskMetricsSummary({
           <div className="flex items-center justify-between gap-2">
             <span>实时</span>
             <span className="font-medium tabular-nums text-foreground">
-              {task.status === "running" ? formatLiveTokenRate(liveTokenRate) : "—"}
+              {isLiveTokenStatus ? formatLiveTokenRate(liveTokenRate) : "—"}
             </span>
           </div>
           <div>
-            {task.status === "running"
+            {isLiveTokenStatus
               ? "实时按最近窗口内的 token 增量估算"
               : "平均值按累计 token / 运行时长计算"}
           </div>

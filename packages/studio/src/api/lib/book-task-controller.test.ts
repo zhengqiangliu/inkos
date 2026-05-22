@@ -180,7 +180,7 @@ describe("BookTaskController audit gating", () => {
     await controller.delete(stoppingBookId, stoppingTask.id);
   });
 
-  it("updates live token usage for audit-stage progress", async () => {
+  it("updates live token usage for audit and revise stages", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
     tempRoots.push(root);
     const bookId = "demo-book";
@@ -230,7 +230,7 @@ describe("BookTaskController audit gating", () => {
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
     });
 
-    const updated = await (controller as unknown as {
+    const auditUpdated = await (controller as unknown as {
       updateLiveTaskMetrics: (
         bookId: string,
         taskId: string,
@@ -247,13 +247,131 @@ describe("BookTaskController audit gating", () => {
       { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       { totalChars: 200, elapsedMs: 1000, chineseChars: 200, status: "streaming" },
       "zh",
-      1,
+      null,
     );
 
-    expect(updated?.tokenUsage?.totalTokens).toBeGreaterThan(0);
-    expect(updated?.writtenWords).toBe(0);
+    expect(auditUpdated?.tokenUsage?.totalTokens).toBeGreaterThan(0);
+    expect(auditUpdated?.writtenWords).toBe(0);
     expect(broadcasts.some((item) => item.event === "book-task:update")).toBe(true);
     expect(broadcasts.some((item) => item.event === "book-task:progress")).toBe(true);
+
+    await store.setStatus(bookId, task.id, "running", {
+      finishedAt: null,
+      stage: "revise",
+      stageLabel: "修订中",
+      stageDetail: "正在修订第 1 章",
+      currentChapterNumber: 1,
+      chapterFinishedAt: null,
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    });
+
+    const reviseUpdated = await (controller as unknown as {
+      updateLiveTaskMetrics: (
+        bookId: string,
+        taskId: string,
+        baseWords: number,
+        baseTokenUsage: { promptTokens: number; completionTokens: number; totalTokens: number },
+        progress: { totalChars: number; elapsedMs: number; chineseChars: number; status: string },
+        language: string | null | undefined,
+        activeChapterNumber: number | null,
+      ) => Promise<BookTask | null>;
+    }).updateLiveTaskMetrics(
+      bookId,
+      task.id,
+      1234,
+      { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      { totalChars: 300, elapsedMs: 1500, chineseChars: 300, status: "streaming" },
+      "zh",
+      null,
+    );
+
+    expect(reviseUpdated?.tokenUsage?.totalTokens).toBeGreaterThan(0);
+  });
+
+  it("emits live token progress while running an audit task", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const state = {
+      stateDir: (id: string) => join(root, "books", id, "story", "state"),
+      loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+      loadChapterIndex: async () => [{
+        number: 1,
+        title: "Ch 1",
+        status: "draft",
+        wordCount: 0,
+        updatedAt: "2026-05-23T00:00:00.000Z",
+        fileName: "ch01.md",
+      }],
+      saveChapterIndex: async () => undefined,
+      getNextChapterNumber: async () => 2,
+    } as never;
+
+    const broadcasts: Array<{ event: string; data: unknown }> = [];
+    let capturedConfig: {
+      onStreamProgress?: (progress: { status: "streaming" | "done"; elapsedMs: number; totalChars: number; chineseChars: number }) => void;
+      onTaskSignal?: (signal: unknown) => void;
+    } | null = null;
+
+    const controller = new BookTaskController({
+      state,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async (overrides) => overrides as never,
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: (config) => {
+        capturedConfig = config as never;
+        return {
+          auditDraft: async () => {
+            capturedConfig?.onStreamProgress?.({
+              status: "streaming",
+              elapsedMs: 1000,
+              totalChars: 200,
+              chineseChars: 200,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            capturedConfig?.onStreamProgress?.({
+              status: "streaming",
+              elapsedMs: 2000,
+              totalChars: 420,
+              chineseChars: 420,
+            });
+            return {
+              passed: true,
+              issues: [],
+              summary: "ok",
+              tokenUsage: { promptTokens: 10, completionTokens: 20, totalTokens: 30 },
+            };
+          },
+          reviseDraft: async () => ({}),
+          writeNextChapter: async () => ({}),
+        };
+      },
+      broadcast: (event, data) => {
+        broadcasts.push({ event, data });
+      },
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "audit",
+      requestedChapters: 1,
+      retryEnabled: false,
+      service: "svc-a",
+      model: "model-a",
+      quickMode: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(broadcasts.some((item) => item.event === "book-task:progress")).toBe(true);
+    });
+    await vi.waitFor(async () => {
+      const latest = await controller.get(bookId, task.id);
+      expect(latest?.status).toBe("succeeded");
+      expect(latest?.tokenUsage?.totalTokens).toBeGreaterThan(0);
+    });
   });
 
   it("revises audit chapters when the latest audit score is below 80 even if status is approved", async () => {
@@ -263,7 +381,7 @@ describe("BookTaskController audit gating", () => {
     await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
     await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
 
-    const chapterIndex = [{
+    let chapterIndex = [{
       number: 3,
       title: "Ch 3",
       status: "ready-for-review",
@@ -285,6 +403,7 @@ describe("BookTaskController audit gating", () => {
       passed: true,
       issues: [],
       summary: "audit ok",
+      report: "audit report body",
     });
     const reviseDraft = vi.fn().mockResolvedValue({
       status: "ready-for-review",
@@ -295,15 +414,21 @@ describe("BookTaskController audit gating", () => {
         issueCount: 0,
         severityCounts: { critical: 0, warning: 0, info: 0 },
         summary: "repaired",
+        report: "修订后审计报告",
         issues: [],
       },
+    });
+    const loadChapterIndex = vi.fn(async () => chapterIndex);
+    const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
+      chapterIndex = nextIndex as typeof chapterIndex;
     });
 
     const controller = new BookTaskController({
       state: {
         stateDir: (id: string) => join(root, "books", id, "story", "state"),
         loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
-        loadChapterIndex: async () => chapterIndex,
+        loadChapterIndex,
+        saveChapterIndex,
         getNextChapterNumber: async () => 4,
       } as never,
       loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
@@ -339,12 +464,31 @@ describe("BookTaskController audit gating", () => {
     expect(auditDraft).toHaveBeenCalledTimes(1);
     expect(reviseDraft).toHaveBeenCalledTimes(1);
     expect(reviseDraft).toHaveBeenCalledWith(bookId, 3);
+    expect(saveChapterIndex).toHaveBeenCalled();
     expect(finalTask.status).toBe("succeeded");
     expect(finalTask.result).toMatchObject({
       auditedChapters: 1,
       passedChapters: 1,
       failedChapters: 0,
       auditPassRate: 100,
+    });
+    expect(chapterIndex[0]).toMatchObject({
+      status: "ready-for-review",
+      auditIssueCount: 0,
+      auditHistory: [
+        expect.objectContaining({
+          passed: true,
+          issueCount: 1,
+          score: 40,
+        }),
+        expect.objectContaining({
+          passed: true,
+          issueCount: 0,
+          score: 92,
+          summary: "repaired",
+          report: "修订后审计报告",
+        }),
+      ],
     });
   });
 
@@ -371,6 +515,7 @@ describe("BookTaskController audit gating", () => {
       passed: true,
       issues: [],
       summary: "audit ok",
+      report: "audit report body",
     });
     const loadChapterIndex = vi.fn(async () => chapterIndex);
     const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
@@ -429,6 +574,7 @@ describe("BookTaskController audit gating", () => {
       passed: true,
       score: 100,
       issueCount: 0,
+      report: "audit report body",
       status: "ready-for-review",
     });
     expect(chapterIndex[0]).toMatchObject({
@@ -439,6 +585,7 @@ describe("BookTaskController audit gating", () => {
           passed: true,
           issueCount: 0,
           score: 100,
+          report: "audit report body",
         }),
       ],
     });

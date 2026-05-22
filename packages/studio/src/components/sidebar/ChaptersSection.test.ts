@@ -8,6 +8,7 @@ import {
   normalizeAuditSummary,
   resolveChapterAuditScore,
   shouldCarryForwardAuditSummary,
+  shouldShowChapterAuditSummary,
   sliceUnprocessedSseMessages,
 } from "./ChaptersSection";
 import type { SSEMessage } from "../../hooks/use-sse";
@@ -299,5 +300,27 @@ describe("shouldCarryForwardAuditSummary", () => {
         auditIssues: ["[warning] wording changed after refresh"],
       },
     })).toBe(true);
+  });
+});
+
+describe("shouldShowChapterAuditSummary", () => {
+  it("hides passed audit summaries when requested", () => {
+    expect(shouldShowChapterAuditSummary({
+      chapter: 11,
+      passed: true,
+      issueCount: 0,
+      score: 91,
+      issues: [],
+    }, true)).toBe(false);
+  });
+
+  it("keeps failed audit summaries visible", () => {
+    expect(shouldShowChapterAuditSummary({
+      chapter: 12,
+      passed: false,
+      issueCount: 2,
+      score: 63,
+      issues: ["[warning] pacing"],
+    }, true)).toBe(true);
   });
 });

@@ -9,6 +9,7 @@ import { ArtifactView } from "../components/chat/BookSidebar";
 import { BookDetailChatDock } from "../components/chat/BookDetailChatDock";
 import { dispatchWriteNextInstruction } from "../utils/write-next";
 import { ChaptersSection } from "../components/sidebar/ChaptersSection";
+import { ChapterAuditHistoryModal } from "../components/sidebar/ChapterAuditHistoryModal";
 import { ChapterPlansSection, EditPlanModal } from "../components/sidebar/ChapterPlansSection";
 import { ChapterPlanReader } from "../components/sidebar/ChapterPlanReader";
 import { VersionHistoryModal } from "../components/sidebar/VersionHistoryModal";
@@ -176,6 +177,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
   const [readerMode, setReaderMode] = useState<ReaderMode>("chapter");
   const [selectedPlanChapter, setSelectedPlanChapter] = useState<number | null>(null);
   const [historyChapter, setHistoryChapter] = useState<number | null>(null);
+  const [auditHistoryChapter, setAuditHistoryChapter] = useState<number | null>(null);
   const [planEditorChapter, setPlanEditorChapter] = useState<number | null>(null);
   const [planEditorSource, setPlanEditorSource] = useState<"manual" | "ai">("manual");
   const [chapterPlansRefreshKey, setChapterPlansRefreshKey] = useState(0);
@@ -425,12 +427,20 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
   const totalWords = chapters.reduce((sum, ch) => sum + (ch.wordCount ?? 0), 0);
   const designSelected = readerMode === "design";
   const selectedPlanHasContent = selectedPlan ? chapters.some((chapter) => chapter.number === selectedPlan.chapterNumber) : false;
+  const auditHistoryChapterMeta = useMemo(() => {
+    if (auditHistoryChapter === null) return null;
+    return chapters.find((chapter) => chapter.number === auditHistoryChapter) ?? null;
+  }, [auditHistoryChapter, chapters]);
 
   const handleOpenReview = () => {
     if (!selectedPlan) return;
     setPlanEditorChapter(selectedPlan.chapterNumber);
     setPlanEditorSource(selectedPlan.source === "ai" ? "ai" : "manual");
   };
+
+  const handleOpenAuditHistory = useCallback((chapterNumber: number) => {
+    setAuditHistoryChapter(chapterNumber);
+  }, []);
 
   return (
     <div className="flex h-full min-w-0 flex-1 overflow-hidden bg-background/30">
@@ -489,6 +499,8 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
               sse={sse}
               className="flex min-h-0 flex-1 flex-col"
               listClassName="h-full min-h-0"
+              onOpenAuditHistory={handleOpenAuditHistory}
+              hidePassedAuditSummary
             />
           </div>
           <div className={designSelected ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
@@ -687,6 +699,15 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
             setChapterPlansRefreshKey((value) => value + 1);
             setSelectedPlanChapter(restoredPlan.chapterNumber);
           }}
+        />
+      )}
+
+      {auditHistoryChapter !== null && auditHistoryChapterMeta && (
+        <ChapterAuditHistoryModal
+          chapterNumber={auditHistoryChapter}
+          chapterTitle={auditHistoryChapterMeta.title}
+          history={Array.isArray(auditHistoryChapterMeta.auditHistory) ? auditHistoryChapterMeta.auditHistory : []}
+          onClose={() => setAuditHistoryChapter(null)}
         />
       )}
     </div>
