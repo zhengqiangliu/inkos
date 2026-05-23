@@ -2856,6 +2856,39 @@ describe("PipelineRunner", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("allows pending state repair when explicitly enabled", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "legacy",
+    });
+    const now = "2026-03-19T00:00:00.000Z";
+    const storyDir = join(state.bookDir(bookId), "story");
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "stable state", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "stable hooks", "utf-8"),
+      state.saveChapterIndex(bookId, [{
+        number: 1,
+        title: "Broken Persistence",
+        status: "state-degraded" as ChapterMeta["status"],
+        wordCount: 1234,
+        createdAt: now,
+        updatedAt: now,
+        auditIssues: ["[warning] state validation degraded"],
+        lengthWarnings: [],
+      }]),
+      writeFile(join(state.bookDir(bookId), "chapters", "0001_Broken_Persistence.md"), "# 第1章 Broken Persistence\n\nbody", "utf-8"),
+    ]);
+
+    await expect((runner as unknown as {
+      assertNoPendingStateRepair: (bookId: string, allowContinue: boolean) => Promise<void>;
+    }).assertNoPendingStateRepair(bookId, true)).resolves.toBeUndefined();
+    await expect((runner as unknown as {
+      assertNoPendingStateRepair: (bookId: string, allowContinue: boolean) => Promise<void>;
+    }).assertNoPendingStateRepair(bookId, false)).rejects.toThrow(/state-degraded/i);
+
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("blocks writing a new chapter when the latest persisted chapter is audit-failed", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "legacy",

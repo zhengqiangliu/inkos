@@ -2354,7 +2354,7 @@ export class PipelineRunner {
     await this.state.ensureControlDocuments(bookId);
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
-    await this.assertNoPendingStateRepair(bookId);
+    await this.assertNoPendingStateRepair(bookId, options?.allowPendingAuditFailure ?? false);
     const stageLanguage = await this.resolveBookLanguage(book);
     await this.assertNoPendingAuditFailure(bookId, stageLanguage, options?.allowPendingAuditFailure ?? false);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
@@ -3710,10 +3710,14 @@ ${matrix}`,
     };
   }
 
-  private async assertNoPendingStateRepair(bookId: string): Promise<void> {
+  private async assertNoPendingStateRepair(bookId: string, allowContinue: boolean): Promise<void> {
     const existingIndex = await this.state.loadChapterIndex(bookId);
     const latestChapter = [...existingIndex].sort((left, right) => right.number - left.number)[0];
     if (latestChapter?.status !== "state-degraded") {
+      return;
+    }
+
+    if (allowContinue) {
       return;
     }
 

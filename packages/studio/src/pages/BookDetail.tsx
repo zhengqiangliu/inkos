@@ -238,6 +238,9 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     if (planEditorChapter === null) return null;
     return chapterPlans.find((plan) => plan.chapterNumber === planEditorChapter) ?? null;
   }, [chapterPlans, planEditorChapter]);
+  const handleOpenAuditHistory = useCallback((chapterNumber: number) => {
+    setAuditHistoryChapter(chapterNumber);
+  }, []);
 
   useEffect(() => {
     if (readerMode !== "design") return;
@@ -427,20 +430,15 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
   const totalWords = chapters.reduce((sum, ch) => sum + (ch.wordCount ?? 0), 0);
   const designSelected = readerMode === "design";
   const selectedPlanHasContent = selectedPlan ? chapters.some((chapter) => chapter.number === selectedPlan.chapterNumber) : false;
-  const auditHistoryChapterMeta = useMemo(() => {
-    if (auditHistoryChapter === null) return null;
-    return chapters.find((chapter) => chapter.number === auditHistoryChapter) ?? null;
-  }, [auditHistoryChapter, chapters]);
+  const auditHistoryChapterMeta = auditHistoryChapter === null
+    ? null
+    : chapters.find((chapter) => chapter.number === auditHistoryChapter) ?? null;
 
   const handleOpenReview = () => {
     if (!selectedPlan) return;
     setPlanEditorChapter(selectedPlan.chapterNumber);
     setPlanEditorSource(selectedPlan.source === "ai" ? "ai" : "manual");
   };
-
-  const handleOpenAuditHistory = useCallback((chapterNumber: number) => {
-    setAuditHistoryChapter(chapterNumber);
-  }, []);
 
   return (
     <div className="flex h-full min-w-0 flex-1 overflow-hidden bg-background/30">

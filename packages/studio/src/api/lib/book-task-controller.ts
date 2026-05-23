@@ -388,6 +388,7 @@ export class BookTaskController {
   private readonly runningTaskIds = new Set<string>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly taskSignalChains = new Map<string, Promise<void>>();
+  private readonly pendingStateRepairWarnings = new Map<string, number>();
 
   constructor(private readonly deps: BookTaskControllerDeps) {
     this.store = new BookTaskStore(deps.state);
@@ -638,6 +639,26 @@ export class BookTaskController {
     const updated = await this.store.appendLog(task.bookId, task.id, log);
     await this.appendTaskEvent("book-task:log", updated, { log });
     return updated;
+  }
+
+  private async warnPendingStateRepairOnce(task: BookTask): Promise<BookTask> {
+    if (task.type !== "write") return task;
+    const index = await this.deps.state.loadChapterIndex(task.bookId).catch(() => []);
+    const latestChapter = [...index].sort((left, right) => right.number - left.number)[0];
+    const key = this.taskSignalKey(task.bookId, task.id);
+    if (latestChapter?.status !== "state-degraded") {
+      this.pendingStateRepairWarnings.delete(key);
+      return task;
+    }
+    if (this.pendingStateRepairWarnings.get(key) === latestChapter.number) {
+      return task;
+    }
+    this.pendingStateRepairWarnings.set(key, latestChapter.number);
+    return this.appendTaskLog(
+      task,
+      "warn",
+      `最新章节 ${latestChapter.number} 状态降级（state-degraded），已允许继续写作一次，请尽快修复。`,
+    );
   }
 
   private broadcastAuditComplete(args: {
@@ -1453,6 +1474,7 @@ export class BookTaskController {
           lastHeartbeatAt: nowIso(),
         });
         await this.appendTaskEvent("book-task:update", latest);
+        latest = await this.warnPendingStateRepairOnce(latest);
         clearHeartbeat();
         heartbeatTimer = setInterval(() => {
           void (async () => {
