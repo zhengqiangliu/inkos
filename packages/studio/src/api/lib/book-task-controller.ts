@@ -1,6 +1,5 @@
 import type { AuditIssue, OnStreamProgress, PipelineConfig, ProjectConfig, StateManager } from "@actalk/inkos-core";
 import type { ReviseMode } from "@actalk/inkos-core";
-import type { ReviseDraftOptions } from "@actalk/inkos-core/pipeline/runner";
 import { ApiError } from "../errors.js";
 import { persistChapterAuditSummary } from "./chapter-audit-index.js";
 import type { BookTask, BookTaskCreatePayload, BookTaskPatchPayload, BookTaskStatus, BookTaskType, RunLogEntry } from "../../shared/contracts.js";
@@ -48,6 +47,29 @@ type PipelineLike = {
   ) => Promise<unknown>;
 };
 type PipelineFactory = (config: PipelineConfig) => PipelineLike;
+
+interface ReviseDraftOptions {
+  readonly overrideIssues?: ReadonlyArray<AuditIssue>;
+  readonly userBrief?: string;
+  readonly reviseContext?: {
+    readonly failureGate?: "critical" | "score" | "none";
+    readonly score?: number;
+    readonly passScoreThreshold?: number;
+    readonly scoreShortfall?: number;
+    readonly unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
+    readonly mustFixFirstIssueIds?: ReadonlyArray<string>;
+    readonly issueClassCounts?: Readonly<{
+      structural: number;
+      textual: number;
+    }>;
+    readonly primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
+    readonly dimensionChecks?: ReadonlyArray<{
+      readonly dimension: string;
+      readonly status: "pass" | "warning" | "failed";
+      readonly evidence?: string;
+    }>;
+  };
+}
 
 export interface BookTaskControllerDeps {
   readonly state: StateManager;

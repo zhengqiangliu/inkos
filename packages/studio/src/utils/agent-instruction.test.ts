@@ -15,6 +15,21 @@ describe("agent-instruction", () => {
       chapterNumber: 12,
       language: "zh",
       auditReport: "审计通过，发现2项问题。",
-    })).toContain("最新审计报告：");
+    })).toContain("## 审计报告");
+    expect(resolveBookAgentInstruction("rewrite", {
+      chapterNumber: 12,
+      language: "zh",
+      auditSummary: {
+        score: 76,
+        passScoreThreshold: 80,
+        scoreShortfall: 4,
+        issueCount: 2,
+        failureGate: "score",
+        summary: "needs revision",
+        report: "审计报告正文",
+        issues: ["情节拖沓", "冲突不够"],
+        severityCounts: { critical: 0, warning: 2, info: 1 },
+      },
+    })).toContain("## 审计约束");
   });
 });

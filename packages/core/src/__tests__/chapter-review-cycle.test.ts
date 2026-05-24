@@ -97,6 +97,67 @@ describe("runChapterReviewCycle", () => {
     expect(result.revised).toBe(true);
   });
 
+  it("passes externalContext through to reviseChapter in the review cycle", async () => {
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(createAuditResult({
+        passed: false,
+        issues: [{
+          severity: "critical",
+          category: "continuity",
+          description: "broken continuity",
+          suggestion: "fix it",
+        }],
+        summary: "needs revision",
+      }))
+      .mockResolvedValueOnce(createAuditResult());
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: "修订后的正文。",
+      wordCount: 6,
+      fixedIssues: ["fixed"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn().mockResolvedValue({
+      content: "修订后的正文。",
+      wordCount: 6,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    });
+
+    await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 1,
+      initialOutput: {
+        content: "原始正文。",
+        wordCount: 5,
+        postWriteErrors: [],
+      },
+      reducedControlInput: undefined,
+      externalContext: "把注意力收回师债主线。",
+      lengthSpec: LENGTH_SPEC,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+    });
+
+    expect(reviseChapter.mock.calls[0]?.[6]?.externalContext).toContain("把注意力收回师债主线。");
+  });
+
   it("escalates to rework when post-write spot-fix makes no meaningful change", async () => {
     const originalDraft = `甲${"字".repeat(205)}。——不是这样，而是那样。`;
     const fixedDraft = `甲${"字".repeat(210)}。是这样。也是那样。`;

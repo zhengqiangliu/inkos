@@ -1157,10 +1157,27 @@ export function ChaptersSection({
     scheduleRewriteFallback(chapterNum);
     try {
       const language = actionLabel.toLowerCase().includes("rewrite") ? "en" : "zh";
+      const latestStructuredAudit = historyEntryToAuditSummary(
+        (chapter?.auditHistory?.length ?? 0) > 0 ? chapter?.auditHistory?.at(-1) : undefined,
+        chapterNum,
+      ) ?? chapter?.audit;
       const instruction = resolveBookAgentInstruction("rewrite", {
         chapterNumber: chapterNum,
         brief,
         auditReport: resolveLatestChapterAuditReport(chapter) ?? undefined,
+        auditSummary: latestStructuredAudit
+          ? {
+              score: latestStructuredAudit.score,
+              passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+              scoreShortfall: latestStructuredAudit.passed ? 0 : Math.max(0, AUDIT_PASS_SCORE_THRESHOLD - latestStructuredAudit.score),
+              issueCount: latestStructuredAudit.issueCount,
+              failureGate: latestStructuredAudit.failureGate,
+              summary: latestStructuredAudit.summary,
+              report: latestStructuredAudit.report,
+              issues: latestStructuredAudit.issues,
+              severityCounts: latestStructuredAudit.severityCounts,
+            }
+          : undefined,
         language,
       });
       await dispatchAgentInstruction(instruction);

@@ -603,7 +603,8 @@ describe("PipelineRunner", () => {
       expect(composeChapter).toHaveBeenCalledTimes(1);
 
       const writeInput = writeChapter.mock.calls[0]?.[0];
-      expect(writeInput?.externalContext).toBeUndefined();
+      expect(writeInput?.externalContext).toContain("Ignore the guild chase and bring focus back to mentor conflict.");
+      expect(writeInput?.externalContext).not.toContain("## Review Preflight");
       expect(writeInput?.chapterIntent).toContain("# Chapter Intent");
       expect(writeInput?.contextPackage?.selectedContext.length).toBeGreaterThan(0);
       expect(writeInput?.ruleStack?.activeOverrides).toHaveLength(1);
@@ -1573,6 +1574,45 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("injects review preflight into the write input before drafting in v2 mode", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "v2",
+    });
+
+    await Promise.all([
+      writeFile(join(state.bookDir(bookId), "story", "current_focus.md"), "# Current Focus\n\nBring focus back to the mentor conflict.\n", "utf-8"),
+      writeFile(join(state.bookDir(bookId), "story", "volume_outline.md"), "# Volume Outline\n\n## Chapter 2\nTrack the merchant guild trail.\n", "utf-8"),
+      writeFile(join(state.bookDir(bookId), "story", "current_state.md"), "# Current State\n\n- Lin Yue still hides the broken oath token.\n", "utf-8"),
+      writeFile(join(state.bookDir(bookId), "story", "story_bible.md"), "# Story Bible\n\n- The jade seal cannot be destroyed.\n", "utf-8"),
+      writeFile(join(state.bookDir(bookId), "story", "pending_hooks.md"), "# Pending Hooks\n\n- Why the mentor vanished after the trial.\n", "utf-8"),
+    ]);
+
+    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: "Governed draft body.",
+        wordCount: "Governed draft body.".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+
+    try {
+      await runner.writeNextChapter(bookId, countChapterLength("Governed pipeline draft.", "zh_chars"));
+
+      const writeInput = writeChapter.mock.calls[0]?.[0];
+      expect(writeInput?.chapterIntent).toContain("## Review Preflight");
+      expect(writeInput?.chapterIntent).toContain("volume_anchor_weak");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("passes governed control inputs into final truth rebuild in v2 mode", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture({
       inputGovernanceMode: "v2",
@@ -1963,7 +2003,8 @@ describe("PipelineRunner", () => {
       expect(composeChapter).not.toHaveBeenCalled();
 
       const writeInput = writeChapter.mock.calls[0]?.[0];
-      expect(writeInput?.externalContext).toBe("Legacy focus only.");
+      expect(writeInput?.externalContext).toContain("Legacy focus only.");
+      expect(writeInput?.externalContext).toContain("## Review Preflight");
       expect(writeInput?.chapterIntent).toBeUndefined();
       expect(writeInput?.contextPackage).toBeUndefined();
       expect(writeInput?.ruleStack).toBeUndefined();
@@ -2011,6 +2052,48 @@ describe("PipelineRunner", () => {
       expect(writeInput?.externalContext).toContain("对话拖沓");
       expect(writeInput?.externalContext).not.toContain("信息重复");
       expect(writeInput?.externalContext).toContain("Keep the focus on the mentor conflict.");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps externalContext visible in governed write input", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture({
+      inputGovernanceMode: "v2",
+      externalContext: "Force the mentor thread back into the chapter.",
+    });
+    const storyDir = join(state.bookDir(bookId), "story");
+
+    await Promise.all([
+      writeFile(join(storyDir, "current_focus.md"), "# Current Focus\n\nBring focus back to the mentor conflict.\n", "utf-8"),
+      writeFile(join(storyDir, "volume_outline.md"), "# Volume Outline\n\n## Chapter 1\nTrack the merchant guild trail.\n", "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- Lin Yue still hides the broken oath token.\n", "utf-8"),
+      writeFile(join(storyDir, "story_bible.md"), "# Story Bible\n\n- The jade seal cannot be destroyed.\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n\n- Why the mentor vanished after the trial.\n", "utf-8"),
+    ]);
+
+    const writeChapter = vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 1,
+        content: "Governed draft body.",
+        wordCount: "Governed draft body.".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+
+    try {
+      await runner.writeNextChapter(bookId, countChapterLength("Governed pipeline draft.", "zh_chars"));
+
+      const writeInput = writeChapter.mock.calls[0]?.[0];
+      expect(writeInput?.externalContext).toContain("Force the mentor thread back into the chapter.");
+      expect(writeInput?.externalContext).not.toContain("## Review Preflight");
+      expect(writeInput?.chapterIntent).toContain("# Chapter Intent");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -4510,6 +4593,14 @@ describe("PipelineRunner", () => {
         "",
       ].join("\n"), "utf-8"),
       writeFile(join(chaptersDir, "0001_夜灯.md"), `# 第1章 夜灯\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "audit_failure_history.json"), JSON.stringify({
+        version: 2,
+        entries: [
+          { chapterNumber: 1, issues: [{ category: "节奏单调", severity: "warning", suggestion: "压缩重复铺陈" }], recordedAt: "2026-05-01T00:00:00.000Z" },
+          { chapterNumber: 2, issues: [{ category: "伏笔债务", severity: "critical", suggestion: "先回收旧伏笔再开新线" }], recordedAt: "2026-05-02T00:00:00.000Z" },
+          { chapterNumber: 3, issues: [{ category: "节奏单调", severity: "warning", suggestion: "缩短解释段" }], recordedAt: "2026-05-03T00:00:00.000Z" },
+        ],
+      }, null, 2), "utf-8"),
     ]);
     await state.saveChapterIndex(bookId, [{
       number: 1,
@@ -4614,6 +4705,14 @@ describe("PipelineRunner", () => {
         "",
       ].join("\n"), "utf-8"),
       writeFile(join(chaptersDir, "0001_夜灯.md"), `# 第1章 夜灯\n\n${originalBody}`, "utf-8"),
+      writeFile(join(storyDir, "audit_failure_history.json"), JSON.stringify({
+        version: 2,
+        entries: [
+          { chapterNumber: 1, issues: [{ category: "节奏单调", severity: "warning", suggestion: "压缩重复铺陈" }], recordedAt: "2026-05-01T00:00:00.000Z" },
+          { chapterNumber: 2, issues: [{ category: "伏笔债务", severity: "critical", suggestion: "先回收旧伏笔再开新线" }], recordedAt: "2026-05-02T00:00:00.000Z" },
+          { chapterNumber: 3, issues: [{ category: "节奏单调", severity: "warning", suggestion: "缩短解释段" }], recordedAt: "2026-05-03T00:00:00.000Z" },
+        ],
+      }, null, 2), "utf-8"),
     ]);
     await state.saveChapterIndex(bookId, [{
       number: 1,
@@ -4658,6 +4757,10 @@ describe("PipelineRunner", () => {
       expect(reviseChapter.mock.calls[0]?.[6]).not.toMatchObject({
         chapterIntent: expect.stringContaining("商会路线优先"),
       });
+      expect(reviseChapter.mock.calls[0]?.[6]?.externalContext).toContain("把注意力收回师债主线，并强调柜台后的异常灯光。");
+      expect(reviseChapter.mock.calls[0]?.[6]?.externalContext).toContain("## 高频失败维度提示");
+      expect(reviseChapter.mock.calls[0]?.[6]?.externalContext).toContain("节奏单调");
+      expect(reviseChapter.mock.calls[0]?.[6]?.externalContext).toContain("伏笔债务");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

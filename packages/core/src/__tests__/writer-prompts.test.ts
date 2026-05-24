@@ -141,6 +141,108 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("Keep the prose restrained");
   });
 
+  it("surfaces an audit gate block before the creative prompt body", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide\n\nKeep the prose restrained.",
+      undefined,
+      2,
+      "creative",
+      undefined,
+      "zh",
+      "legacy",
+      undefined,
+      {
+        chapterNumber: 2,
+        chapterName: "风起",
+        highlight: "开局承压",
+        coreConflict: "主角要在限定时间内过关",
+        plotAndConflict: "动作推进与冲突升级",
+        emotionalTone: "紧张",
+        endingHook: "门外传来敲门声",
+        status: "planned",
+        source: "auto",
+        version: 1,
+        needsReview: false,
+        anchorRefs: {
+          worldRefs: [],
+          characterRefs: [],
+          emotionRefs: [],
+          hookRefs: [],
+        },
+        driftFlags: [],
+        lockedFields: [],
+        hookAssignment: [],
+        requiredRecoverHooks: [],
+        maxNewHooks: 3,
+        maxRecoveryPerChapter: 3,
+        createdAt: "2026-03-22T00:00:00.000Z",
+        updatedAt: "2026-03-22T00:00:00.000Z",
+      },
+      { hasParentCanon: true },
+    );
+
+    expect(prompt).toContain("## 审计门禁");
+    expect(prompt).toContain("critical=0 / score>=80 / 结构优先");
+    expect(prompt).toContain("章节衔接检查");
+    expect(prompt).toContain("伏笔检查");
+  });
+
+  it("keeps the full audit preview aligned with chapter-plan-driven priority dimensions", () => {
+    const prompt = buildWriterSystemPrompt(
+      BOOK,
+      GENRE,
+      null,
+      "# Book Rules",
+      "# Genre Body",
+      "# Style Guide\n\nKeep the prose restrained.",
+      undefined,
+      2,
+      "creative",
+      undefined,
+      "zh",
+      "legacy",
+      undefined,
+      {
+        chapterNumber: 2,
+        chapterName: "风起",
+        highlight: "开局承压",
+        coreConflict: "主角要在限定时间内过关",
+        plotAndConflict: "动作推进与冲突升级",
+        emotionalTone: "紧张",
+        endingHook: "门外传来敲门声",
+        status: "planned",
+        source: "auto",
+        version: 1,
+        needsReview: false,
+        anchorRefs: {
+          worldRefs: [],
+          characterRefs: [],
+          emotionRefs: [],
+          hookRefs: [],
+        },
+        driftFlags: [],
+        lockedFields: [],
+        hookAssignment: [],
+        requiredRecoverHooks: [],
+        maxNewHooks: 3,
+        maxRecoveryPerChapter: 3,
+        createdAt: "2026-03-22T00:00:00.000Z",
+        updatedAt: "2026-03-22T00:00:00.000Z",
+      },
+      { hasParentCanon: true },
+    );
+
+    expect(prompt).toContain("## 审计预览");
+    expect(prompt).toContain("章节衔接检查");
+    expect(prompt).toContain("读者期待管理");
+    expect(prompt).toContain("大纲偏离检测");
+  });
+
   it("tells governed English prompts to obey variance briefs and include resistance-bearing exchanges", () => {
     const prompt = buildWriterSystemPrompt(
       {

@@ -66,6 +66,7 @@ interface AuditFailureHistoryEntry {
     readonly category: string;
     readonly severity: AuditIssue["severity"];
     readonly dimensionId?: string;
+    readonly suggestion?: string;
   }>;
   readonly recordedAt: string;
 }
@@ -622,7 +623,7 @@ export class PipelineRunner {
           chapterNumber: Math.max(1, Math.trunc(Number(entry.chapterNumber))),
           issues: Array.isArray(entry.issues)
             ? entry.issues
-              .filter((issue): issue is { readonly category: string; readonly severity: AuditIssue["severity"]; readonly dimensionId?: string } => Boolean(
+              .filter((issue): issue is { readonly category: string; readonly severity: AuditIssue["severity"]; readonly dimensionId?: string; readonly suggestion?: string } => Boolean(
                 issue
                 && typeof issue === "object"
                 && typeof (issue as { category?: unknown }).category === "string"
@@ -635,6 +636,9 @@ export class PipelineRunner {
                   : "warning",
                 ...(typeof issue.dimensionId === "string" && issue.dimensionId.trim().length > 0
                   ? { dimensionId: issue.dimensionId.trim() }
+                  : {}),
+                ...(typeof issue.suggestion === "string" && issue.suggestion.trim().length > 0
+                  ? { suggestion: issue.suggestion.trim() }
                   : {}),
               }))
               : Array.isArray(entry.categories)
@@ -669,6 +673,7 @@ export class PipelineRunner {
       category: string;
       severity: AuditIssue["severity"];
       dimensionId?: string;
+      suggestion?: string;
     }>();
 
     for (const issue of auditResult.issues) {
@@ -678,17 +683,23 @@ export class PipelineRunner {
       const dimensionId = typeof issue.dimensionId === "string" && issue.dimensionId.trim().length > 0
         ? issue.dimensionId.trim()
         : undefined;
+      const suggestion = typeof issue.suggestion === "string" && issue.suggestion.trim().length > 0
+        ? issue.suggestion.trim()
+        : undefined;
       const current = issueMap.get(category);
       if (!current) {
-        issueMap.set(category, { category, severity: issue.severity, ...(dimensionId ? { dimensionId } : {}) });
+        issueMap.set(category, { category, severity: issue.severity, ...(dimensionId ? { dimensionId } : {}), ...(suggestion ? { suggestion } : {}) });
         continue;
       }
       if (severityRank[issue.severity] > severityRank[current.severity]) {
-        issueMap.set(category, { category, severity: issue.severity, ...(dimensionId ? { dimensionId } : {}) });
+        issueMap.set(category, { category, severity: issue.severity, ...(dimensionId ? { dimensionId } : {}), ...(suggestion ? { suggestion } : {}) });
         continue;
       }
       if (!current.dimensionId && dimensionId) {
         current.dimensionId = dimensionId;
+      }
+      if (!current.suggestion && suggestion) {
+        current.suggestion = suggestion;
       }
     }
 
@@ -713,6 +724,7 @@ export class PipelineRunner {
     type FailureStats = {
       readonly category: string;
       dimensionId?: string;
+      suggestion?: string;
       critical: number;
       warning: number;
       chapters: number[];
@@ -726,9 +738,13 @@ export class PipelineRunner {
         const dimensionId = typeof issue.dimensionId === "string" && issue.dimensionId.trim().length > 0
           ? issue.dimensionId.trim()
           : undefined;
+        const suggestion = typeof issue.suggestion === "string" && issue.suggestion.trim().length > 0
+          ? issue.suggestion.trim()
+          : undefined;
         const current = stats.get(category) ?? {
           category,
           ...(dimensionId ? { dimensionId } : {}),
+          ...(suggestion ? { suggestion } : {}),
           critical: 0,
           warning: 0,
           chapters: [],
@@ -737,6 +753,9 @@ export class PipelineRunner {
           stats.set(category, current);
         } else if (!current.dimensionId && dimensionId) {
           current.dimensionId = dimensionId;
+        }
+        if (!current.suggestion && suggestion) {
+          current.suggestion = suggestion;
         }
         if (issue.severity === "critical") current.critical += 1;
         if (issue.severity === "warning") current.warning += 1;
@@ -786,7 +805,8 @@ export class PipelineRunner {
 
     const formatItem = (item: FailureStats): string => {
       const dimSegment = item.dimensionId && item.dimensionId !== item.category ? `，${item.dimensionId}` : "";
-      return `- ${item.category}${dimSegment}（${formatCounts(item)}，${describeRun(item.chapters)}）`;
+      const suggestionSegment = item.suggestion ? `；动作：${item.suggestion}` : "";
+      return `- ${item.category}${dimSegment}（${formatCounts(item)}，${describeRun(item.chapters)}${suggestionSegment}）`;
     };
 
     const lines = [
@@ -1450,6 +1470,23 @@ export class PipelineRunner {
         wordCount ?? book.chapterWordCount,
         book.language ?? gp.language,
       );
+      const reviewPreflight = await this.runReviewPreflight({
+        bookDir,
+        chapterNumber,
+        target: "write-next",
+        language: book.language ?? gp.language,
+      });
+      const writeInputWithPreflight = this.applyReviewPreflightToWriteInput(
+        writeInput,
+        reviewPreflight,
+        book.language ?? gp.language,
+      );
+      if (reviewPreflight.signals.length > 0) {
+        this.logWarn(book.language ?? gp.language, {
+          zh: this.buildPreflightSignalsSummary(reviewPreflight, book.language ?? gp.language),
+          en: this.buildPreflightSignalsSummary(reviewPreflight, book.language ?? gp.language),
+        });
+      }
 
       const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
       this.logStage(stageLanguage, { zh: "撰写章节草稿", en: "writing chapter draft" });
@@ -1457,7 +1494,7 @@ export class PipelineRunner {
         book,
         bookDir,
         chapterNumber,
-        ...writeInput,
+        ...writeInputWithPreflight,
         lengthSpec,
         onTextDelta: (text) => {
           this.config.onWriterTextDelta?.({
@@ -1483,7 +1520,7 @@ export class PipelineRunner {
         chapterNumber,
         chapterContent: output.content,
         lengthSpec,
-        chapterIntent: writeInput.chapterIntent,
+        chapterIntent: writeInputWithPreflight.chapterIntent,
       });
       totalUsage = PipelineRunner.addUsage(totalUsage, normalizedDraft.tokenUsage);
       const draftOutput: WriteChapterOutput = {
@@ -1784,6 +1821,8 @@ export class PipelineRunner {
         chapterLengthTarget,
         lengthLanguage,
       );
+      const auditFailureHints = await this.buildAuditFailureHints(bookDir);
+      const reviseExternalContext = this.mergeExternalContext(this.config.externalContext, auditFailureHints);
       const reviseControlInput = (this.config.inputGovernanceMode ?? "v2") === "legacy"
         ? undefined
         : await this.createGovernedArtifacts(
@@ -1902,6 +1941,7 @@ export class PipelineRunner {
         reviseAuditControlInputWithPreflight
           ? {
               userBrief: options?.userBrief,
+              externalContext: reviseExternalContext,
               chapterIntent: reviseAuditControlInputWithPreflight.chapterIntent,
               contextPackage: reviseAuditControlInputWithPreflight.contextPackage,
               ruleStack: reviseAuditControlInputWithPreflight.ruleStack,
@@ -1939,6 +1979,7 @@ export class PipelineRunner {
             }
           : {
               userBrief: options?.userBrief,
+              externalContext: reviseExternalContext,
               lengthSpec,
               reviseContext: options?.reviseContext,
               previousChapterContent: previousChapterForRevise,
@@ -2402,6 +2443,11 @@ export class PipelineRunner {
       target: "write-next",
       language: pipelineLang,
     });
+    const writeInputWithPreflight = this.applyReviewPreflightToWriteInput(
+      writeInput,
+      reviewPreflight,
+      pipelineLang,
+    );
     const reducedControlInputWithPreflight = this.withPreflightControlInput(
       reducedControlInput,
       reviewPreflight,
@@ -2422,7 +2468,7 @@ export class PipelineRunner {
       book,
       bookDir,
       chapterNumber,
-      ...writeInput,
+      ...writeInputWithPreflight,
       lengthSpec,
       // Write-next may be retried after a partial/failed previous run where state projection
       // already advanced to the same chapter number; allow idempotent reapply for this chapter.
@@ -2453,6 +2499,7 @@ export class PipelineRunner {
       chapterNumber,
       initialOutput: output,
       reducedControlInput: reducedControlInputWithPreflight,
+      externalContext: writeInput.externalContext,
       lengthSpec,
       initialUsage: totalUsage,
       createReviser: () => new ReviserAgent(this.agentCtxFor("reviser", bookId)),
@@ -3790,6 +3837,7 @@ ${matrix}`,
     );
 
     return {
+      externalContext: mergedExternalContext,
       chapterIntent: plan.intentMarkdown,
       contextPackage: composed.contextPackage,
       ruleStack: composed.ruleStack,
@@ -4863,6 +4911,44 @@ ${matrix}`,
       ...reduced,
       chapterIntent: `${reduced.chapterIntent}\n${appendix}`.trim(),
     };
+  }
+
+  private applyReviewPreflightToWriteInput<T extends {
+    readonly chapterIntent?: string;
+    readonly externalContext?: string;
+  }>(
+    input: T,
+    preflight: ReviewPreflightResult,
+    language: LengthLanguage,
+  ): T {
+    if (preflight.signals.length === 0) {
+      return input;
+    }
+
+    const appendix = [
+      "",
+      "## Review Preflight",
+      this.buildPreflightSignalsSummary(preflight, language),
+      "Follow-up directives:",
+      ...preflight.signals.map((signal, index) => `${index + 1}. ${signal.suggestion}`),
+      "",
+    ].join("\n");
+
+    if (typeof input.chapterIntent === "string" && input.chapterIntent.trim().length > 0) {
+      return {
+        ...input,
+        chapterIntent: `${input.chapterIntent.trim()}\n${appendix}`.trim(),
+      };
+    }
+
+    if (typeof input.externalContext === "string" && input.externalContext.trim().length > 0) {
+      return {
+        ...input,
+        externalContext: `${input.externalContext.trim()}\n${appendix}`.trim(),
+      };
+    }
+
+    return input;
   }
 
   private async runReviewPreflight(params: {

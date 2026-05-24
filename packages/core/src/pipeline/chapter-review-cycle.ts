@@ -475,6 +475,7 @@ export async function runChapterReviewCycle(params: {
   readonly chapterNumber: number;
   readonly initialOutput: Pick<WriteChapterOutput, "content" | "wordCount" | "postWriteErrors">;
   readonly reducedControlInput?: ChapterReviewCycleControlInput;
+  readonly externalContext?: string;
   readonly lengthSpec: LengthSpec;
   readonly initialUsage: ChapterReviewCycleUsage;
   readonly createReviser: () => {
@@ -486,6 +487,7 @@ export async function runChapterReviewCycle(params: {
       mode: ReviseMode,
       genre?: string,
       options?: {
+        externalContext?: string;
         chapterIntent?: string;
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
@@ -607,6 +609,7 @@ export async function runChapterReviewCycle(params: {
       params.book.genre,
       {
         ...params.reducedControlInput,
+        externalContext: params.externalContext,
         lengthSpec: params.lengthSpec,
         reviseContext: {
           failureGate: "critical",
@@ -637,6 +640,7 @@ export async function runChapterReviewCycle(params: {
         params.book.genre,
         {
           ...params.reducedControlInput,
+          externalContext: params.externalContext,
           lengthSpec: params.lengthSpec,
         },
       );
@@ -812,6 +816,7 @@ export async function runChapterReviewCycle(params: {
       params.book.genre,
       {
         ...params.reducedControlInput,
+        externalContext: params.externalContext,
         lengthSpec: params.lengthSpec,
         reviseContext,
         onRevisedContentDelta: params.onRevisedContentDelta,

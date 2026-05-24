@@ -1,5 +1,6 @@
 import type { BookRules } from "../models/book-rules.js";
 import type { FanficMode } from "../models/book.js";
+import type { ChapterPlan } from "../models/chapter-plan.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { getFanficDimensionConfig } from "./fanfic-dimensions.js";
 
@@ -193,6 +194,10 @@ export function buildAuditDimensions(
   language: AuditPromptLanguage,
   hasParentCanon = false,
   fanficMode?: FanficMode,
+  options: {
+    readonly chapterNumber?: number;
+    readonly chapterPlan?: ChapterPlan;
+  } = {},
 ): ReadonlyArray<AuditDimension> {
   const activeIds = new Set(gp.auditDimensions);
 
@@ -225,6 +230,32 @@ export function buildAuditDimensions(
   activeIds.add(32);
   activeIds.add(33);
   activeIds.add(38);
+
+  if (bookRules?.protagonist) {
+    activeIds.add(1);
+    activeIds.add(16);
+    activeIds.add(34);
+  }
+
+  if (gp.numericalSystem) {
+    activeIds.add(5);
+    activeIds.add(11);
+    activeIds.add(15);
+  }
+
+  if (options.chapterPlan?.hookAssignment.length || options.chapterPlan?.requiredRecoverHooks.length || options.chapterPlan?.endingHook) {
+    activeIds.add(6);
+  }
+
+  if ((options.chapterNumber ?? 0) > 0 && (options.chapterNumber ?? 0) <= 3) {
+    activeIds.add(7);
+  }
+
+  if (bookRules?.enableFullCastTracking) {
+    activeIds.add(13);
+    activeIds.add(14);
+    activeIds.add(36);
+  }
 
   if (gp.eraResearch || bookRules?.eraConstraints?.enabled) {
     activeIds.add(12);
@@ -266,10 +297,15 @@ export function formatAuditDimensionsPreview(
   options: {
     readonly hasParentCanon?: boolean;
     readonly fanficMode?: FanficMode;
+    readonly chapterNumber?: number;
+    readonly chapterPlan?: ChapterPlan;
   } = {},
 ): string {
   const language: AuditPromptLanguage = isEnglish ? "en" : "zh";
-  const dimensions = buildAuditDimensions(gp, bookRules, language, options.hasParentCanon ?? false, options.fanficMode);
+  const dimensions = buildAuditDimensions(gp, bookRules, language, options.hasParentCanon ?? false, options.fanficMode, {
+    chapterNumber: options.chapterNumber,
+    chapterPlan: options.chapterPlan,
+  });
   const items = dimensions.map((dimension) => (
     isEnglish
       ? `${dimension.id}. ${dimension.name}${dimension.note ? ` (${dimension.note})` : ""}`
@@ -284,4 +320,108 @@ export function formatAuditDimensionsPreview(
   return isEnglish
     ? `## Audit Preview\n\n${intro}\n\n${items.map((item) => `- ${item}`).join("\n")}\n\n- ${hardFocus}`
     : `## 审计预览\n\n${intro}\n\n${items.map((item) => `- ${item}`).join("\n")}\n\n- ${hardFocus}`;
+}
+
+export function formatAuditPriorityPreview(
+  gp: GenreProfile,
+  bookRules: BookRules | null,
+  isEnglish: boolean,
+  options: {
+    readonly chapterNumber?: number;
+    readonly chapterPlan?: ChapterPlan;
+    readonly hasParentCanon?: boolean;
+    readonly fanficMode?: FanficMode;
+  } = {},
+): string {
+  const language: AuditPromptLanguage = isEnglish ? "en" : "zh";
+  const dimensions = buildAuditDimensions(gp, bookRules, language, options.hasParentCanon ?? false, options.fanficMode, {
+    chapterNumber: options.chapterNumber,
+    chapterPlan: options.chapterPlan,
+  });
+  const dimensionMap = new Map(dimensions.map((dimension) => [dimension.id, dimension] as const));
+
+  const priorityIds: number[] = [];
+  const push = (...ids: number[]) => {
+    for (const id of ids) {
+      if (!priorityIds.includes(id)) priorityIds.push(id);
+    }
+  };
+
+  const chapterNumber = options.chapterNumber;
+  const chapterPlan = options.chapterPlan;
+  const openingThreeChaptersEnabled = bookRules?.openingThreeChapters?.enabled ?? true;
+  if ((chapterNumber ?? 0) > 0 && (chapterNumber ?? 0) <= 3 && openingThreeChaptersEnabled) {
+    push(38, 33, 32, 7, 6);
+  } else {
+    push(38, 33, 32, 6);
+  }
+
+  if (chapterPlan?.hookAssignment.length || chapterPlan?.requiredRecoverHooks.length || chapterPlan?.endingHook) {
+    push(6, 32, 33);
+  }
+
+  if (bookRules?.protagonist) {
+    push(1, 16, 34);
+  }
+
+  if (gp.numericalSystem) {
+    push(5, 11, 15);
+  }
+
+  if (gp.eraResearch || bookRules?.eraConstraints?.enabled) {
+    push(12);
+  }
+
+  if (options.hasParentCanon && !options.fanficMode) {
+    push(28, 29, 30, 31);
+  }
+
+  if (options.fanficMode) {
+    push(34, 35, 36, 37);
+  }
+
+  if (bookRules?.enableFullCastTracking) {
+    push(13, 14, 36);
+  }
+
+  const selected = priorityIds
+    .map((id) => dimensionMap.get(id))
+    .filter((dimension): dimension is NonNullable<typeof dimension> => Boolean(dimension))
+    .slice(0, 7);
+
+  const targetScoreLine = isEnglish
+    ? "- Target: pass the first audit on the first attempt, with critical issues at 0 and score at or above 80."
+    : "- 目标：首审一次通过，critical=0，分数达到80分及以上。";
+  const strategyLine = isEnglish
+    ? "- Order of work: structure first, continuity second, character consistency third, then style."
+    : "- 处理顺序：先结构，再连续性，再人物一致性，最后才是句面。";
+  const fallbackLine = isEnglish
+    ? "- Treat the full audit preview below as the backup checklist; do not split attention evenly across all dimensions."
+    : "- 下方完整审计预览是备查清单，不要把注意力平均分配到所有维度。";
+  const chapterLine = chapterPlan
+    ? isEnglish
+      ? `- Chapter focus: ${chapterPlan.chapterName} / ${chapterPlan.emotionalTone} / ${chapterPlan.coreConflict}`
+      : `- 本章聚焦：${chapterPlan.chapterName} / ${chapterPlan.emotionalTone} / ${chapterPlan.coreConflict}`
+    : "";
+  const hookLine = chapterPlan?.endingHook
+    ? isEnglish
+      ? `- Ending hook: ${chapterPlan.endingHook}`
+      : `- 结尾钩子：${chapterPlan.endingHook}`
+    : "";
+  const driftLine = chapterPlan?.driftFlags.length
+    ? isEnglish
+      ? `- Drift flags: ${chapterPlan.driftFlags.map((flag) => flag.code).join(", ")}`
+      : `- 偏离标记：${chapterPlan.driftFlags.map((flag) => flag.code).join("、")}`
+    : "";
+
+  const items = selected.map((dimension, index) => {
+    const note = dimension.note ? (isEnglish ? ` — ${dimension.note}` : `：${dimension.note}`) : "";
+    return isEnglish
+      ? `${index + 1}. ${dimension.name}${note}`
+      : `${index + 1}. ${dimension.name}${note}`;
+  });
+
+  return isEnglish
+    ? `## Audit Gate\n\n${targetScoreLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\nPriority checks:\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`
+    : `## 审计门禁\n\n${targetScoreLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\n优先检查：\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`;
 }

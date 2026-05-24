@@ -110,6 +110,7 @@ export class ReviserAgent extends BaseAgent {
     genre?: string,
     options?: {
       userBrief?: string;
+      externalContext?: string;
       chapterIntent?: string;
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
@@ -425,6 +426,17 @@ ${outputFormat}${structuralIssueRequiredBlock ? `\n=== STRUCTURAL_TRUTH_ACTIONS 
 ${options.userBrief}
 `
       : "";
+    const externalContextBlock = options?.externalContext?.trim()
+      ? isEnglish
+        ? `
+## External Context
+${options.externalContext.trim()}
+`
+        : `
+## 外部指令
+${options.externalContext.trim()}
+`
+      : "";
 
     const previousChapterTail = options?.previousChapterContent
       ? extractChapterTail(options.previousChapterContent, 800)
@@ -457,6 +469,7 @@ ${previousChapterTail}
 
 ## 审稿问题
 ${issueList}
+${externalContextBlock}
 ${userBriefBlock}
 ## 当前状态卡
 ${foundationBriefBlock}${currentState}

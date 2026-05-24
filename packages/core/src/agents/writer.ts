@@ -261,6 +261,9 @@ export class WriterAgent extends BaseAgent {
       input.chapterIntent ? "governed" : "legacy",
       resolvedLengthSpec,
       input.chapterPlan,
+      {
+        hasParentCanon,
+      },
     );
 
     const creativeUserPrompt = input.chapterIntent && input.contextPackage && input.ruleStack
@@ -276,6 +279,7 @@ export class WriterAgent extends BaseAgent {
         selectedEvidenceBlock: this.joinGovernedEvidenceBlocks(governedMemoryBlocks),
         dialogueQuoteGuideline,
         foundationBrief,
+        externalContext: input.externalContext,
       })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -1011,6 +1015,7 @@ ${lengthRequirementBlock}
     readonly selectedEvidenceBlock?: string;
     readonly dialogueQuoteGuideline?: string;
     readonly foundationBrief: string;
+    readonly externalContext?: string;
   }): string {
     const contextSections = params.contextPackage.selectedContext
       .map((entry) => [
@@ -1056,6 +1061,11 @@ ${lengthRequirementBlock}
         ? `\n## Foundation Brief\n${params.foundationBrief}\n`
         : `\n## 基础创作摘要\n${params.foundationBrief}\n`
       : "";
+    const externalContextBlock = params.externalContext?.trim()
+      ? params.language === "en"
+        ? `\n## External Context\n${params.externalContext}\n`
+        : `\n## 外部指令\n${params.externalContext}\n`
+      : "";
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
@@ -1064,6 +1074,7 @@ ${lengthRequirementBlock}
 ${params.chapterIntent}
 
 ${foundationBriefBlock}
+${externalContextBlock}
 ## Selected Context
 ${contextSections || "(none)"}
 ${selectedEvidenceBlock}
@@ -1093,6 +1104,7 @@ ${lengthRequirementBlock}
 ${params.chapterIntent}
 
 ${foundationBriefBlock}
+${externalContextBlock}
 ## 已选上下文
 ${contextSections || "(无)"}
 ${selectedEvidenceBlock}

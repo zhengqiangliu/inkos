@@ -453,6 +453,69 @@ describe("ReviserAgent", () => {
     }
   });
 
+  it("renders externalContext as a separate revise prompt block", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-external-context-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    const chatSpy = vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "[ISSUE-01] 已修复。",
+        "",
+        "=== REVISED_CONTENT ===",
+        "修订后的正文。",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      await agent.reviseChapter(
+        bookDir,
+        "原始正文。",
+        1,
+        [CRITICAL_ISSUE],
+        "rewrite",
+        "xuanhuan",
+        {
+          externalContext: "把注意力收回师债主线，并保留柜台后的异常灯光。",
+          userBrief: "只收紧结尾，不要改动主线。",
+        },
+      );
+
+      const messages = chatSpy.mock.calls[0]?.[0] as ReadonlyArray<{ content: string }> | undefined;
+      const userPrompt = messages?.[1]?.content ?? "";
+      expect(userPrompt).toContain("## 外部指令");
+      expect(userPrompt).toContain("把注意力收回师债主线，并保留柜台后的异常灯光");
+      expect(userPrompt).toContain("## 用户修订要求");
+      expect(userPrompt).toContain("只收紧结尾，不要改动主线");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not render failed-dimension block when dimensionChecks has only warning/pass", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-reviser-dimension-check-warning-test-"));
     const bookDir = join(root, "book");

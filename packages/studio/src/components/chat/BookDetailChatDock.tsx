@@ -18,8 +18,11 @@ import { pickLatestAssistantToolExecutions } from "../../pages/chat-execution-pa
 import { dispatchWriteNextInstruction, readBookDetailSessionId, resolveBookDetailSessionId } from "../../utils/write-next";
 import { resolveBookAgentInstruction } from "../../utils/agent-instruction";
 import { resolveLatestChapterAuditReport } from "../../utils/chapter-audit";
-import { formatOptionalTokenRate, getTaskLiveTokenRatePerSecond, type TaskTokenSample } from "../../lib/task-metrics";
-import type { BookTask } from "../../shared/contracts";
+import {
+  resolveLatestAgentTokenSnapshot,
+  resolveLatestBookTaskTokenSnapshot,
+} from "../../utils/token-summary";
+import { AUDIT_PASS_SCORE_THRESHOLD } from "../../utils/audit-score";
 
 interface Nav {
   toServices: () => void;
@@ -37,105 +40,6 @@ interface BookDetailChatDockProps {
   readonly nextChapter?: number;
   readonly targetChapters?: number;
   readonly chapterWordCount?: number;
-}
-
-type TokenUsageSnapshot = NonNullable<BookTask["tokenUsage"]>;
-
-function normalizeTokenUsage(value: unknown): TokenUsageSnapshot | null {
-  if (!value || typeof value !== "object") return null;
-  const usage = value as { promptTokens?: unknown; completionTokens?: unknown; totalTokens?: unknown };
-  const promptTokens = Number(usage.promptTokens);
-  const completionTokens = Number(usage.completionTokens);
-  const totalTokens = Number(usage.totalTokens);
-  if (!Number.isFinite(promptTokens) || !Number.isFinite(completionTokens) || !Number.isFinite(totalTokens)) return null;
-  return {
-    promptTokens: Math.max(0, Math.trunc(promptTokens)),
-    completionTokens: Math.max(0, Math.trunc(completionTokens)),
-    totalTokens: Math.max(0, Math.trunc(totalTokens)),
-  };
-}
-
-function resolveLatestAgentRunId(
-  messages: ReadonlyArray<SSEMessage>,
-  sessionId: string,
-  currentRunId: string | null | undefined,
-): string | null {
-  if (currentRunId) return currentRunId;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (!message || message.event !== "agent:complete") continue;
-    const payload = message.data as { sessionId?: unknown; runId?: unknown } | null;
-    if (payload?.sessionId !== sessionId) continue;
-    if (typeof payload.runId === "string" && payload.runId.trim()) return payload.runId;
-  }
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (!message || message.event !== "agent:start") continue;
-    const payload = message.data as { sessionId?: unknown; runId?: unknown } | null;
-    if (payload?.sessionId !== sessionId) continue;
-    if (typeof payload.runId === "string" && payload.runId.trim()) return payload.runId;
-  }
-  return null;
-}
-
-function isLiveTaskStatus(status: unknown): boolean {
-  return status === "running" || status === "stopping";
-}
-
-function resolveLatestBookTaskTokenSummary(messages: ReadonlyArray<SSEMessage>, bookId: string, nowTick: number): string | null {
-  let liveTaskId: string | null = null;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (!message || (message.event !== "book-task:update" && message.event !== "book-task:progress")) continue;
-    const payload = message.data as {
-      bookId?: unknown;
-      task?: {
-        id?: unknown;
-        status?: unknown;
-      };
-    } | null;
-    if (payload?.bookId !== bookId) continue;
-    const taskId = typeof payload.task?.id === "string" && payload.task.id.trim() ? payload.task.id : null;
-    if (!taskId) continue;
-    if (!isLiveTaskStatus(payload.task?.status)) continue;
-    liveTaskId = taskId;
-    break;
-  }
-
-  if (!liveTaskId) return null;
-
-  const samples: TaskTokenSample[] = [];
-  let latestUsage: TokenUsageSnapshot | null = null;
-
-  for (const message of messages) {
-    if (message.event !== "book-task:update" && message.event !== "book-task:progress") continue;
-    const payload = message.data as {
-      bookId?: unknown;
-      task?: {
-        id?: unknown;
-        tokenUsage?: unknown;
-      };
-      progress?: {
-        tokenUsage?: unknown;
-      };
-    } | null;
-    if (payload?.bookId !== bookId) continue;
-    const taskId = typeof payload.task?.id === "string" && payload.task.id.trim() ? payload.task.id : null;
-    if (taskId !== liveTaskId) continue;
-
-    const usage = normalizeTokenUsage(payload.task?.tokenUsage) ?? normalizeTokenUsage(payload.progress?.tokenUsage);
-    if (!usage) continue;
-    latestUsage = usage;
-    samples.push({
-      at: message.timestamp,
-      totalTokens: usage.totalTokens,
-    });
-  }
-
-  const liveRate = samples.length > 1 ? getTaskLiveTokenRatePerSecond(samples, nowTick) : null;
-  const totalTokens = latestUsage?.totalTokens ?? samples.at(-1)?.totalTokens ?? null;
-  if (totalTokens === null && liveRate === null) return null;
-  return `Token：实时 ${formatOptionalTokenRate(liveRate)} · 总计 ${totalTokens === null ? "—" : totalTokens.toLocaleString()}`;
 }
 
 export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, latestChapterNumber = null, latestChapterAuditReport = null, nextChapter = 1, targetChapters = 1, chapterWordCount = 0 }: BookDetailChatDockProps) {
@@ -281,11 +185,40 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
 
       if (!hasQuickActionChapter) return;
       const sessionId = await resolveBookDetailSessionId(bookId, activeSessionId);
+      const latestAudit = artifactChapterMeta?.audit ?? undefined;
+      const latestHistory = Array.isArray(artifactChapterMeta?.auditHistory) ? artifactChapterMeta?.auditHistory.at(-1) : undefined;
+      const structuredAudit = latestAudit ?? (latestHistory
+        ? {
+            chapter: quickActionChapter,
+            passed: latestHistory.passed,
+            issueCount: latestHistory.issueCount,
+            score: latestHistory.score,
+            severityCounts: latestHistory.severityCounts,
+            failureGate: latestHistory.failureGate,
+            summary: latestHistory.summary,
+            report: latestHistory.report,
+            issues: latestHistory.issues,
+          }
+        : undefined);
       const instruction = action === "audit"
         ? (isZh ? `审计第${quickActionChapter}章` : `audit chapter ${quickActionChapter}`)
         : resolveBookAgentInstruction("rewrite", {
           chapterNumber: quickActionChapter,
+          brief: "",
           auditReport: resolveLatestChapterAuditReport(artifactChapterMeta) ?? latestChapterAuditReport ?? undefined,
+          auditSummary: structuredAudit
+            ? {
+                score: structuredAudit.score,
+                passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+                scoreShortfall: structuredAudit.passed ? 0 : Math.max(0, AUDIT_PASS_SCORE_THRESHOLD - structuredAudit.score),
+                issueCount: structuredAudit.issueCount,
+                failureGate: structuredAudit.failureGate,
+                summary: structuredAudit.summary,
+                report: structuredAudit.report,
+                issues: structuredAudit.issues,
+                severityCounts: structuredAudit.severityCounts,
+              }
+            : undefined,
           language: isZh ? "zh" : "en",
         });
       await sendMessage(sessionId, instruction, bookId);
@@ -338,43 +271,15 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
   const sessionTokenSummary = useMemo(() => {
     const session = activeSession;
     if (!session) return null;
-    const runId = resolveLatestAgentRunId(sse.messages, session.sessionId, session.currentRunId);
-    if (!runId) return null;
-
-    const samples: TaskTokenSample[] = [];
-    let latestUsage: TokenUsageSnapshot | null = null;
-
-    for (const message of sse.messages) {
-      if (message.event !== "agent:usage" && message.event !== "agent:complete") continue;
-      const payload = message.data as {
-        sessionId?: unknown;
-        runId?: unknown;
-        tokenUsage?: unknown;
-      } | null;
-      if (payload?.sessionId !== session.sessionId || payload?.runId !== runId) continue;
-
-      const usage = normalizeTokenUsage(payload.tokenUsage);
-      if (usage) {
-        latestUsage = usage;
-        samples.push({
-          at: message.timestamp,
-          totalTokens: usage.totalTokens,
-        });
-      }
-    }
-
-    const liveRate = samples.length > 1
-      ? getTaskLiveTokenRatePerSecond(samples, nowTick)
-      : null;
-    const totalTokens = latestUsage?.totalTokens ?? samples.at(-1)?.totalTokens ?? null;
-    if (totalTokens === null && liveRate === null) return null;
-    return `Token：实时 ${formatOptionalTokenRate(liveRate)} · 总计 ${totalTokens === null ? "—" : totalTokens.toLocaleString()}`;
+    return resolveLatestAgentTokenSnapshot(sse.messages, session.sessionId, session.currentRunId, nowTick);
   }, [activeSession, nowTick, sse.messages]);
   const taskTokenSummary = useMemo(
-    () => resolveLatestBookTaskTokenSummary(sse.messages, bookId, nowTick),
+    () => resolveLatestBookTaskTokenSnapshot(sse.messages, bookId, nowTick),
     [bookId, nowTick, sse.messages],
   );
-  const tokenSummary = taskTokenSummary ?? sessionTokenSummary;
+  const tokenSummary = sessionTokenSummary && taskTokenSummary
+    ? (taskTokenSummary.latestAt >= sessionTokenSummary.latestAt ? taskTokenSummary.summary : sessionTokenSummary.summary)
+    : sessionTokenSummary?.summary ?? taskTokenSummary?.summary ?? null;
 
   return (
     <aside
