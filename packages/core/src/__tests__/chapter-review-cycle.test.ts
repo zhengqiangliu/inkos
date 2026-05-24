@@ -1269,4 +1269,83 @@ describe("runChapterReviewCycle", () => {
     expect(auditChapter).toHaveBeenCalledTimes(3);
     expect(result.auditResult.passed).toBe(true);
   });
+
+  it("escalates structure-overloaded reviews directly to rework", async () => {
+    const draft = "字".repeat(220);
+    const failingAudit = createAuditResult({
+      passed: false,
+      issues: [
+        { severity: "warning", category: "卷纲一致性", description: "卷纲偏离", suggestion: "回收到卷目标" },
+        { severity: "warning", category: "伏笔债务", description: "伏笔压力过高", suggestion: "先回收旧债" },
+        { severity: "warning", category: "时间线", description: "时间线松动", suggestion: "补齐先后关系" },
+        { severity: "warning", category: "评分门禁", description: "评分偏低", suggestion: "提升章节质量" },
+      ],
+      summary: "overloaded",
+    });
+    const passingAudit = createAuditResult({ passed: true, issues: [], summary: "done" });
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(passingAudit);
+    const reviseModes: ReviseMode[] = [];
+    const reviseChapter = vi.fn().mockImplementation(async (
+      _bookDir: string,
+      content: string,
+      _chapterNumber: number,
+      _issues: ReadonlyArray<AuditIssue>,
+      mode: ReviseMode,
+    ) => {
+      reviseModes.push(mode);
+      return {
+        revisedContent: `${content}重构`,
+        wordCount: content.length + 2,
+        fixedIssues: ["[ISSUE-01] structure reset"],
+        updatedState: "",
+        updatedLedger: "",
+        updatedHooks: "",
+        tokenUsage: ZERO_USAGE,
+      };
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn().mockImplementation(async (content: string) => ({
+      content,
+      wordCount: content.length,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    }));
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 3,
+      initialOutput: {
+        content: draft,
+        wordCount: 220,
+        postWriteErrors: [],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      preflightSignals: [
+        { code: "hook_debt_pressure", severity: "warning", message: "hook debt", suggestion: "回收旧债" },
+      ],
+      reviseMode: "spot-fix",
+      maxReviseRounds: 2,
+    });
+
+    expect(reviseModes).toEqual(["rework"]);
+    expect(result.autoReview.stoppedByMaxRounds).toBe(false);
+  });
 });

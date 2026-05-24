@@ -8,6 +8,18 @@ export const DEFAULT_HOOK_LOOKAHEAD_CHAPTERS = 3;
 
 export const DEFAULT_MAX_RECOVERY_PER_CHAPTER = 3;
 
+export interface HookDebtBudget {
+  readonly hardClearMode: boolean;
+  readonly reason: string;
+  readonly maxRecoveryPerChapter: number;
+  readonly maxNewHooks: number;
+  readonly requiredRecoverHooks: ReadonlyArray<string>;
+  readonly hookAssignment: ReadonlyArray<string>;
+  readonly staleDebt: ReadonlyArray<string>;
+  readonly mustAdvance: ReadonlyArray<string>;
+  readonly eligibleResolve: ReadonlyArray<string>;
+}
+
 /**
  * Build the hook agenda using simple stalest-first sorting.
  * No lifecycle pressure formulas — just pick the hooks that have been
@@ -77,6 +89,88 @@ export function buildPlannerHookAgenda(params: {
   };
 }
 
+export function deriveHookDebtBudget(params: {
+  readonly hooks: ReadonlyArray<StoredHook>;
+  readonly chapterNumber: number;
+  readonly targetChapters?: number;
+  readonly maxRecoveryPerChapter?: number;
+  readonly maxNewHooks?: number;
+}): HookDebtBudget {
+  const normalizedHooks = params.hooks.map(normalizeStoredHook);
+  const agenda = buildPlannerHookAgenda({
+    hooks: params.hooks,
+    chapterNumber: params.chapterNumber,
+    targetChapters: params.targetChapters,
+    maxMustAdvance: 3,
+    maxEligibleResolve: 2,
+    maxStaleDebt: 4,
+  });
+
+  const activeHooks = normalizedHooks.filter((hook) => hook.status !== "resolved" && hook.status !== "deferred");
+  const overdueHooks = activeHooks
+    .filter((hook) => hook.expectedChapter != null && hook.expectedChapter > 0 && hook.expectedChapter < params.chapterNumber)
+    .sort((left, right) => (
+      (left.expectedChapter ?? 0) - (right.expectedChapter ?? 0)
+      || left.lastAdvancedChapter - right.lastAdvancedChapter
+      || left.startChapter - right.startChapter
+      || left.hookId.localeCompare(right.hookId)
+    ));
+  const activeCount = activeHooks.length;
+  const overdueCount = overdueHooks.length;
+  const staleCount = agenda.staleDebt.length;
+  const eligibleResolveCount = agenda.eligibleResolve.length;
+
+  const hardClearMode = activeCount >= 18 || overdueCount >= 3 || staleCount >= 4 || (activeCount >= HOOK_HEALTH_DEFAULTS.maxActiveHooks && overdueCount + staleCount >= 4);
+  const highPressureMode = hardClearMode || overdueCount > 0 || staleCount >= 2 || activeCount >= HOOK_HEALTH_DEFAULTS.maxActiveHooks;
+
+  const baseRecovery = params.maxRecoveryPerChapter ?? DEFAULT_MAX_RECOVERY_PER_CHAPTER;
+  const recoveryTarget = hardClearMode
+    ? Math.min(5, Math.max(3, overdueCount + Math.min(staleCount, 2)))
+    : overdueCount > 0
+      ? Math.min(4, Math.max(2, overdueCount + 1))
+      : staleCount >= 3
+        ? 3
+        : Math.max(1, Math.min(baseRecovery, eligibleResolveCount > 0 ? 2 : 1));
+
+  const maxRecoveryPerChapter = Math.max(1, Math.min(5, Math.max(baseRecovery, recoveryTarget)));
+  const maxNewHooks = Math.max(
+    0,
+    Math.min(
+      params.maxNewHooks ?? 3,
+      hardClearMode || highPressureMode ? 0 : staleCount >= 2 || activeCount >= HOOK_HEALTH_DEFAULTS.maxActiveHooks ? 1 : 2,
+    ),
+  );
+
+  const requiredRecoverHooks = uniqueStrings([
+    ...overdueHooks.slice(0, maxRecoveryPerChapter).map((hook) => hook.hookId),
+    ...agenda.eligibleResolve.slice(0, Math.max(0, maxRecoveryPerChapter - overdueHooks.length)),
+    ...agenda.staleDebt.slice(0, Math.max(0, maxRecoveryPerChapter - overdueHooks.length - eligibleResolveCount)),
+  ]).slice(0, maxRecoveryPerChapter);
+
+  const hookAssignment = uniqueStrings([
+    ...requiredRecoverHooks,
+    ...agenda.mustAdvance.slice(0, Math.max(0, maxRecoveryPerChapter - requiredRecoverHooks.length)),
+  ]).slice(0, maxRecoveryPerChapter);
+
+  const reason = hardClearMode
+    ? "伏笔债务已进入清债模式，需要优先回收旧债并停止新增"
+    : highPressureMode
+      ? "伏笔债务压力偏高，需要压缩新增并优先回收旧债"
+      : "伏笔债务处于正常压力区间";
+
+  return {
+    hardClearMode,
+    reason,
+    maxRecoveryPerChapter,
+    maxNewHooks,
+    requiredRecoverHooks,
+    hookAssignment,
+    staleDebt: agenda.staleDebt,
+    mustAdvance: agenda.mustAdvance,
+    eligibleResolve: agenda.eligibleResolve,
+  };
+}
+
 function normalizeStoredHook(hook: StoredHook): HookRecord {
   return {
     hookId: hook.hookId,
@@ -95,6 +189,10 @@ function normalizeStoredHookStatus(status: string): HookStatus {
   if (/^(deferred|paused|hold|延后|延期|搁置|暂缓)$/i.test(status.trim())) return "deferred";
   if (/^(progressing|advanced|重大推进|持续推进)$/i.test(status.trim())) return "progressing";
   return "open";
+}
+
+function uniqueStrings(values: ReadonlyArray<string>): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 export function filterActiveHooks(hooks: ReadonlyArray<StoredHook>): StoredHook[] {

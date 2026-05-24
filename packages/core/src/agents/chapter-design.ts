@@ -16,8 +16,10 @@ import {
   readPendingHooks,
   formatRecentSummaries,
 } from "./planner-context.js";
+import { parsePendingHooksMarkdown } from "../utils/story-markdown.js";
 import { readStoryFrame } from "../utils/outline-paths.js";
 import { extractChapterLimitFromOutline } from "../utils/chapter-limit.js";
+import { deriveHookDebtBudget } from "../utils/hook-agenda.js";
 
 export interface DesignChapterInput {
   readonly book: BookConfig;
@@ -135,7 +137,7 @@ export class ChapterDesignAgent extends BaseAgent {
     }
 
     const now = new Date().toISOString();
-    return ChapterPlanSchema.parse({
+    const plan = ChapterPlanSchema.parse({
       chapterNumber: input.chapterNumber,
       chapterName: first.chapterName,
       highlight: first.highlight,
@@ -161,6 +163,7 @@ export class ChapterDesignAgent extends BaseAgent {
       createdAt: now,
       updatedAt: now,
     });
+    return this.applyHookDebtBudget(plan, context.pendingHooks, input.chapterNumber, context.outlineChapterLimit);
   }
 
   /**
@@ -204,8 +207,8 @@ export class ChapterDesignAgent extends BaseAgent {
       }
       const now = new Date().toISOString();
 
-      return parsed.map((p, index) =>
-        ChapterPlanSchema.parse({
+      return parsed.map((p, index) => {
+        const plan = ChapterPlanSchema.parse({
           chapterNumber: input.startChapter + index,
           chapterName: p.chapterName,
           highlight: p.highlight,
@@ -230,8 +233,9 @@ export class ChapterDesignAgent extends BaseAgent {
           lockedFields: [],
           createdAt: now,
           updatedAt: now,
-        }),
-      );
+        });
+        return this.applyHookDebtBudget(plan, context.pendingHooks, input.startChapter + index, context.outlineChapterLimit);
+      });
     } catch {
       return this.buildFallbackBatchPlans(input, context);
     }
@@ -300,6 +304,34 @@ export class ChapterDesignAgent extends BaseAgent {
     } catch {
       return "";
     }
+  }
+
+  private applyHookDebtBudget(
+    plan: ChapterPlan,
+    pendingHooksMarkdown: string,
+    chapterNumber: number,
+    targetChapters?: number,
+  ): ChapterPlan {
+    const budget = deriveHookDebtBudget({
+      hooks: parsePendingHooksMarkdown(pendingHooksMarkdown),
+      chapterNumber,
+      targetChapters,
+      maxRecoveryPerChapter: plan.maxRecoveryPerChapter,
+      maxNewHooks: plan.maxNewHooks,
+    });
+
+    const hardRequiredRecoverHooks = budget.hardClearMode
+      ? budget.requiredRecoverHooks
+      : uniqueStrings([...plan.requiredRecoverHooks, ...budget.requiredRecoverHooks]);
+    const hardHookAssignment = uniqueStrings([...plan.hookAssignment, ...budget.hookAssignment]);
+
+    return ChapterPlanSchema.parse({
+      ...plan,
+      hookAssignment: budget.hardClearMode ? hardRequiredRecoverHooks : hardHookAssignment.slice(0, budget.maxRecoveryPerChapter),
+      requiredRecoverHooks: hardRequiredRecoverHooks.slice(0, budget.maxRecoveryPerChapter),
+      maxRecoveryPerChapter: budget.maxRecoveryPerChapter,
+      maxNewHooks: Math.min(plan.maxNewHooks, budget.maxNewHooks),
+    });
   }
 
   /**
@@ -431,7 +463,7 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
       const first = parsed[0];
 
       const now = new Date().toISOString();
-      return ChapterPlanSchema.parse({
+      const plan = ChapterPlanSchema.parse({
         chapterNumber: input.chapterNumber,
         chapterName: first?.chapterName || input.title || `第${input.chapterNumber}章`,
         highlight: first?.highlight || `第${input.chapterNumber}章核心看点待确认`,
@@ -457,6 +489,7 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
         createdAt: now,
         updatedAt: now,
       });
+      return this.applyHookDebtBudget(plan, context.pendingHooks, input.chapterNumber, context.outlineChapterLimit);
     } catch {
       return this.buildFallbackBackfillPlan(input);
     }
@@ -492,7 +525,7 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
         ? `延续${previousHook}所指向的问题，第${chapterNumber}章末再度留下悬念。`
         : `第${chapterNumber}章在新的变化中收束，为后续章节留出悬念。`;
 
-      plans.push(ChapterPlanSchema.parse({
+      const plan = ChapterPlanSchema.parse({
         chapterNumber,
         chapterName,
         highlight,
@@ -514,7 +547,8 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
         lockedFields: [],
         createdAt: now,
         updatedAt: now,
-      }));
+      });
+      plans.push(this.applyHookDebtBudget(plan, context.pendingHooks, chapterNumber, limit));
     }
 
     return plans;
@@ -537,7 +571,7 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
     const tail = closingSentences.slice(-2).join("，") || truncateText(closing, 48);
     const tone = inferTone(normalizedContent);
 
-    return ChapterPlanSchema.parse({
+    const plan = ChapterPlanSchema.parse({
       chapterNumber: input.chapterNumber,
       chapterName,
       highlight: lead
@@ -571,6 +605,7 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
       createdAt: now,
       updatedAt: now,
     });
+    return this.applyHookDebtBudget(plan, "", input.chapterNumber);
   }
 
   private buildBackfillUserMessage(
@@ -660,4 +695,8 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
 
     return parts.join("\n");
   }
+}
+
+function uniqueStrings(values: ReadonlyArray<string>): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }

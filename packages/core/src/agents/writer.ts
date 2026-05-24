@@ -23,7 +23,7 @@ import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import { buildLengthSpec, countChapterLength } from "../utils/length-metrics.js";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
-import { buildHookDebtHardConstraintBlock } from "../utils/hook-agenda.js";
+import { buildHookDebtHardConstraintBlock, deriveHookDebtBudget } from "../utils/hook-agenda.js";
 import {
   buildGovernedCharacterMatrixWorkingSet,
   buildGovernedHookWorkingSet,
@@ -438,6 +438,7 @@ export class WriterAgent extends BaseAgent {
       book,
       genreProfile,
       bookRules,
+      chapterPlan: input.chapterPlan,
       chapterNumber,
       title: creative.title,
       content: chapterContent,
@@ -484,6 +485,93 @@ export class WriterAgent extends BaseAgent {
           existingHookIds: [...priorHookIds],
         })
       : [];
+    const beforeHookRecords = parsePendingHooksMarkdown(hooks);
+    const afterHooksMarkdown = runtimeStateArtifacts?.hooksMarkdown ?? settlement.updatedHooks;
+    const afterHookRecords = parsePendingHooksMarkdown(afterHooksMarkdown);
+    const hardHookBudget = input.chapterPlan
+      ? deriveHookDebtBudget({
+          hooks: beforeHookRecords,
+          chapterNumber,
+          targetChapters: book.targetChapters,
+          maxRecoveryPerChapter: input.chapterPlan.maxRecoveryPerChapter,
+          maxNewHooks: input.chapterPlan.maxNewHooks,
+        })
+      : null;
+    const hookBudgetViolations: PostWriteViolation[] = [];
+    if (input.chapterPlan) {
+      const beforeActiveCount = beforeHookRecords.filter((hook) => hook.status !== "resolved" && hook.status !== "deferred").length;
+      const afterActiveCount = afterHookRecords.filter((hook) => hook.status !== "resolved" && hook.status !== "deferred").length;
+      const beforeOverdueCount = beforeHookRecords.filter((hook) =>
+        hook.status !== "resolved"
+        && hook.status !== "deferred"
+        && hook.expectedChapter != null
+        && hook.expectedChapter > 0
+        && hook.expectedChapter < chapterNumber,
+      ).length;
+      const afterOverdueCount = afterHookRecords.filter((hook) =>
+        hook.status !== "resolved"
+        && hook.status !== "deferred"
+        && hook.expectedChapter != null
+        && hook.expectedChapter > 0
+        && hook.expectedChapter < chapterNumber,
+      ).length;
+      const newHookCount = resolvedRuntimeStateDelta?.newHookCandidates.length ?? 0;
+      const resolvedCount = resolvedRuntimeStateDelta?.hookOps.resolve.length ?? 0;
+      const requiredRecoverCount = input.chapterPlan.requiredRecoverHooks.length;
+      const expectedResolveFloor = Math.min(requiredRecoverCount, input.chapterPlan.maxRecoveryPerChapter);
+
+      if (newHookCount > input.chapterPlan.maxNewHooks) {
+        hookBudgetViolations.push({
+          rule: "hook-budget-new-overflow",
+          severity: "error",
+          description: resolvedLanguage === "en"
+            ? `This chapter introduced ${newHookCount} new hooks, exceeding the plan cap of ${input.chapterPlan.maxNewHooks}.`
+            : `本章新增了 ${newHookCount} 个伏笔，超过计划上限 ${input.chapterPlan.maxNewHooks} 个。`,
+          suggestion: resolvedLanguage === "en"
+            ? "Reduce new hooks or move them into existing hook recovery."
+            : "压缩新增伏笔，优先把动作用于旧伏笔回收。",
+        });
+      }
+
+      if (expectedResolveFloor > 0 && resolvedCount < expectedResolveFloor) {
+        hookBudgetViolations.push({
+          rule: "hook-budget-recovery-floor",
+          severity: hardHookBudget?.hardClearMode ? "error" : "warning",
+          description: resolvedLanguage === "en"
+            ? `This chapter resolved only ${resolvedCount} hook(s), below the expected recovery floor ${expectedResolveFloor}.`
+            : `本章仅回收 ${resolvedCount} 条伏笔，低于期望回收下限 ${expectedResolveFloor} 条。`,
+          suggestion: resolvedLanguage === "en"
+            ? "Increase real payoff beats for the planned hooks before finalizing the chapter."
+            : "在落盘前补足计划内伏笔的真实回收段落。",
+        });
+      }
+
+      if ((hardHookBudget?.hardClearMode || input.chapterPlan.maxNewHooks === 0) && afterActiveCount >= beforeActiveCount) {
+        hookBudgetViolations.push({
+          rule: "hook-budget-net-debt",
+          severity: "error",
+          description: resolvedLanguage === "en"
+            ? `Hook debt did not decrease in clear-debt mode (${beforeActiveCount} -> ${afterActiveCount}).`
+            : `清债模式下伏笔债务没有下降（${beforeActiveCount} -> ${afterActiveCount}）。`,
+          suggestion: resolvedLanguage === "en"
+            ? "Resolve or retire existing hooks before introducing any new hook."
+            : "先回收或退役旧伏笔，再考虑新增。",
+        });
+      }
+
+      if ((hardHookBudget?.hardClearMode || beforeOverdueCount > 0) && afterOverdueCount >= beforeOverdueCount) {
+        hookBudgetViolations.push({
+          rule: "hook-budget-overdue-not-reduced",
+          severity: hardHookBudget?.hardClearMode ? "error" : "warning",
+          description: resolvedLanguage === "en"
+            ? `Overdue hooks did not decrease (${beforeOverdueCount} -> ${afterOverdueCount}).`
+            : `逾期伏笔没有下降（${beforeOverdueCount} -> ${afterOverdueCount}）。`,
+          suggestion: resolvedLanguage === "en"
+            ? "Prioritize overdue hooks until the overdue count drops."
+            : "优先处理逾期伏笔，直到逾期数量下降。",
+        });
+      }
+    }
 
     // ── Post-write validation (regex + rule-based, zero LLM cost) ──
     const ruleViolations = [
@@ -491,6 +579,7 @@ export class WriterAgent extends BaseAgent {
       ...detectCrossChapterRepetition(chapterContent, fingerprintChapters, resolvedLanguage),
       ...detectParagraphLengthDrift(chapterContent, fingerprintChapters, resolvedLanguage),
       ...validatePreWriteCommitments(creative.preWriteCheck, chapterContent, resolvedLanguage),
+      ...hookBudgetViolations,
     ];
     const aiTellIssues = analyzeAITells(chapterContent, resolvedLanguage).issues;
 
@@ -522,6 +611,17 @@ export class WriterAgent extends BaseAgent {
       });
       for (const issue of hookHealthIssues) {
         this.ctx.logger?.warn(`[${issue.severity}] ${issue.category}: ${issue.description}`);
+      }
+    }
+    if (hardHookBudget?.hardClearMode) {
+      const hardFailures = hookBudgetViolations.filter((violation) => violation.severity === "error");
+      if (hardFailures.length > 0) {
+        const detail = hardFailures.map((violation) => violation.description).join("；");
+        throw new Error(
+          resolvedLanguage === "en"
+            ? `Hook debt clear-mode validation failed for chapter ${chapterNumber}: ${detail}`
+            : `第${chapterNumber}章伏笔清债校验失败：${detail}`,
+        );
       }
     }
 
@@ -655,6 +755,7 @@ export class WriterAgent extends BaseAgent {
     readonly book: BookConfig;
     readonly genreProfile: GenreProfile;
     readonly bookRules: BookRules | null;
+    readonly chapterPlan?: ChapterPlan;
     readonly chapterNumber: number;
     readonly title: string;
     readonly content: string;
@@ -739,6 +840,7 @@ export class WriterAgent extends BaseAgent {
       selectedEvidenceBlock: params.selectedEvidenceBlock,
       governedControlBlock,
       validationFeedback: params.validationFeedback,
+      forceResolveCap: params.chapterPlan?.maxRecoveryPerChapter,
     });
 
     // Settler outputs all truth files — scale with content size

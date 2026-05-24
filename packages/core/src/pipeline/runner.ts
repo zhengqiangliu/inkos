@@ -2542,6 +2542,7 @@ export class PipelineRunner {
       restoreLostAuditIssues: (previous, next) => this.restoreLostAuditIssues(previous, next),
       analyzeAITells,
       analyzeSensitiveWords,
+      preflightSignals: reviewPreflight.signals,
       logWarn: (message) => this.logWarn(pipelineLang, message),
       logStage: (message) => this.logStage(stageLanguage, message),
       reviseMode: "spot-fix",

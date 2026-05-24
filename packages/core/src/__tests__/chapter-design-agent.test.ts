@@ -20,13 +20,14 @@ import { ChapterDesignAgent } from "../agents/chapter-design.js";
 describe("ChapterDesignAgent backfill prompt", () => {
   let root: string;
   let bookDir: string;
+  let storyDir: string;
   let outlineDir: string;
   let volumeOutlineText: string;
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "inkos-chapter-design-agent-"));
     bookDir = join(root, "books", "demo-book");
-    const storyDir = join(bookDir, "story");
+    storyDir = join(bookDir, "story");
     outlineDir = join(storyDir, "outline");
     volumeOutlineText = "# 卷纲\n\n### 第一卷：风起（1-3章）\n\n第1章到第3章围绕主线冲突推进。";
     await mkdir(storyDir, { recursive: true });
@@ -162,6 +163,75 @@ describe("ChapterDesignAgent backfill prompt", () => {
     expect(plan.highlight).toContain("夜雨");
     expect(plan.coreConflict).toContain("冲突");
     expect(plan.endingHook.length).toBeGreaterThan(0);
+  });
+
+  it("tightens hook recovery budget when hook debt is already overloaded", async () => {
+    const heavyHooks = Array.from({ length: 20 }, (_, index) => {
+      const id = `hook-${String(index + 1).padStart(2, "0")}`;
+      const expectedChapter = index === 0 ? 1 : 8 + index;
+      const lastAdvancedChapter = index < 4 ? 1 : 0;
+      return `| ${id} | ${index + 1} | mystery | open | ${lastAdvancedChapter} | payoff-${index + 1} | | 旧债-${index + 1} | ${expectedChapter} |`;
+    });
+    await writeFile(join(storyDir, "pending_hooks.md"), [
+      "# 伏笔池",
+      "",
+      "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 回收节奏 | 备注 | 预期回收章节 |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+      ...heavyHooks,
+    ].join("\n"), "utf-8");
+
+    chatCompletionMock.mockResolvedValue({
+      content: [
+        "---",
+        "chapterName: 债务清算",
+        "highlight: 优先回收旧债",
+        "coreConflict: 主角必须先处理旧伏笔，再考虑新线",
+        "plotAndConflict: |",
+        "  本章集中处理旧线索，压住新钩子。",
+        "emotionalTone: 紧张",
+        "endingHook: 旧债暂未完全结清。",
+        "hookAssignment:",
+        "  - hook-01",
+        "requiredRecoverHooks:",
+        "  - hook-02",
+        "maxNewHooks: 3",
+        "maxRecoveryPerChapter: 3",
+        "---",
+      ].join("\n"),
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+    });
+
+    const agent = new ChapterDesignAgent({
+      client: { provider: "openai", apiFormat: "chat", stream: false, defaults: { temperature: 0.7, maxTokens: 8192, maxTokensCap: null, thinkingBudget: 0, extra: {} } },
+      model: "gpt-5.4",
+      projectRoot: root,
+      bookId: "demo-book",
+    });
+
+    const plan = await agent.analyzeAndDesignChapter({
+      book: {
+        id: "demo-book",
+        title: "Demo",
+        genre: "xuanhuan",
+        platform: "qidian",
+        language: "zh",
+        status: "active",
+        targetChapters: 100,
+        chapterWordCount: 3000,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      bookDir,
+      volumeOutline: volumeOutlineText,
+      chapterNumber: 3,
+      title: "第三章 清债",
+      content: "本章没有真正展开新线，只是清理旧债。",
+      language: "zh",
+    });
+
+    expect(plan.maxNewHooks).toBe(0);
+    expect(plan.maxRecoveryPerChapter).toBe(3);
+    expect(plan.hookAssignment.length).toBeLessThanOrEqual(plan.maxRecoveryPerChapter);
   });
 
   it("clamps batch generation to the outline limit and ignores model-provided chapter numbers", async () => {

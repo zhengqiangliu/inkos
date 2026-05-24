@@ -1107,6 +1107,141 @@ describe("WriterAgent", () => {
     }
   });
 
+  it("rejects clear-debt chapters that still expand hook debt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-writer-hook-debt-test-"));
+    const bookDir = join(root, "book");
+    const storyDir = join(bookDir, "story");
+    await mkdir(storyDir, { recursive: true });
+    await Promise.all([
+      writeFile(join(storyDir, "current_state.md"), "# Current State\n\n- 当前章节 0\n", "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), [
+        "# Pending Hooks",
+        "",
+        ...Array.from({ length: 20 }, (_, index) => `- hook-${String(index + 1).padStart(2, "0")}`),
+      ].join("\n"), "utf-8"),
+    ]);
+
+    const agent = new WriterAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0,
+          maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(WriterAgent.prototype as never, "chat" as never)
+      .mockResolvedValueOnce({
+        content: [
+          "=== PRE_WRITE_CHECK ===",
+          "| 检查项 | 本章记录 | 备注 |",
+          "|--------|----------|------|",
+          "| 大纲锚定 | 第1章清债 | ok |",
+          "| 本章冲突 | 先回收旧债 | ok |",
+          "| 待回收伏笔 | hook-01 | ok |",
+          "",
+          "=== CHAPTER_TITLE ===",
+          "清债",
+          "",
+          "=== CHAPTER_CONTENT ===",
+          "本章先处理旧债，再往后压住新线。",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: "=== OBSERVATIONS ===\n- observed",
+        usage: ZERO_USAGE,
+      })
+      .mockResolvedValueOnce({
+        content: [
+          "=== POST_SETTLEMENT ===",
+          "ok",
+          "",
+          "=== RUNTIME_STATE_DELTA ===",
+          "```json",
+          JSON.stringify({
+            chapter: 1,
+            hookOps: {
+              upsert: [],
+              mention: [],
+              resolve: [],
+              defer: [],
+            },
+            newHookCandidates: [
+              {
+                type: "mystery",
+                expectedPayoff: "继续追查旧门后的线索",
+                payoffTiming: "near-term",
+                notes: "本章仍然新开了一个钩子",
+              },
+            ],
+            subplotOps: [],
+            emotionalArcOps: [],
+            characterMatrixOps: [],
+            notes: [],
+          }, null, 2),
+          "```",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    try {
+      await expect(agent.writeChapter({
+        book: {
+          id: "writer-book",
+          title: "Writer Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 120,
+          chapterWordCount: 2200,
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        },
+        bookDir,
+        chapterNumber: 1,
+        lengthSpec: buildLengthSpec(2200, "zh"),
+        chapterPlan: {
+          chapterNumber: 1,
+          chapterName: "清债",
+          highlight: "先回收旧债",
+          coreConflict: "主角必须先清理伏笔债务",
+          plotAndConflict: "本章集中回收旧伏笔，压住新增钩子。",
+          emotionalTone: "紧张",
+          endingHook: "旧债尚未全清。",
+          status: "planned",
+          source: "auto",
+          version: 1,
+          needsReview: true,
+          anchorRefs: {
+            worldRefs: [],
+            characterRefs: [],
+            emotionRefs: [],
+            hookRefs: [],
+          },
+          driftFlags: [],
+          lockedFields: [],
+          hookAssignment: ["hook-01"],
+          requiredRecoverHooks: ["hook-01"],
+          maxNewHooks: 0,
+          maxRecoveryPerChapter: 5,
+          createdAt: "2026-03-23T00:00:00.000Z",
+          updatedAt: "2026-03-23T00:00:00.000Z",
+        },
+      })).rejects.toThrow(/清债校验失败|clear-debt validation failed/i);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("renders externalContext inside governed creative prompts", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-external-context-test-"));
     const bookDir = join(root, "book");

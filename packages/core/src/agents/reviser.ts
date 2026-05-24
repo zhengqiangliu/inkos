@@ -121,6 +121,16 @@ export class ReviserAgent extends BaseAgent {
         score?: number;
         passScoreThreshold?: number;
         scoreShortfall?: number;
+        structureOverload?: {
+          enabled: boolean;
+          reason: string;
+          signals: ReadonlyArray<{
+            code: string;
+            severity: "warning" | "info";
+            message: string;
+            suggestion: string;
+          }>;
+        };
         unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
         mustFixFirstIssueIds?: ReadonlyArray<string>;
         issueClassCounts?: Readonly<{
@@ -256,6 +266,12 @@ export class ReviserAgent extends BaseAgent {
         : failureGate === "none"
           ? `\n- 门禁策略：none。保持保守修改，优先完成 must-fix 与未收敛项。`
           : "";
+    const structureOverload = reviseContext?.structureOverload?.enabled === true
+      ? reviseContext.structureOverload
+      : undefined;
+    const structureOverloadBlock = structureOverload
+      ? `\n- 结构过载：${structureOverload.reason}\n- 本轮唯一目标：先重构问题段落和结构骨架，再做局部文风修整。\n- 必须先处理的信号：\n${structureOverload.signals.map((signal) => `  - [${signal.code}] ${signal.message} → ${signal.suggestion}`).join("\n")}`
+      : "";
     const revisionStagnationBlock = reviseContext?.previousRevisionWasNoop === true
       ? "\n- 修订停滞：上一轮修订未产生可应用正文变化。本轮必须重构问题段落，先列出将要改动的具体段落，再输出真正不同的修订稿。"
       : "";
@@ -286,7 +302,7 @@ export class ReviserAgent extends BaseAgent {
       ? `\n- 主问题类型：${primaryIssueClass}`
       : "";
     const auditGateBlock = failureGate || Number.isFinite(Number(reviseContext?.score)) || Number.isFinite(Number(reviseContext?.passScoreThreshold)) || mustFixFirstBlock.length > 0 || revisionStagnationBlock.length > 0
-      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${typeof currentScore === "number" ? `\n- 当前评分: ${currentScore}` : ""}${typeof passScoreThreshold === "number" ? `\n- 通过阈值: ${passScoreThreshold}` : ""}${typeof scoreShortfall === "number" ? `\n- 距离通过阈值还差: ${scoreShortfall}` : ""}${failureGateStrategyBlock}${revisionStagnationBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
+      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${typeof currentScore === "number" ? `\n- 当前评分: ${currentScore}` : ""}${typeof passScoreThreshold === "number" ? `\n- 通过阈值: ${passScoreThreshold}` : ""}${typeof scoreShortfall === "number" ? `\n- 距离通过阈值还差: ${scoreShortfall}` : ""}${failureGateStrategyBlock}${structureOverloadBlock}${revisionStagnationBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
       : "";
     const hooksWorkingSet = governedMode && options?.contextPackage
       ? buildGovernedHookWorkingSet({

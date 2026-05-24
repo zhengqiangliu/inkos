@@ -23,6 +23,16 @@ export interface ChapterReviewContext {
   readonly score?: number;
   readonly passScoreThreshold?: number;
   readonly scoreShortfall?: number;
+  readonly structureOverload?: {
+    readonly enabled: boolean;
+    readonly reason: string;
+    readonly signals: ReadonlyArray<{
+      readonly code: string;
+      readonly severity: "warning" | "info";
+      readonly message: string;
+      readonly suggestion: string;
+    }>;
+  };
   readonly unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
   readonly mustFixFirstIssueIds?: ReadonlyArray<string>;
   readonly issueClassCounts?: Readonly<{
@@ -64,6 +74,8 @@ const AUTO_REVIEW_STOP_REASON_TOKEN_LIMIT = "修订消耗总 token 超过安全�
 const MIN_AUDIT_PASS_SCORE = 80;
 const AUTO_REVIEW_DEFAULT_MODE: ReviseMode = "spot-fix";
 const STRUCTURAL_REPAIR_EXCLUDED_CATEGORIES = new Set(["篇幅控制", "Length Control", "评分门禁", "Score Gate"]);
+const STRUCTURE_OVERLOAD_WARNING_THRESHOLD = 3;
+const STRUCTURE_OVERLOAD_LOW_SCORE_THRESHOLD = 60;
 
 export interface AuditSeverityCounts {
   readonly critical: number;
@@ -345,6 +357,56 @@ function hasRepairStructuralSignals(issues: ReadonlyArray<AuditIssue>): boolean 
   );
 }
 
+function shouldTriggerStructureOverload(params: {
+  readonly issues: ReadonlyArray<AuditIssue>;
+  readonly score?: number;
+  readonly preflightSignals?: ReadonlyArray<{
+    readonly code: string;
+    readonly severity: "warning" | "info";
+    readonly message: string;
+    readonly suggestion: string;
+  }>;
+}): { readonly enabled: boolean; readonly reason: string } {
+  const structuralCount = params.issues.filter((issue) => isStructuralAuditIssue(issue)).length;
+  const preflightHighRisk = params.preflightSignals?.some((signal) =>
+    signal.code === "hook_debt_pressure" || signal.code === "volume_outline_missing" || signal.code === "volume_anchor_weak" || signal.code === "state_chapter_lag",
+  ) ?? false;
+  const lowScore = typeof params.score === "number" && params.score < STRUCTURE_OVERLOAD_LOW_SCORE_THRESHOLD;
+  if (structuralCount >= STRUCTURE_OVERLOAD_WARNING_THRESHOLD && (preflightHighRisk || lowScore)) {
+    return {
+      enabled: true,
+      reason: preflightHighRisk
+        ? "预检已确认存在高风险结构债务，需直接按重构策略处理"
+        : "结构性问题过多且评分偏低，需直接按重构策略处理",
+    };
+  }
+  if (preflightHighRisk && lowScore && structuralCount > 0) {
+    return {
+      enabled: true,
+      reason: "预检高风险信号与低评分叠加，需直接按重构策略处理",
+    };
+  }
+  return { enabled: false, reason: "" };
+}
+
+function buildStructureOverloadSignalBlock(params: {
+  readonly enabled: boolean;
+  readonly reason: string;
+  readonly preflightSignals?: ReadonlyArray<{
+    readonly code: string;
+    readonly severity: "warning" | "info";
+    readonly message: string;
+    readonly suggestion: string;
+  }>;
+}): ChapterReviewContext["structureOverload"] {
+  if (!params.enabled) return undefined;
+  return {
+    enabled: true,
+    reason: params.reason,
+    signals: params.preflightSignals ?? [],
+  };
+}
+
 function resolveAdaptiveMaxReviseRounds(
   configuredMaxRounds: number,
   issues: ReadonlyArray<AuditIssue>,
@@ -540,6 +602,12 @@ export async function runChapterReviewCycle(params: {
     found: ReadonlyArray<{ severity: string }>;
     issues: ReadonlyArray<AuditIssue>;
   };
+  readonly preflightSignals?: ReadonlyArray<{
+    readonly code: string;
+    readonly severity: "warning" | "info";
+    readonly message: string;
+    readonly suggestion: string;
+  }>;
   readonly logWarn: (message: { zh: string; en: string }) => void;
   readonly logStage: (message: { zh: string; en: string }) => void;
   readonly maxReviseRounds?: number;
@@ -717,6 +785,11 @@ export async function runChapterReviewCycle(params: {
   let stopReason: string | undefined;
   let previousSpotFixHadNoDelta = false;
   const reviseLoopStartTokens = totalUsage.totalTokens;
+  const structureOverload = shouldTriggerStructureOverload({
+    issues: auditResult.issues,
+    score: estimateAuditScore(countIssueSeverities(auditResult.issues)),
+    preflightSignals: params.preflightSignals,
+  });
   for (let reviseRound = 1; (unboundedReview || reviseRound <= maxReviseRounds) && !auditResult.passed; reviseRound += 1) {
     // Token safety valve: prevent runaway consumption in high-round scenarios
       if (totalUsage.totalTokens - reviseLoopStartTokens > MAX_REVISE_TOTAL_TOKENS) {
@@ -754,6 +827,11 @@ export async function runChapterReviewCycle(params: {
       score: priorAuditScore,
       passScoreThreshold: MIN_AUDIT_PASS_SCORE,
       scoreShortfall,
+      structureOverload: buildStructureOverloadSignalBlock({
+        enabled: structureOverload.enabled,
+        reason: structureOverload.reason,
+        preflightSignals: params.preflightSignals,
+      }),
       issueClassCounts,
       primaryIssueClass,
       dimensionChecks: auditResult.dimensionChecks,
@@ -767,6 +845,13 @@ export async function runChapterReviewCycle(params: {
       carryover ?? undefined,
       reviseContext,
     );
+    if (structureOverload.enabled && reviseMode === "spot-fix") {
+      reviseMode = "rework";
+      params.logWarn({
+        zh: `检测到结构过载：${structureOverload.reason}，本轮直接切换为rework`,
+        en: `Structure overload detected: ${structureOverload.reason}; switching directly to rework for this round`,
+      });
+    }
     if (configuredReviseMode === "spot-fix" && reviseRound > 1 && carryover && (carryover.unresolved.length > 0 || carryover.partial.length > 0)) {
       const persistentIssuesForMode = [...carryover.unresolved, ...carryover.partial];
       reviseMode = hasStructuralAuditSignals(persistentIssuesForMode) ? "rework" : "rewrite";
@@ -938,6 +1023,13 @@ export async function runChapterReviewCycle(params: {
         params.logWarn({
           zh: `第${reviseRound}轮重审返回空问题但仍未通过，判定为结构修复中间态，继续下一轮修订`,
           en: `Round ${reviseRound} re-audit returned no issues but still failed; treating as structural-repair intermediate state and continuing`,
+        });
+        continue;
+      }
+      if (structureOverload.enabled && reviseRound < maxReviseRounds) {
+        params.logWarn({
+          zh: `第${reviseRound}轮仍未通过且存在结构过载信号，继续下一轮重构修复`,
+          en: `Round ${reviseRound} still failed with structure overload signals; continuing the next reconstruction round`,
         });
         continue;
       }
