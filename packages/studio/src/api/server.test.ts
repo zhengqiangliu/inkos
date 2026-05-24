@@ -5901,6 +5901,99 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("escalates unchanged auto revision to rework on the next round", async () => {
+    const firstFailedAudit = {
+      chapterNumber: 12,
+      passed: false,
+      issues: [
+        { severity: "warning", category: "节奏", description: "节奏偏慢", suggestion: "压缩铺垫" },
+        { severity: "warning", category: "情绪", description: "情绪单调", suggestion: "增加起伏" },
+      ],
+      summary: "need stronger revision",
+    };
+    const secondFailedAudit = {
+      chapterNumber: 12,
+      passed: false,
+      issues: [
+        { severity: "warning", category: "节奏", description: "节奏偏慢", suggestion: "压缩铺垫" },
+        { severity: "warning", category: "情绪", description: "情绪单调", suggestion: "增加起伏" },
+      ],
+      summary: "still needs work",
+    };
+    const finalPassedAudit = {
+      chapterNumber: 12,
+      passed: true,
+      issues: [],
+      summary: "fixed",
+    };
+    auditDraftMock
+      .mockResolvedValueOnce(firstFailedAudit)
+      .mockResolvedValueOnce(secondFailedAudit)
+      .mockResolvedValueOnce(finalPassedAudit);
+    reviseDraftMock
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 3120,
+        fixedIssues: ["- 尝试修订但未改动正文"],
+        applied: false,
+        status: "unchanged",
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 3180,
+        fixedIssues: ["- 重构段落"],
+        applied: true,
+        status: "ready-for-review",
+      });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+    const eventsResponse = await app.request("http://localhost/api/v1/events");
+    expect(eventsResponse.status).toBe(200);
+
+    const runId = "run-audit-rework-escalation-1";
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "审计第12章",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-1",
+        runId,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const events = await collectSSEEvents(
+      eventsResponse,
+      ["audit:start", "audit:complete", "revise:start", "revise:complete"],
+      { timeoutMs: 3_000, minCount: 8 },
+    );
+    const reviseStarts = events.filter((event) => event.event === "revise:start");
+    const secondReviseStart = reviseStarts[1];
+    expect(secondReviseStart?.data).toMatchObject({
+      sessionId: "agent-session-1",
+      runId,
+      chapter: 12,
+      round: 2,
+      maxRounds: 2,
+      phase: "revise",
+      mode: "rework",
+      autoTriggeredByAudit: true,
+      strategyReason: expect.stringContaining("未产生有效正文变化"),
+    });
+    expect(reviseDraftMock.mock.calls[1]?.[2]).toBe("rework");
+    expect(reviseDraftMock.mock.calls[1]?.[3]).toMatchObject({
+      overrideIssues: expect.arrayContaining([
+        expect.objectContaining({
+          severity: "critical",
+          category: "revision_stagnation",
+          description: expect.stringContaining("未产生可应用正文变化"),
+        }),
+      ]),
+    });
+  });
+
   it("marks deterministic audit tool:end as error when final audit still fails", async () => {
     const failedAudit = {
       chapterNumber: 12,

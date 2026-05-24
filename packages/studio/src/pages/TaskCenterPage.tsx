@@ -549,8 +549,9 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
     setCreating(true);
     setCreateError(null);
     try {
-      const payload: { type: BookTaskType; requestedChapters?: number; auditChapterStart?: number; auditChapterEnd?: number; wordCount?: number; quickMode: boolean; service?: string; model?: string } = {
+      const payload: { type: BookTaskType; source: "task-center"; requestedChapters?: number; auditChapterStart?: number; auditChapterEnd?: number; wordCount?: number; quickMode: boolean; service?: string; model?: string } = {
         type: createTaskType,
+        source: "task-center",
         quickMode: createTaskQuickModeHidden ? false : createQuickMode,
       };
       const requested = Number(requestedChapters);

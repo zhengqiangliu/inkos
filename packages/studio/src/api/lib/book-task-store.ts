@@ -126,6 +126,7 @@ function normalizeTask(task: Partial<BookTask>): BookTask {
     id: typeof task.id === "string" ? task.id : randomUUID(),
     bookId: typeof task.bookId === "string" ? task.bookId : "",
     type: normalizeTaskType(task.type),
+    source: task.source === "task-center" ? "task-center" : "book-detail",
     title: typeof task.title === "string" ? task.title : "自动任务",
     status: task.status === "queued" || task.status === "running" || task.status === "paused" || task.status === "stopping" || task.status === "retry_waiting" || task.status === "cancelled" || task.status === "failed" || task.status === "succeeded"
       ? task.status
@@ -480,6 +481,7 @@ export class BookTaskStore {
           id: randomUUID(),
           bookId,
           type,
+          source: input.source === "task-center" ? "task-center" : "book-detail",
           title: input.title,
           status: "queued",
           createdAt: now,

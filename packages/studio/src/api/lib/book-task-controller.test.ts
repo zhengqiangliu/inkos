@@ -885,9 +885,88 @@ describe("BookTaskController audit gating", () => {
     });
 
     expect(writeNextChapter).toHaveBeenCalledTimes(1);
+    expect(writeNextChapter).toHaveBeenCalledWith(
+      bookId,
+      expect.any(Number),
+      undefined,
+      expect.objectContaining({
+        quickMode: false,
+        allowPendingAuditFailure: true,
+        unboundedReview: false,
+      }),
+    );
     const warnLogs = broadcasts.filter((item) => item.event === "book-task:log" && (item.data as { log?: { level?: string } }).log?.level === "warn");
     expect(warnLogs).toHaveLength(1);
     expect((warnLogs[0]?.data as { log?: { message?: string } } | undefined)?.log?.message).toContain("state-degraded");
     expect(broadcasts.some((item) => item.event === "book-task:error")).toBe(false);
+  });
+
+  it("enables unbounded review rounds for task-center write tasks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const writeNextChapter = vi.fn().mockResolvedValue({
+      chapterNumber: 1,
+      title: "Ch 1",
+      wordCount: 1200,
+      status: "ready-for-review",
+      passed: true,
+      auditResult: {
+        passed: true,
+      },
+      tokenUsage: {
+        promptTokens: 1,
+        completionTokens: 2,
+        totalTokens: 3,
+      },
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6, language: "zh" }),
+        loadChapterIndex: async () => [],
+        getNextChapterNumber: async () => 1,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft: async () => ({}),
+        reviseDraft: async () => ({}),
+        writeNextChapter,
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "write",
+      source: "task-center",
+      requestedChapters: 1,
+      retryEnabled: false,
+      service: "svc-a",
+      model: "model-a",
+      quickMode: false,
+    });
+
+    await vi.waitFor(async () => {
+      const current = await controller.get(bookId, task.id);
+      expect(current?.status).toBe("succeeded");
+    });
+
+    expect(writeNextChapter).toHaveBeenCalledWith(
+      bookId,
+      expect.any(Number),
+      undefined,
+      expect.objectContaining({
+        quickMode: false,
+        allowPendingAuditFailure: true,
+        unboundedReview: true,
+      }),
+    );
   });
 });

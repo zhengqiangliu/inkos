@@ -138,6 +138,7 @@ export interface PipelineConfig {
     readonly chapterNumber?: number;
     readonly round?: number;
     readonly maxReviseRounds?: number;
+    readonly unboundedReview?: boolean;
     readonly phase?: "audit" | "revise";
     readonly mode?: ReviseMode;
     readonly passed?: boolean;
@@ -153,6 +154,7 @@ export interface PipelineConfig {
     readonly round: number;
     readonly maxReviseRounds: number;
     readonly phase: "audit";
+    readonly unboundedReview?: boolean;
   }) => void | Promise<void>;
   readonly onWriteNextAuditComplete?: (payload: {
     readonly bookId: string;
@@ -161,6 +163,7 @@ export interface PipelineConfig {
     readonly maxReviseRounds: number;
     readonly phase: "audit";
     readonly audit: ReviseAuditSummary;
+    readonly unboundedReview?: boolean;
   }) => void | Promise<void>;
   readonly onWriteNextReviseStart?: (payload: {
     readonly bookId: string;
@@ -169,6 +172,7 @@ export interface PipelineConfig {
     readonly maxReviseRounds: number;
     readonly phase: "revise";
     readonly mode: ReviseMode;
+    readonly unboundedReview?: boolean;
   }) => void | Promise<void>;
   readonly onWriteNextReviseComplete?: (payload: {
     readonly bookId: string;
@@ -180,6 +184,7 @@ export interface PipelineConfig {
     readonly wordCount: number;
     readonly applied: boolean;
     readonly audit?: ReviseAuditSummary;
+    readonly unboundedReview?: boolean;
   }) => void | Promise<void>;
   readonly defaultWriteNextQuickMode?: boolean;
   readonly writeStageHeartbeatMs?: number;
@@ -281,6 +286,7 @@ export interface WriteNextChapterOptions {
   readonly deferMemorySync?: boolean;
   readonly deferSnapshotSync?: boolean;
   readonly allowPendingAuditFailure?: boolean;
+  readonly unboundedReview?: boolean;
 }
 
 // Atomic operation results
@@ -359,6 +365,7 @@ export interface ReviseDraftOptions {
       textual: number;
     }>;
     readonly primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
+    readonly previousRevisionWasNoop?: boolean;
     readonly dimensionChecks?: ReadonlyArray<{
       readonly dimension: string;
       readonly status: "pass" | "warning" | "failed";
@@ -2538,7 +2545,8 @@ export class PipelineRunner {
       logWarn: (message) => this.logWarn(pipelineLang, message),
       logStage: (message) => this.logStage(stageLanguage, message),
       reviseMode: "spot-fix",
-      onAuditStart: async ({ round, maxReviseRounds }) => {
+      unboundedReview: options?.unboundedReview ?? false,
+      onAuditStart: async ({ round, maxReviseRounds, unboundedReview }) => {
         auditRoundStartedAt.set(round, this.nowMs());
         await this.config.onWriteNextAuditStart?.({
           bookId,
@@ -2546,9 +2554,10 @@ export class PipelineRunner {
           round,
           maxReviseRounds,
           phase: "audit",
+          unboundedReview,
         });
       },
-      onAuditComplete: async ({ round, maxReviseRounds, audit }) => {
+      onAuditComplete: async ({ round, maxReviseRounds, unboundedReview, audit }) => {
         const startedAt = auditRoundStartedAt.get(round);
         if (typeof startedAt === "number") {
           auditMs += this.elapsedMs(startedAt);
@@ -2560,6 +2569,7 @@ export class PipelineRunner {
           round,
           maxReviseRounds,
           phase: "audit",
+          unboundedReview,
           audit: {
             passed: audit.passed,
             score: audit.score,
@@ -2572,7 +2582,7 @@ export class PipelineRunner {
           },
         });
       },
-      onReviseStart: async ({ round, maxReviseRounds, mode }) => {
+      onReviseStart: async ({ round, maxReviseRounds, unboundedReview, mode }) => {
         reviseRoundStartedAt.set(round, this.nowMs());
         await this.config.onWriteNextReviseStart?.({
           bookId,
@@ -2581,6 +2591,7 @@ export class PipelineRunner {
           maxReviseRounds,
           phase: "revise",
           mode,
+          unboundedReview,
         });
       },
       onStructuralPreRevise: async ({ round, mode }) => {
@@ -2594,7 +2605,7 @@ export class PipelineRunner {
         );
         await this.syncNarrativeMemoryIndex(bookId);
       },
-      onReviseComplete: async ({ round, maxReviseRounds, mode, reviseResult, reviseAudit }) => {
+      onReviseComplete: async ({ round, maxReviseRounds, unboundedReview, mode, reviseResult, reviseAudit }) => {
         const startedAt = reviseRoundStartedAt.get(round);
         if (typeof startedAt === "number") {
           reviseMs += this.elapsedMs(startedAt);
@@ -2607,6 +2618,7 @@ export class PipelineRunner {
           maxReviseRounds,
           phase: "revise",
           mode,
+          unboundedReview,
           wordCount: reviseResult.wordCount,
           applied: reviseResult.revisedContent.length > 0,
           ...(reviseAudit

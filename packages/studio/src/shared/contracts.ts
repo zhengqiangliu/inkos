@@ -166,6 +166,7 @@ export type BookTaskStatus =
 
 export interface BookTaskCreatePayload {
   readonly type?: BookTaskType;
+  readonly source?: "book-detail" | "task-center";
   readonly requestedChapters?: number;
   readonly auditChapterStart?: number | null;
   readonly auditChapterEnd?: number | null;
@@ -190,6 +191,7 @@ export interface BookTask {
   readonly id: string;
   readonly bookId: string;
   readonly type: BookTaskType;
+  readonly source: "book-detail" | "task-center";
   readonly title: string;
   readonly status: BookTaskStatus;
   readonly stage: string;

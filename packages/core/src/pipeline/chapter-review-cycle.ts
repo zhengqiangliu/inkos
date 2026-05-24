@@ -543,16 +543,19 @@ export async function runChapterReviewCycle(params: {
   readonly logWarn: (message: { zh: string; en: string }) => void;
   readonly logStage: (message: { zh: string; en: string }) => void;
   readonly maxReviseRounds?: number;
+  readonly unboundedReview?: boolean;
   readonly reviseMode?: ReviseMode;
-  readonly onAuditStart?: (payload: { round: number; maxReviseRounds: number }) => void | Promise<void>;
+  readonly onAuditStart?: (payload: { round: number; maxReviseRounds: number; unboundedReview?: boolean }) => void | Promise<void>;
   readonly onAuditComplete?: (payload: {
     round: number;
     maxReviseRounds: number;
+    unboundedReview?: boolean;
     audit: AuditRoundSummary;
   }) => void | Promise<void>;
   readonly onReviseStart?: (payload: {
     round: number;
     maxReviseRounds: number;
+    unboundedReview?: boolean;
     mode: ReviseMode;
   }) => void | Promise<void>;
   readonly onStructuralPreRevise?: (payload: {
@@ -564,6 +567,7 @@ export async function runChapterReviewCycle(params: {
   readonly onReviseComplete?: (payload: {
     round: number;
     maxReviseRounds: number;
+    unboundedReview?: boolean;
     mode: ReviseMode;
     reviseResult: ReviseOutput;
     reviseAudit: AuditRoundSummary | null;
@@ -575,11 +579,12 @@ export async function runChapterReviewCycle(params: {
   let finalContent = params.initialOutput.content;
   let finalWordCount = params.initialOutput.wordCount;
   let revised = false;
+  const unboundedReview = params.unboundedReview === true;
   const configuredMaxReviseRounds = Number.isFinite(Number(params.maxReviseRounds))
-    ? Math.max(0, Math.min(MAX_ADAPTIVE_REVISE_ROUNDS, Math.trunc(Number(params.maxReviseRounds))))
+    ? Math.max(0, Math.trunc(Number(params.maxReviseRounds)))
     : DEFAULT_AUTO_REVISE_ROUNDS;
   const configuredReviseMode = params.reviseMode ?? AUTO_REVIEW_DEFAULT_MODE;
-  let maxReviseRounds = configuredMaxReviseRounds;
+  let maxReviseRounds = Math.max(0, Math.min(MAX_ADAPTIVE_REVISE_ROUNDS, configuredMaxReviseRounds));
 
   if (params.initialOutput.postWriteErrors.length > 0) {
     params.logWarn({
@@ -662,7 +667,7 @@ export async function runChapterReviewCycle(params: {
 
   params.logStage({ zh: "审计草稿", en: "auditing draft" });
   let auditRound = 1;
-  await params.onAuditStart?.({ round: auditRound, maxReviseRounds });
+  await params.onAuditStart?.({ round: auditRound, maxReviseRounds, unboundedReview });
   const llmAudit = await params.auditor.auditChapter(
     params.bookDir,
     finalContent,
@@ -698,6 +703,7 @@ export async function runChapterReviewCycle(params: {
   await params.onAuditComplete?.({
     round: auditRound,
     maxReviseRounds,
+    unboundedReview,
     audit: buildAuditRoundSummary(params.chapterNumber, auditResult),
   });
 
@@ -711,13 +717,13 @@ export async function runChapterReviewCycle(params: {
   let stopReason: string | undefined;
   let previousSpotFixHadNoDelta = false;
   const reviseLoopStartTokens = totalUsage.totalTokens;
-  for (let reviseRound = 1; reviseRound <= maxReviseRounds && !auditResult.passed; reviseRound += 1) {
+  for (let reviseRound = 1; (unboundedReview || reviseRound <= maxReviseRounds) && !auditResult.passed; reviseRound += 1) {
     // Token safety valve: prevent runaway consumption in high-round scenarios
-    if (totalUsage.totalTokens - reviseLoopStartTokens > MAX_REVISE_TOTAL_TOKENS) {
-      stoppedByMaxRounds = true;
-      stopReason = AUTO_REVIEW_STOP_REASON_TOKEN_LIMIT;
-      break;
-    }
+      if (totalUsage.totalTokens - reviseLoopStartTokens > MAX_REVISE_TOTAL_TOKENS) {
+        stoppedByMaxRounds = true;
+        stopReason = AUTO_REVIEW_STOP_REASON_TOKEN_LIMIT;
+        break;
+      }
     const blockingIssues = auditResult.issues.filter(
       (issue) => issue.severity === "critical" || issue.severity === "warning",
     );
@@ -779,17 +785,17 @@ export async function runChapterReviewCycle(params: {
       reviseMode = "rewrite";
     }
     // On the final round, escalate to rewrite for a stronger convergence attempt
-    if (reviseMode === "spot-fix" && reviseRound >= maxReviseRounds) {
+    if (!unboundedReview && reviseMode === "spot-fix" && reviseRound >= maxReviseRounds) {
       reviseMode = "rewrite";
     }
     if (hasStructuralAuditSignals(issuesForRound)) {
       try {
-        await params.onStructuralPreRevise?.({
-          round: reviseRound,
-          maxReviseRounds,
-          mode: reviseMode,
-          issues: issuesForRound,
-        });
+      await params.onStructuralPreRevise?.({
+        round: reviseRound,
+        maxReviseRounds,
+        mode: reviseMode,
+        issues: issuesForRound,
+      });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         params.logWarn({
@@ -801,6 +807,7 @@ export async function runChapterReviewCycle(params: {
     await params.onReviseStart?.({
       round: reviseRound,
       maxReviseRounds,
+      unboundedReview,
       mode: reviseMode,
     });
     params.logStage({
@@ -830,6 +837,7 @@ export async function runChapterReviewCycle(params: {
       await params.onReviseComplete?.({
         round: reviseRound,
         maxReviseRounds,
+        unboundedReview,
         mode: reviseMode,
         reviseResult: reviseOutput,
         reviseAudit: null,
@@ -861,7 +869,7 @@ export async function runChapterReviewCycle(params: {
     }
 
     auditRound = reviseRound + 1;
-    await params.onAuditStart?.({ round: auditRound, maxReviseRounds });
+    await params.onAuditStart?.({ round: auditRound, maxReviseRounds, unboundedReview });
     const reAudit = await params.auditor.auditChapter(
       params.bookDir,
       finalContent,
@@ -913,6 +921,7 @@ export async function runChapterReviewCycle(params: {
     await params.onAuditComplete?.({
       round: auditRound,
       maxReviseRounds,
+      unboundedReview,
       audit: reviseAuditSummary,
     });
     priorRoundIssues = issuesForRound;
@@ -934,7 +943,7 @@ export async function runChapterReviewCycle(params: {
       }
       break;
     }
-    if (!auditResult.passed && reviseRound === maxReviseRounds) {
+    if (!unboundedReview && !auditResult.passed && reviseRound === maxReviseRounds) {
       stoppedByMaxRounds = true;
       stopReason = AUTO_REVIEW_STOP_REASON_MAX_ROUNDS;
     }
@@ -950,7 +959,7 @@ export async function runChapterReviewCycle(params: {
     postReviseCount,
     normalizeApplied,
     autoReview: {
-      enabled: maxReviseRounds > 0,
+      enabled: unboundedReview || maxReviseRounds > 0,
       maxReviseRounds,
       reviseRoundsUsed,
       auditRounds: auditRound,

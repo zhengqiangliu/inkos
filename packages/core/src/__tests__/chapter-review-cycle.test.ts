@@ -1023,6 +1023,162 @@ describe("runChapterReviewCycle", () => {
     expect(callOrder).toEqual(["hook", "revise"]);
   });
 
+  it("continues beyond five rounds when unbounded review is enabled", async () => {
+    const draft = "字".repeat(220);
+    const failingAudit = createAuditResult({
+      passed: false,
+      issues: [{
+        severity: "critical",
+        category: "continuity",
+        description: "still broken",
+        suggestion: "fix it",
+      }],
+      summary: "needs work",
+    });
+    const passingAudit = createAuditResult({
+      passed: true,
+      issues: [],
+      summary: "done",
+    });
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(passingAudit);
+    const reviseChapter = vi.fn().mockImplementation(async (
+      _bookDir: string,
+      content: string,
+    ) => ({
+      revisedContent: `${content}修`,
+      wordCount: `${content}修`.length,
+      fixedIssues: ["noop"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    }));
+    const normalizeDraftLengthIfNeeded = vi.fn().mockImplementation(async (content: string) => ({
+      content,
+      wordCount: content.length,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    }));
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 1,
+      initialOutput: {
+        content: draft,
+        wordCount: 220,
+        postWriteErrors: [],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage: (left, right) => ({
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0),
+      }),
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      reviseMode: "spot-fix",
+      maxReviseRounds: 2,
+      unboundedReview: true,
+    });
+
+    expect(reviseChapter).toHaveBeenCalledTimes(6);
+    expect(auditChapter).toHaveBeenCalledTimes(7);
+    expect(result.autoReview.reviseRoundsUsed).toBe(6);
+    expect(result.autoReview.stoppedByMaxRounds).toBe(false);
+    expect(result.auditResult.passed).toBe(true);
+  });
+
+  it("still stops unbounded review when token usage crosses the safety threshold", async () => {
+    const draft = "字".repeat(220);
+    const failingAudit = createAuditResult({
+      passed: false,
+      issues: [{
+        severity: "critical",
+        category: "continuity",
+        description: "still broken",
+        suggestion: "fix it",
+      }],
+      summary: "needs work",
+    });
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(failingAudit);
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: draft,
+      wordCount: 220,
+      fixedIssues: ["noop"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn().mockResolvedValue({
+      content: draft,
+      wordCount: 220,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    });
+    let usageCall = 0;
+    const addUsage = (left: { promptTokens: number; completionTokens: number; totalTokens: number }, right?: { promptTokens: number; completionTokens: number; totalTokens: number }) => {
+      usageCall += 1;
+      const extra = usageCall >= 3 ? 150_000 : 0;
+      return {
+        promptTokens: left.promptTokens + (right?.promptTokens ?? 0),
+        completionTokens: left.completionTokens + (right?.completionTokens ?? 0),
+        totalTokens: left.totalTokens + (right?.totalTokens ?? 0) + extra,
+      };
+    };
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 1,
+      initialOutput: {
+        content: draft,
+        wordCount: 220,
+        postWriteErrors: [],
+      },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage,
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [] as Array<{ severity: "warn" | "block" }>, issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      reviseMode: "spot-fix",
+      maxReviseRounds: 2,
+      unboundedReview: true,
+    });
+
+    expect(reviseChapter).toHaveBeenCalledTimes(1);
+    expect(auditChapter).toHaveBeenCalledTimes(2);
+    expect(result.autoReview.stoppedByMaxRounds).toBe(true);
+    expect(result.autoReview.stopReason).toContain("token");
+  });
+
   it("continues structural repair rounds when re-audit returns no issues but still fails", async () => {
     const draft = "字".repeat(220);
     const firstAudit = createAuditResult({

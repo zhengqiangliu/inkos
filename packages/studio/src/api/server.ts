@@ -843,6 +843,7 @@ interface AutoAuditCycleResult {
   readonly audits: ReadonlyArray<NormalizedAuditDraftSummary>;
   readonly revisions: ReadonlyArray<{
     readonly round: number;
+    readonly mode: AutoReviseMode;
     readonly reviseResult: PipelineReviseDraftResult;
     readonly reviseAudit: NormalizedReviseAuditSummary | null;
     readonly basisIssueTexts: ReadonlyArray<string>;
@@ -946,7 +947,7 @@ const STRUCTURAL_AUDIT_SIGNALS = [
   "score gate",
 ];
 
-function hasStructuralAuditSignals(audit: Pick<NormalizedAuditDraftSummary, "issueTexts">): boolean {
+function hasStructuralAuditTextSignals(audit: Pick<NormalizedAuditDraftSummary, "issueTexts">): boolean {
   if (audit.issueTexts.length === 0) return false;
   const merged = audit.issueTexts.join("\n").toLowerCase();
   return STRUCTURAL_AUDIT_SIGNALS.some((signal) => merged.includes(signal));
@@ -966,7 +967,7 @@ function resolveAdaptiveMaxReviseRounds(
 ): number {
   if (configuredMaxRounds <= 0) return 0;
   let resolved = configuredMaxRounds;
-  if (audit.severityCounts.warning >= 4 || hasStructuralAuditSignals(audit)) {
+  if (audit.severityCounts.warning >= 4 || hasStructuralAuditTextSignals(audit)) {
     resolved = Math.max(resolved, 4);
   }
   if (audit.severityCounts.critical >= 2) {
@@ -980,12 +981,14 @@ function resolveAdaptiveReviseMode(
   audit: Pick<NormalizedAuditDraftSummary, "issueTexts">,
   reviseRound: number,
   options?: {
+    forceRework?: boolean;
     forceRewrite?: boolean;
   },
 ): AutoReviseMode {
+  if (options?.forceRework) return "rework";
   if (options?.forceRewrite) return "rewrite";
   if (configuredMode !== "spot-fix") return configuredMode;
-  if (!hasStructuralAuditSignals(audit)) {
+  if (!hasStructuralAuditTextSignals(audit)) {
     // Pure word-count deficiency: use rewrite (broader than spot-fix but lighter than rework)
     if (isLengthOnlyIssueTexts(audit.issueTexts)) return "rewrite";
     return "spot-fix";
@@ -1041,6 +1044,19 @@ function buildStructuralStagnationOverrideIssues(
   }));
 }
 
+function buildRevisionStagnationOverrideIssues(args: {
+  readonly previousMode: AutoReviseMode;
+  readonly previousStatus: string;
+  readonly reviseRound: number;
+}): AutoReviewStructuredIssue[] {
+  return [{
+    severity: "critical",
+    category: "revision_stagnation",
+    description: `第${Math.max(1, args.reviseRound - 1)}轮${args.previousMode}修订返回 ${args.previousStatus}，未产生可应用正文变化。`,
+    suggestion: "本轮必须重构问题段落，先明确要改动的具体段落，再输出真正不同的修订稿。",
+  }];
+}
+
 function detectStructuralStagnation(args: {
   basisAudit: Pick<NormalizedAuditDraftSummary, "issueTexts" | "score" | "issueCount">;
   previousAudit?: Pick<NormalizedAuditDraftSummary, "score" | "issueCount">;
@@ -1066,7 +1082,7 @@ function detectStructuralStagnation(args: {
   if (unresolvedStructuralIssues.length < args.minUnresolvedStructuralIssues) {
     return { stalled: false, unresolvedStructuralIssues };
   }
-  if (!hasStructuralAuditSignals(args.basisAudit)) {
+  if (!hasStructuralAuditTextSignals(args.basisAudit)) {
     return { stalled: false, unresolvedStructuralIssues };
   }
   const scoreDelta = args.basisAudit.score - args.previousAudit.score;
@@ -1080,6 +1096,7 @@ function buildReviseStrategyReason(args: {
   resolvedMode: AutoReviseMode;
   reviseRound: number;
   stagnationStalled: boolean;
+  previousRevisionWasNoop: boolean;
   failedOutlineDeviationDimension: boolean;
   unresolvedIssueCountFromPrevRound: number;
   failureGate: AuditFailureGate;
@@ -1091,6 +1108,9 @@ function buildReviseStrategyReason(args: {
   }
   if (args.stagnationStalled) {
     return "检测到结构问题连续未收敛，已升级为 rewrite 并注入结构化修订约束。";
+  }
+  if (args.previousRevisionWasNoop) {
+    return "上一轮修订未产生有效正文变化，已升级为 rework 并补充修订停滞约束。";
   }
   if (args.configuredMode === "spot-fix" && args.resolvedMode === "rework") {
     return "检测到结构性审计信号，首轮由 spot-fix 升级为 rework。";
@@ -1332,13 +1352,14 @@ function buildAutoReviewAuditEventState(params: {
   round: number;
   maxReviseRounds: number;
   passed: boolean;
+  unboundedReview?: boolean;
   stopReason?: string;
 }): {
   autoReviewFinal: boolean;
   autoReviewState: "retrying" | "passed" | "failed-max-rounds" | "failed-single-audit";
   autoReviewStopReason?: string;
 } {
-  const { round, maxReviseRounds, passed } = params;
+  const { round, maxReviseRounds, passed, unboundedReview } = params;
   if (maxReviseRounds <= 0) {
     return {
       autoReviewFinal: true,
@@ -1349,6 +1370,12 @@ function buildAutoReviewAuditEventState(params: {
     return {
       autoReviewFinal: true,
       autoReviewState: "passed",
+    };
+  }
+  if (unboundedReview) {
+    return {
+      autoReviewFinal: false,
+      autoReviewState: "retrying",
     };
   }
   if (round <= maxReviseRounds) {
@@ -1498,6 +1525,7 @@ async function runAuditWithAutoRevise(args: {
   const audits: NormalizedAuditDraftSummary[] = [];
   const revisions: Array<{
     round: number;
+    mode: AutoReviseMode;
     reviseResult: PipelineReviseDraftResult;
     reviseAudit: NormalizedReviseAuditSummary | null;
     basisIssueTexts: string[];
@@ -1544,6 +1572,10 @@ async function runAuditWithAutoRevise(args: {
   for (let reviseRound = 1; reviseRound <= effectiveMaxReviseRounds; reviseRound += 1) {
     const basisAudit = currentAudit;
     const previousRevision = revisions.length > 0 ? revisions[revisions.length - 1] : undefined;
+    const previousRevisionWasNoop = Boolean(
+      previousRevision
+      && (!previousRevision.reviseResult.applied || previousRevision.reviseResult.status === "unchanged"),
+    );
     const previousAudit = audits.length > 1 ? audits[audits.length - 2] : undefined;
     const stagnation = detectStructuralStagnation({
       basisAudit,
@@ -1561,6 +1593,7 @@ async function runAuditWithAutoRevise(args: {
       basisAudit,
       reviseRound,
       {
+        forceRework: previousRevisionWasNoop,
         forceRewrite: stagnation.stalled || hasFailedOutlineDeviationDimension(basisAudit),
       },
     );
@@ -1570,15 +1603,24 @@ async function runAuditWithAutoRevise(args: {
         { issueResolutions: previousRevision.issueResolutions.map((item) => ({ issue: item.issue, outcome: item.outcome })) },
       )
       : [];
+    const revisionStagnationOverrides = previousRevisionWasNoop && previousRevision
+      ? buildRevisionStagnationOverrideIssues({
+          previousMode: previousRevision.mode,
+          previousStatus: previousRevision.reviseResult.status,
+          reviseRound,
+        })
+      : [];
     const structuralStagnationOverrides = stagnation.stalled
       ? buildStructuralStagnationOverrideIssues(stagnation.unresolvedStructuralIssues)
       : [];
     if (stagnation.stalled) {
       structuralStagnationObserved = true;
     }
-    const mergedOverrideIssues = structuralStagnationOverrides.length > 0
-      ? [...structuralStagnationOverrides, ...prioritizedOverrideIssues]
-      : prioritizedOverrideIssues;
+    const mergedOverrideIssues = [
+      ...revisionStagnationOverrides,
+      ...structuralStagnationOverrides,
+      ...prioritizedOverrideIssues,
+    ];
     const unresolvedIssueIdsFromPrevRound = collectUnresolvedIssueIdsFromRevision(previousRevision);
     const mustFixFirstIssueIds = computeMustFixFirstIssueIds({
       basisAudit,
@@ -1594,6 +1636,7 @@ async function runAuditWithAutoRevise(args: {
       failureGate: basisAudit.failureGate,
       score: basisAudit.score,
       passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+      previousRevisionWasNoop,
       unresolvedIssueIdsFromPrevRound,
       ...(mustFixFirstIssueIds.length > 0 ? { mustFixFirstIssueIds } : {}),
       ...(Array.isArray(basisAudit.dimensionChecks) && basisAudit.dimensionChecks.length > 0
@@ -1611,6 +1654,7 @@ async function runAuditWithAutoRevise(args: {
       resolvedMode: reviseMode,
       reviseRound,
       stagnationStalled: stagnation.stalled,
+      previousRevisionWasNoop,
       failedOutlineDeviationDimension: hasFailedOutlineDeviationDimension(basisAudit),
       unresolvedIssueCountFromPrevRound: unresolvedIssueIdsFromPrevRound.length,
       failureGate: basisAudit.failureGate,
@@ -1647,6 +1691,7 @@ async function runAuditWithAutoRevise(args: {
       : [];
     const revisionEntry = {
       round: reviseRound,
+      mode: reviseMode,
       reviseResult,
       reviseAudit,
       basisIssueTexts: [...basisAudit.issueTexts],
@@ -5279,6 +5324,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           round: payload.round,
           maxRounds: payload.maxReviseRounds,
           phase: payload.phase,
+          unboundedReview: payload.unboundedReview,
         });
         overrides?.onTaskSignal?.({
           kind: "audit:start",
@@ -5286,6 +5332,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           chapterNumber: payload.chapterNumber,
           round: payload.round,
           maxReviseRounds: payload.maxReviseRounds,
+          unboundedReview: payload.unboundedReview,
           phase: payload.phase,
         });
       },
@@ -5318,6 +5365,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           round: payload.round,
           maxReviseRounds: payload.maxReviseRounds,
           passed: payload.audit.passed,
+          unboundedReview: payload.unboundedReview,
         });
         if (!overrides?.runIdForSSE && autoReviewState.autoReviewFinal) {
           const terminalState = autoReviewState.autoReviewState === "failed-max-rounds"
@@ -5347,6 +5395,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           round: payload.round,
           maxRounds: payload.maxReviseRounds,
           phase: payload.phase,
+          unboundedReview: payload.unboundedReview,
           passed: payload.audit.passed,
           issueCount: payload.audit.issueCount,
           score: payload.audit.score,
@@ -5366,6 +5415,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           chapterNumber: payload.chapterNumber,
           round: payload.round,
           maxReviseRounds: payload.maxReviseRounds,
+          unboundedReview: payload.unboundedReview,
           phase: payload.phase,
           passed: payload.audit.passed,
           issueCount: payload.audit.issueCount,
@@ -5385,6 +5435,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           phase: payload.phase,
           mode: payload.mode,
           autoTriggeredByAudit: true,
+          unboundedReview: payload.unboundedReview,
         });
         overrides?.onTaskSignal?.({
           kind: "revise:start",
@@ -5392,6 +5443,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           chapterNumber: payload.chapterNumber,
           round: payload.round,
           maxReviseRounds: payload.maxReviseRounds,
+          unboundedReview: payload.unboundedReview,
           phase: payload.phase,
           mode: payload.mode,
         });
@@ -5454,6 +5506,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           wordCount: payload.wordCount,
           status: reviseStatus,
           applied: payload.applied,
+          unboundedReview: payload.unboundedReview,
           ...(reviseAudit ? { audit: reviseAudit } : {}),
         });
         overrides?.onTaskSignal?.({
@@ -5462,6 +5515,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
           chapterNumber: payload.chapterNumber,
           round: payload.round,
           maxReviseRounds: payload.maxReviseRounds,
+          unboundedReview: payload.unboundedReview,
           phase: payload.phase,
           mode: payload.mode,
           wordCount: payload.wordCount,
@@ -5893,6 +5947,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const id = c.req.param("id");
     const body = await c.req.json<{
       type?: "write" | "audit";
+      source?: "book-detail" | "task-center";
       requestedChapters?: number;
       auditChapterStart?: number;
       auditChapterEnd?: number;

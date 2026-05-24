@@ -128,6 +128,7 @@ export class ReviserAgent extends BaseAgent {
           textual: number;
         }>;
         primaryIssueClass?: "none" | "structural" | "textual" | "mixed";
+        previousRevisionWasNoop?: boolean;
         dimensionChecks?: ReadonlyArray<{
           dimension: string;
           status: "pass" | "warning" | "failed";
@@ -255,6 +256,9 @@ export class ReviserAgent extends BaseAgent {
         : failureGate === "none"
           ? `\n- 门禁策略：none。保持保守修改，优先完成 must-fix 与未收敛项。`
           : "";
+    const revisionStagnationBlock = reviseContext?.previousRevisionWasNoop === true
+      ? "\n- 修订停滞：上一轮修订未产生可应用正文变化。本轮必须重构问题段落，先列出将要改动的具体段落，再输出真正不同的修订稿。"
+      : "";
     const currentScore = Number.isFinite(Number(reviseContext?.score))
       ? Math.trunc(Number(reviseContext?.score))
       : undefined;
@@ -281,8 +285,8 @@ export class ReviserAgent extends BaseAgent {
     const primaryIssueClassBlock = primaryIssueClass
       ? `\n- 主问题类型：${primaryIssueClass}`
       : "";
-    const auditGateBlock = failureGate || Number.isFinite(Number(reviseContext?.score)) || Number.isFinite(Number(reviseContext?.passScoreThreshold)) || mustFixFirstBlock.length > 0
-      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${typeof currentScore === "number" ? `\n- 当前评分: ${currentScore}` : ""}${typeof passScoreThreshold === "number" ? `\n- 通过阈值: ${passScoreThreshold}` : ""}${typeof scoreShortfall === "number" ? `\n- 距离通过阈值还差: ${scoreShortfall}` : ""}${failureGateStrategyBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
+    const auditGateBlock = failureGate || Number.isFinite(Number(reviseContext?.score)) || Number.isFinite(Number(reviseContext?.passScoreThreshold)) || mustFixFirstBlock.length > 0 || revisionStagnationBlock.length > 0
+      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${typeof currentScore === "number" ? `\n- 当前评分: ${currentScore}` : ""}${typeof passScoreThreshold === "number" ? `\n- 通过阈值: ${passScoreThreshold}` : ""}${typeof scoreShortfall === "number" ? `\n- 距离通过阈值还差: ${scoreShortfall}` : ""}${failureGateStrategyBlock}${revisionStagnationBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
       : "";
     const hooksWorkingSet = governedMode && options?.contextPackage
       ? buildGovernedHookWorkingSet({

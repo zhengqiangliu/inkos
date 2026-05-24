@@ -78,6 +78,7 @@ describe("BookTaskStore", () => {
     const tasks = await store.list("demo-book");
     expect(tasks).toHaveLength(1);
     expect(tasks[0]?.id).toBe("task-legacy");
+    expect(tasks[0]?.source).toBe("book-detail");
 
     const persisted = JSON.parse(await readFile(join(root, "book-tasks.json"), "utf-8")) as {
       tasks: Array<{ id: string; bookId: string }>;
@@ -90,6 +91,38 @@ describe("BookTaskStore", () => {
 
     await store.deleteBook("demo-book");
     expect(await store.list("demo-book")).toEqual([]);
+  });
+
+  it("defaults task source to book-detail and persists task-center writes", async () => {
+    root = await mkdtemp(join(tmpdir(), "inkos-task-source-"));
+    await mkdir(join(root, "books", "demo-book", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({ id: "demo-book", title: "Demo Book" }), "utf-8");
+    await mkdir(join(root, "books", "demo-book-2", "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book-2", "book.json"), JSON.stringify({ id: "demo-book-2", title: "Demo Book 2" }), "utf-8");
+
+    const store = new BookTaskStore(new StateManager(root));
+    const defaultTask = await store.create("demo-book", {
+      requestedChapters: 1,
+      title: "Default source task",
+      type: "write",
+    });
+    const taskCenterTask = await store.create("demo-book-2", {
+      requestedChapters: 1,
+      title: "Task center task",
+      type: "write",
+      source: "task-center",
+    });
+
+    expect(defaultTask.source).toBe("book-detail");
+    expect(taskCenterTask.source).toBe("task-center");
+
+    const persisted = JSON.parse(await readFile(join(root, "book-tasks.json"), "utf-8")) as {
+      tasks: Array<{ title: string; source?: string }>;
+    };
+    expect(persisted.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "Default source task", source: "book-detail" }),
+      expect.objectContaining({ title: "Task center task", source: "task-center" }),
+    ]));
   });
 
   it("waits for a cross-process project lock before writing task changes", async () => {

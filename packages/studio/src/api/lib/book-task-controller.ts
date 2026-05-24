@@ -15,6 +15,7 @@ interface TaskProgressSignal {
   readonly chapterNumber?: number;
   readonly round?: number;
   readonly maxReviseRounds?: number;
+  readonly unboundedReview?: boolean;
   readonly mode?: string;
   readonly passed?: boolean;
   readonly score?: number;
@@ -84,6 +85,7 @@ export interface BookTaskControllerDeps {
 interface WriteNextChapterOptions {
   readonly quickMode?: boolean;
   readonly allowPendingAuditFailure?: boolean;
+  readonly unboundedReview?: boolean;
 }
 
 function nowIso(): string {
@@ -104,6 +106,7 @@ function summarizeTask(task: BookTask): Partial<BookTask> {
     id: task.id,
     bookId: task.bookId,
     type: task.type,
+    source: task.source,
     title: task.title,
     status: task.status,
     stage: task.stage,
@@ -246,6 +249,16 @@ function stageLabel(stage: string): string {
 
 function normalizeTaskType(type: unknown): BookTaskType {
   return type === "audit" ? "audit" : "write";
+}
+
+function normalizeTaskSource(source: unknown): "book-detail" | "task-center" {
+  return source === "task-center" ? "task-center" : "book-detail";
+}
+
+function resolveWriteTaskMode(task: BookTask): { readonly unboundedReview: boolean } {
+  return {
+    unboundedReview: normalizeTaskSource(task.source) === "task-center" && task.type === "write",
+  };
 }
 
 function taskTypeStartLog(type: BookTaskType, requestedChapters: number): string {
@@ -534,6 +547,7 @@ export class BookTaskController {
     const auditChapterStart = normalizeNullableNumber(payload.auditChapterStart);
     const auditChapterEnd = normalizeNullableNumber(payload.auditChapterEnd);
     const type = normalizeTaskType(payload.type);
+    const source = normalizeTaskSource(payload.source);
     const requestedChapters = type === "audit" && (auditChapterStart !== null || auditChapterEnd !== null)
       ? Math.max(1, Math.abs((auditChapterEnd ?? auditChapterStart ?? nextChapter) - (auditChapterStart ?? auditChapterEnd ?? nextChapter)) + 1)
       : normalizeChapterCount(payload.requestedChapters, defaultRequested);
@@ -550,6 +564,7 @@ export class BookTaskController {
     const task = await this.store.create(bookId, {
       ...payload,
       type,
+      source,
       requestedChapters,
       auditChapterStart,
       auditChapterEnd,
@@ -949,7 +964,7 @@ export class BookTaskController {
 
     if (signal.kind === "audit:start") {
       const detail = signal.chapterNumber
-        ? `第 ${signal.chapterNumber} 章审计中${typeof signal.round === "number" && typeof signal.maxReviseRounds === "number" ? `（第 ${signal.round}/${signal.maxReviseRounds} 轮）` : ""}`
+        ? `第 ${signal.chapterNumber} 章审计中${typeof signal.round === "number" ? `（第 ${signal.round}/${signal.unboundedReview ? "∞" : (Number.isFinite(signal.maxReviseRounds) ? signal.maxReviseRounds : "∞")} 轮）` : ""}`
         : "审计中";
       await this.updateStage(current, "audit", detail);
       return;
@@ -965,7 +980,7 @@ export class BookTaskController {
 
     if (signal.kind === "revise:start") {
       const detail = signal.chapterNumber
-        ? `第 ${signal.chapterNumber} 章修订中${typeof signal.mode === "string" ? `（${signal.mode}）` : ""}${typeof signal.round === "number" && typeof signal.maxReviseRounds === "number" ? `，第 ${signal.round}/${signal.maxReviseRounds} 轮` : ""}`
+        ? `第 ${signal.chapterNumber} 章修订中${typeof signal.mode === "string" ? `（${signal.mode}）` : ""}${typeof signal.round === "number" ? `，第 ${signal.round}/${signal.unboundedReview ? "∞" : (Number.isFinite(signal.maxReviseRounds) ? signal.maxReviseRounds : "∞")} 轮` : ""}`
         : "修订中";
       await this.updateStage(current, "revise", detail);
       return;
@@ -1577,6 +1592,7 @@ export class BookTaskController {
       }
 
       task = await this.updateStage(task, "prepare", taskTypePrepareStage(taskType));
+      const writeTaskMode = resolveWriteTaskMode(task);
       let activeChapterNumber: number | null = null;
       let chapterBaseWords = task.writtenWords ?? 0;
       let chapterBaseTokenUsage = task.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
@@ -1663,7 +1679,7 @@ export class BookTaskController {
           bookId,
           task.options.wordCount ?? undefined,
           undefined,
-          { quickMode: task.options.quickMode, allowPendingAuditFailure: true },
+          { quickMode: task.options.quickMode, allowPendingAuditFailure: true, unboundedReview: writeTaskMode.unboundedReview },
         );
 
         clearHeartbeat();
