@@ -17,11 +17,14 @@ export interface AutoReviewChapterState {
 }
 
 function normalizeReviseRoundsUsed(state: {
+  readonly phase: "audit" | "revise";
   readonly reviseRoundsUsed?: number;
   readonly round: number;
   readonly maxRounds: number;
 }): number {
-  const fallback = Math.max(0, state.round - 1);
+  const fallback = state.phase === "revise"
+    ? Math.max(1, state.round)
+    : Math.max(0, state.round - 1);
   const raw = Number.isFinite(Number(state.reviseRoundsUsed)) ? Number(state.reviseRoundsUsed) : fallback;
   return Math.max(0, Math.min(Math.trunc(raw), Math.max(0, state.maxRounds)));
 }
@@ -59,7 +62,8 @@ export function describeExecutionAutoReview(state: AutoReviewProgressState | und
   }
 
   const reviseRoundsUsed = normalizeReviseRoundsUsed(state);
-  const reviseRoundText = `${reviseRoundsUsed}/${state.maxRounds}`;
+  const currentRound = Math.max(1, Math.trunc(state.round));
+  const reviseRoundText = `${currentRound}/${state.maxRounds}`;
   if (state.phase === "revise" && !state.final) {
     const meta = buildExecutionAutoReviewMeta(state);
     return {
@@ -119,17 +123,18 @@ export function describeExecutionAutoReview(state: AutoReviewProgressState | und
 
 export function describeChapterAutoReview(state: AutoReviewChapterState | undefined): AutoReviewDisplay | null {
   if (!state || state.maxRounds <= 0) return null;
+  const round = Math.max(1, Math.trunc(state.round));
   if (state.phase === "revise") {
     return {
-      text: `自动修订：第${state.round}/${state.maxRounds}轮`,
-      compactText: `自动修订 ${state.round}/${state.maxRounds}`,
+      text: `自动修订：第${round}/${state.maxRounds}轮`,
+      compactText: `自动修订 ${round}/${state.maxRounds}`,
       tone: "info",
     };
   }
   if (state.phase === "audit") {
     return {
-      text: `自动复审：第${state.round}/${state.maxRounds + 1}轮`,
-      compactText: `自动复审 ${state.round}/${state.maxRounds + 1}`,
+      text: `自动复审：第${round}/${state.maxRounds + 1}轮`,
+      compactText: `自动复审 ${round}/${state.maxRounds + 1}`,
       tone: "info",
     };
   }

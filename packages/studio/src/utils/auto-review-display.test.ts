@@ -17,6 +17,35 @@ describe("describeExecutionAutoReview", () => {
     });
   });
 
+  it("defaults active revise rounds to one-based display when usage is omitted", () => {
+    expect(describeExecutionAutoReview({
+      enabled: true,
+      phase: "revise",
+      round: 1,
+      maxRounds: 3,
+      final: false,
+    })).toMatchObject({
+      text: "自动修订：第1/3轮",
+      compactText: "自动修订 1/3",
+      tone: "info",
+    });
+  });
+
+  it("ignores zero revise usage when a revise round is active", () => {
+    expect(describeExecutionAutoReview({
+      enabled: true,
+      phase: "revise",
+      round: 1,
+      maxRounds: 3,
+      final: false,
+      reviseRoundsUsed: 0,
+    })).toMatchObject({
+      text: "自动修订：第1/3轮",
+      compactText: "自动修订 1/3",
+      tone: "info",
+    });
+  });
+
   it("formats terminal failed-max-rounds status", () => {
     expect(describeExecutionAutoReview({
       enabled: true,
@@ -71,15 +100,15 @@ describe("describeChapterAutoReview", () => {
   it("formats chapter revise/audit hints", () => {
     expect(describeChapterAutoReview({
       phase: "revise",
-      round: 2,
+      round: 0,
       maxRounds: 2,
     })).toMatchObject({
-      text: "自动修订：第2/2轮",
+      text: "自动修订：第1/2轮",
       tone: "info",
     });
     expect(describeChapterAutoReview({
       phase: "audit",
-      round: 1,
+      round: 0,
       maxRounds: 2,
     })).toMatchObject({
       text: "自动复审：第1/3轮",

@@ -350,6 +350,7 @@ export interface ReviseDraftOptions {
     readonly failureGate?: "critical" | "score" | "none";
     readonly score?: number;
     readonly passScoreThreshold?: number;
+    readonly scoreShortfall?: number;
     readonly unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
     readonly mustFixFirstIssueIds?: ReadonlyArray<string>;
     readonly issueClassCounts?: Readonly<{

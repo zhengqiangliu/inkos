@@ -1041,4 +1041,49 @@ describe("attachSessionStreamListeners", () => {
       });
     }
   });
+
+  it("keeps revise progress one-based while a revise round is active", () => {
+    const eventSource = new MockEventSource();
+    const state = createState();
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 92,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    eventSource.emit("tool:start", {
+      sessionId: "s1",
+      runId: "r1",
+      id: "t92",
+      tool: "sub_agent",
+      args: { agent: "reviser" },
+    });
+    eventSource.emit("revise:start", {
+      sessionId: "s1",
+      runId: "r1",
+      chapter: 10,
+      round: 1,
+      maxRounds: 3,
+      phase: "revise",
+      mode: "rewrite",
+      autoTriggeredByAudit: true,
+    });
+
+    const session = state.get().sessions.s1;
+    const last = session.messages[session.messages.length - 1];
+    const tool = last?.parts?.find((part) => part.type === "tool");
+    expect(tool?.type).toBe("tool");
+    if (tool?.type === "tool") {
+      expect(tool.execution.autoReview).toMatchObject({
+        phase: "revise",
+        round: 1,
+        maxRounds: 3,
+        reviseRoundsUsed: 1,
+      });
+    }
+  });
 });

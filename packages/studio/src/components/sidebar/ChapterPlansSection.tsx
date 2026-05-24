@@ -1,8 +1,8 @@
-﻿import { createPortal } from "react-dom";
+import { createPortal } from "react-dom";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchJson } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
-import { X, Sparkles, ChevronDown, ChevronUp, RotateCcw, Check, Lock, History } from "lucide-react";
+import { X, Sparkles, ChevronDown, ChevronUp, RotateCcw, Check, Lock, History, RefreshCw } from "lucide-react";
 
 interface ChapterPlan {
   chapterNumber: number;
@@ -140,6 +140,7 @@ interface ChapterPlansSectionProps {
   readonly nextChapter: number;
   readonly targetChapters: number;
   readonly refreshToken?: number;
+  readonly onRefresh?: () => void;
   readonly onSelectChapter?: (chapterNumber: number) => void;
   readonly selectedChapter?: number | null;
   readonly chapterNumbers?: ReadonlyArray<number>;
@@ -151,6 +152,7 @@ export function ChapterPlansSection({
   nextChapter,
   targetChapters,
   refreshToken,
+  onRefresh,
   onSelectChapter,
   selectedChapter: selectedChapterProp = null,
   chapterNumbers = [],
@@ -244,12 +246,13 @@ export function ChapterPlansSection({
         setActionSummary(null);
       }
       await refetch();
+      onRefresh?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRunning(null);
     }
-  }, [refetch]);
+  }, [onRefresh, refetch]);
 
   const missingChapters = useMemo(() => {
     return computeMissingChapterNumbers(plans, nextChapter, chapterNumbers);
@@ -440,12 +443,30 @@ export function ChapterPlansSection({
   ), []);
 
   const hasChapterContent = useCallback((chapterNumber: number): boolean => chapterContentNumberSet.has(chapterNumber), [chapterContentNumberSet]);
+  const handleForceRefresh = useCallback(() => {
+    void refetch();
+    onRefresh?.();
+  }, [onRefresh, refetch]);
 
   return (
     <SidebarCard
       title="章节分章设计"
       contentClassName="space-y-2"
-      actions={running ? <span className="text-[10px] text-primary">{running}</span> : null}
+      actions={(
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleForceRefresh}
+            className="inline-flex items-center gap-1 rounded-md border border-border/40 px-2 py-1 text-[10px] text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+            title="强制刷新分章设计列表"
+            aria-label="强制刷新分章设计列表"
+          >
+            <RefreshCw size={10} className={running ? "animate-spin" : ""} />
+            刷新
+          </button>
+          {running ? <span className="text-[10px] text-primary">{running}</span> : null}
+        </div>
+      )}
       className="flex min-h-0 flex-1 flex-col"
     >
       <div className="rounded-lg border border-border/30 bg-secondary/15 p-2.5 space-y-2">
@@ -1142,3 +1163,5 @@ export function EditPlanModal({ bookId, chapterNumber, plan, canEdit, needsRevie
     </div>
   );
 }
+
+

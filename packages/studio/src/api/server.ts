@@ -6135,6 +6135,15 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     try {
       const index = await state.loadChapterIndex(id);
+      const target = index.find((ch) => ch.number === num);
+      if (!target) {
+        return c.json({ error: `Chapter ${num} not found` }, 404);
+      }
+      const latestAudit = Array.isArray(target.auditHistory) ? target.auditHistory[target.auditHistory.length - 1] : undefined;
+      const latestScore = typeof latestAudit?.score === "number" ? Math.trunc(latestAudit.score) : null;
+      if (!latestAudit || latestScore === null || latestScore < AUDIT_PASS_SCORE_THRESHOLD || latestAudit.passed !== true) {
+        return c.json({ error: `Chapter ${num} audit score must be at least ${AUDIT_PASS_SCORE_THRESHOLD} before approval.` }, 409);
+      }
       const updated = index.map((ch) =>
         ch.number === num ? { ...ch, status: "approved" as const } : ch,
       );

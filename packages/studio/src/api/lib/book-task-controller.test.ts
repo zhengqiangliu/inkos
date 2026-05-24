@@ -418,6 +418,18 @@ describe("BookTaskController audit gating", () => {
         issues: [],
       },
     });
+    const auditIssues = [{
+      severity: "warning",
+      category: "结构",
+      description: "节奏偏慢",
+      suggestion: "提高冲突密度",
+    }];
+    auditDraft.mockResolvedValueOnce({
+      passed: false,
+      issues: auditIssues,
+      summary: "needs revision",
+      report: "audit report body",
+    });
     const loadChapterIndex = vi.fn(async () => chapterIndex);
     const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
       chapterIndex = nextIndex as typeof chapterIndex;
@@ -463,7 +475,21 @@ describe("BookTaskController audit gating", () => {
 
     expect(auditDraft).toHaveBeenCalledTimes(1);
     expect(reviseDraft).toHaveBeenCalledTimes(1);
-    expect(reviseDraft).toHaveBeenCalledWith(bookId, 3);
+    expect(reviseDraft).toHaveBeenCalledWith(
+      bookId,
+      3,
+      "rewrite",
+      expect.objectContaining({
+        userBrief: expect.stringContaining("## 任务中心自动修订约束"),
+        reviseContext: expect.objectContaining({
+          failureGate: "score",
+          score: 40,
+          passScoreThreshold: 80,
+          scoreShortfall: 40,
+          mustFixFirstIssueIds: expect.arrayContaining(["ISSUE-01"]),
+        }),
+      }),
+    );
     expect(saveChapterIndex).toHaveBeenCalled();
     expect(finalTask.status).toBe("succeeded");
     expect(finalTask.result).toMatchObject({
@@ -590,6 +616,205 @@ describe("BookTaskController audit gating", () => {
       ],
     });
     expect(broadcasts.some((item) => item.event === "book-task:complete")).toBe(true);
+  });
+
+  it("keeps audit task below 80 in revise flow until it passes threshold", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    let chapterIndex = [{
+      number: 3,
+      title: "Ch 3",
+      status: "drafted",
+      wordCount: 2400,
+      auditIssueCount: 2,
+      updatedAt: "2026-05-20T00:00:00.000Z",
+      fileName: "ch03.md",
+      auditHistory: [{
+        auditedAt: "2026-05-20T00:00:00.000Z",
+        passed: true,
+        issueCount: 2,
+        score: 72,
+        summary: "low score pass",
+      }],
+    }];
+
+    const broadcasts: Array<{ event: string; data: unknown }> = [];
+    const auditDraft = vi.fn().mockResolvedValue({
+      passed: true,
+      issues: [],
+      summary: "audit ok",
+      report: "audit report body",
+    });
+    const reviseDraft = vi.fn().mockResolvedValue({
+      status: "ready-for-review",
+      applied: true,
+      audit: {
+        passed: true,
+        score: 92,
+        issueCount: 0,
+        severityCounts: { critical: 0, warning: 0, info: 0 },
+        summary: "repaired",
+        report: "revised report",
+        issues: [],
+      },
+    });
+    const loadChapterIndex = vi.fn(async () => chapterIndex);
+    const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
+      chapterIndex = nextIndex as typeof chapterIndex;
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+        loadChapterIndex,
+        saveChapterIndex,
+        getNextChapterNumber: async () => 4,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft,
+        reviseDraft,
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: (event, data) => {
+        broadcasts.push({ event, data });
+      },
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "audit",
+      requestedChapters: 1,
+      auditChapterStart: 3,
+      auditChapterEnd: 3,
+      retryEnabled: false,
+    });
+
+    await vi.waitFor(async () => {
+      const current = await controller.get(bookId, task.id);
+      expect(current?.status).toBe("succeeded");
+    });
+
+    expect(auditDraft).toHaveBeenCalledTimes(1);
+    expect(reviseDraft).toHaveBeenCalledTimes(1);
+    expect(saveChapterIndex).toHaveBeenCalled();
+    expect(broadcasts.some((item) => item.event === "book-task:error")).toBe(false);
+    expect(chapterIndex[0]).toMatchObject({
+      status: "ready-for-review",
+      auditIssueCount: 0,
+      auditHistory: [
+        expect.objectContaining({
+          passed: true,
+          score: 72,
+        }),
+        expect.objectContaining({
+          passed: true,
+          score: 92,
+        }),
+      ],
+    });
+  });
+
+  it("switches to rework for task-center audit revisions with critical issues", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    let chapterIndex = [{
+      number: 3,
+      title: "Ch 3",
+      status: "drafted",
+      wordCount: 2400,
+      auditIssueCount: 1,
+      updatedAt: "2026-05-20T00:00:00.000Z",
+      fileName: "ch03.md",
+      auditHistory: [],
+    }];
+
+    const auditDraft = vi.fn().mockResolvedValue({
+      passed: false,
+      issues: [
+        {
+          severity: "critical",
+          category: "plot",
+          description: "main conflict broken",
+          suggestion: "restore main conflict",
+        },
+      ],
+      summary: "critical failure",
+      report: "critical report",
+    });
+    const reviseDraft = vi.fn().mockResolvedValue({
+      status: "ready-for-review",
+      applied: true,
+      audit: {
+        passed: true,
+        score: 88,
+        issueCount: 0,
+        severityCounts: { critical: 0, warning: 0, info: 0 },
+        summary: "fixed",
+        report: "fixed report",
+        issues: [],
+      },
+    });
+    const loadChapterIndex = vi.fn(async () => chapterIndex);
+    const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
+      chapterIndex = nextIndex as typeof chapterIndex;
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6 }),
+        loadChapterIndex,
+        saveChapterIndex,
+        getNextChapterNumber: async () => 4,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft,
+        reviseDraft,
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "audit",
+      requestedChapters: 1,
+      auditChapterStart: 3,
+      auditChapterEnd: 3,
+      retryEnabled: false,
+    });
+
+    await vi.waitFor(async () => {
+      const current = await controller.get(bookId, task.id);
+      expect(current?.status).toBe("succeeded");
+    });
+
+    expect(reviseDraft).toHaveBeenCalledWith(
+      bookId,
+      3,
+      "rework",
+      expect.objectContaining({
+        reviseContext: expect.objectContaining({
+          failureGate: "critical",
+          mustFixFirstIssueIds: expect.arrayContaining(["ISSUE-01"]),
+        }),
+      }),
+    );
   });
 
   it("warns once and keeps writing when the latest chapter is state-degraded", async () => {

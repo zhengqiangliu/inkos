@@ -4015,6 +4015,41 @@ describe("createStudioServer daemon lifecycle", () => {
     ]));
   });
 
+  it("rejects chapter approval when latest audit score is below 80", async () => {
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "待通过",
+        status: "ready-for-review",
+        wordCount: 3200,
+        createdAt: "2026-04-07T00:00:00.000Z",
+        updatedAt: "2026-04-07T00:00:00.000Z",
+        auditIssueCount: 2,
+        auditHistory: [
+          {
+            auditedAt: "2026-04-07T00:00:00.000Z",
+            passed: true,
+            issueCount: 2,
+            score: 72,
+            summary: "score too low",
+          },
+        ],
+      },
+    ]);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapters/3/approve", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Chapter 3 audit score must be at least 80 before approval.",
+    });
+  });
+
   it("appends manual chapter-plan edits to history", async () => {
     const bookDir = join(root, "books", "demo-book");
     await mkdir(join(bookDir, "story", "state"), { recursive: true });

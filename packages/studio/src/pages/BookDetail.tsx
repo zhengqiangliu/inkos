@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
@@ -507,6 +507,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
                 nextChapter={nextChapter}
                 targetChapters={targetChapters}
                 refreshToken={chapterPlansRefreshKey}
+                onRefresh={() => setChapterPlansRefreshKey((value) => value + 1)}
                 onSelectChapter={setSelectedPlanChapter}
                 selectedChapter={selectedPlanChapter ?? chapterPlans[0]?.chapterNumber ?? null}
                 chapterNumbers={chapters.map((chapter) => chapter.number)}
@@ -711,6 +712,8 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     </div>
   );
 }
+
+
 
 
 

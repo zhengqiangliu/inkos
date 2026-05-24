@@ -406,7 +406,9 @@ function toAutoReviewProgress(
   const reviseRoundsUsedRaw = Number(payload.reviseRoundsUsed);
   const reviseRoundsUsed = Number.isFinite(reviseRoundsUsedRaw)
     ? Math.max(0, Math.trunc(reviseRoundsUsedRaw))
-    : Math.max(0, round - 1);
+    : phase === "revise"
+      ? round
+      : Math.max(0, round - 1);
   const stopReason = typeof payload.autoReviewStopReason === "string" && payload.autoReviewStopReason.trim().length > 0
     ? payload.autoReviewStopReason.trim()
     : undefined;
@@ -1086,4 +1088,3 @@ export function attachSessionStreamListeners({
     }
   });
 }
-

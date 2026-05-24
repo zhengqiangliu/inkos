@@ -1,8 +1,11 @@
-import type { OnStreamProgress, PipelineConfig, ProjectConfig, StateManager } from "@actalk/inkos-core";
+import type { AuditIssue, OnStreamProgress, PipelineConfig, ProjectConfig, StateManager } from "@actalk/inkos-core";
+import type { ReviseMode } from "@actalk/inkos-core";
+import type { ReviseDraftOptions } from "@actalk/inkos-core/pipeline/runner";
 import { ApiError } from "../errors.js";
 import { persistChapterAuditSummary } from "./chapter-audit-index.js";
 import type { BookTask, BookTaskCreatePayload, BookTaskPatchPayload, BookTaskStatus, BookTaskType, RunLogEntry } from "../../shared/contracts.js";
 import { BookTaskStore } from "./book-task-store.js";
+import { AUDIT_PASS_SCORE_THRESHOLD } from "../../utils/audit-score.js";
 
 type Broadcast = (event: string, data: unknown) => void;
 
@@ -29,16 +32,22 @@ type ResolveRuntimeSelection = (args: {
   readonly selectedModel?: string;
 }) => Promise<{ client?: unknown; model?: string; error?: string }>;
 
-type PipelineFactory = (config: PipelineConfig) => {
-  auditDraft: (bookId: string, chapterNumber?: number) => Promise<unknown>;
-  reviseDraft?: (bookId: string, chapterNumber?: number) => Promise<unknown>;
-  writeNextChapter: (
+type PipelineLike = {
+  readonly auditDraft: (bookId: string, chapterNumber?: number) => Promise<unknown>;
+  readonly reviseDraft?: (
+    bookId: string,
+    chapterNumber?: number,
+    mode?: ReviseMode,
+    options?: ReviseDraftOptions,
+  ) => Promise<unknown>;
+  readonly writeNextChapter: (
     bookId: string,
     wordCount?: number,
     temperatureOverride?: number,
     options?: WriteNextChapterOptions,
   ) => Promise<unknown>;
 };
+type PipelineFactory = (config: PipelineConfig) => PipelineLike;
 
 export interface BookTaskControllerDeps {
   readonly state: StateManager;
@@ -60,6 +69,7 @@ function nowIso(): string {
 }
 
 const MIN_AUDIT_PASS_SCORE = 80;
+const TASK_CENTER_AUDIT_MIN_PASS_SCORE = AUDIT_PASS_SCORE_THRESHOLD;
 
 function normalizeChapterCount(value: unknown, fallback: number): number {
   const numeric = typeof value === "number" ? value : Number(value);
@@ -381,6 +391,81 @@ function countAuditIssueSeverities(issues: ReadonlyArray<{ readonly severity?: s
 function estimateAuditScore(severityCounts: { critical: number; warning: number; info: number }): number {
   const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12;
   return Math.max(0, Math.min(100, raw));
+}
+
+function clipText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function buildTaskCenterRevisionBrief(args: {
+  readonly chapterNumber: number;
+  readonly score: number | null;
+  readonly threshold: number;
+  readonly summary?: string | null;
+  readonly report?: string | null;
+  readonly severityCounts: { critical: number; warning: number; info: number };
+  readonly issues: ReadonlyArray<{
+    readonly severity?: string;
+    readonly category?: string;
+    readonly description?: string;
+    readonly suggestion?: string;
+  }>;
+}): string {
+  const scoreLine = typeof args.score === "number" ? `${args.score}/100` : "未知";
+  const shortfall = typeof args.score === "number"
+    ? Math.max(0, args.threshold - args.score)
+    : null;
+  const topIssues = args.issues
+    .filter((issue) => issue && (issue.severity === "critical" || issue.severity === "warning" || issue.severity === "info"))
+    .slice(0, 5)
+    .map((issue, index) => {
+      const severity = issue.severity ?? "info";
+      const category = issue.category?.trim() || "未分类";
+      const description = issue.description?.trim() || "未提供描述";
+      const suggestion = issue.suggestion?.trim()
+        ? `；建议：${clipText(issue.suggestion.trim(), 120)}`
+        : "";
+      return `${index + 1}. [${severity}] ${category}: ${clipText(description, 180)}${suggestion}`;
+    });
+
+  const reportBlock = args.report?.trim()
+    ? `\n## 审计报告摘要\n${clipText(args.report.trim(), 1200)}`
+    : "";
+
+  return [
+    "## 任务中心自动修订约束",
+    `- 章节：第${args.chapterNumber}章`,
+    `- 审计结论：未通过`,
+    `- 当前评分：${scoreLine}`,
+    `- 通过阈值：${args.threshold}/100`,
+    ...(shortfall !== null ? [`- 距离通过阈值还差：${shortfall}`] : []),
+    `- 严重问题：${args.severityCounts.critical}，警告：${args.severityCounts.warning}，提示：${args.severityCounts.info}`,
+    ...(args.summary?.trim() ? [`- 审计摘要：${args.summary.trim()}`] : []),
+    "## 优先修复项",
+    ...(topIssues.length > 0 ? topIssues : ["- 本轮审计未提供结构化问题明细，请基于审计报告整体收敛修改。"]),
+    "## 修订要求",
+    "- 只围绕上述问题收敛修改，优先清理 critical/warning。",
+    "- 不要扩写无关情节，不要改变主线结论。",
+    "- 如果需要较大改动，优先重组问题段落而不是整章推翻。",
+    reportBlock,
+  ]
+    .filter((line) => typeof line === "string" && line.length > 0)
+    .join("\n");
+}
+
+function buildIssueIdList(
+  issues: ReadonlyArray<{ readonly severity?: string }>,
+  allowedSeverities: ReadonlyArray<string> = ["critical", "warning"],
+): string[] {
+  const issueIds: string[] = [];
+  let counter = 1;
+  for (const issue of issues) {
+    if (!allowedSeverities.includes(issue.severity ?? "")) continue;
+    issueIds.push(`ISSUE-${String(counter).padStart(2, "0")}`);
+    counter += 1;
+  }
+  return issueIds;
 }
 
 export class BookTaskController {
@@ -955,10 +1040,7 @@ export class BookTaskController {
     readonly bookId: string;
     readonly taskId: string;
     readonly task: BookTask;
-    readonly pipeline: {
-      readonly auditDraft: (bookId: string, chapterNumber?: number) => Promise<unknown>;
-      readonly reviseDraft?: (bookId: string, chapterNumber?: number) => Promise<unknown>;
-    };
+    readonly pipeline: PipelineLike;
   }): Promise<void> {
     const { bookId, taskId, pipeline } = args;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -1016,6 +1098,7 @@ export class BookTaskController {
     let auditedChapters = 0;
     let passedChapters = 0;
     let failedChapters = 0;
+    const minPassScore = TASK_CENTER_AUDIT_MIN_PASS_SCORE;
     for (const chapterNumber of chaptersToAudit) {
       latest = await this.requireTask(bookId, taskId);
       if (latest.status === "stopping" || latest.stopRequestedAt) {
@@ -1062,134 +1145,292 @@ export class BookTaskController {
         await this.appendTaskLog(latest, "info", `第 ${chapterNumber} 章不存在，自动忽略。`);
         continue;
       }
-      const chapterAuditSnapshot = extractLatestChapterAuditSnapshot(chapterMeta);
-      if (isChapterAuditPassed(chapterMeta)) {
-        completed += 1;
+      let currentChapterMeta = chapterMeta;
+      let auditLoopRound = 0;
+      let chapterFinished = false;
+      while (!chapterFinished) {
+        auditLoopRound += 1;
+        const chapterAuditSnapshot = extractLatestChapterAuditSnapshot(currentChapterMeta);
+        const chapterAuditPassed = isChapterAuditPassed(currentChapterMeta);
+        const chapterAuditScore = chapterAuditSnapshot?.score ?? null;
+        if (chapterAuditPassed && (chapterAuditScore === null || chapterAuditScore >= minPassScore)) {
+          completed += 1;
+          passedChapters += 1;
+          const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
+          const latestIndex = await this.deps.state.loadChapterIndex(bookId).catch(() => chapterIndex);
+          currentChapterMeta = latestIndex.find((chapter) => Number(chapter.number) === chapterNumber) ?? currentChapterMeta;
+          const latestSnapshot = extractLatestChapterAuditSnapshot(currentChapterMeta);
+          const auditScore = latestSnapshot?.score ?? chapterAuditScore;
+          latest = await this.store.setStatus(bookId, taskId, "running", {
+            completedChapters: completed,
+            currentChapterNumber: chapterNumber,
+            lastChapterNumber: chapterNumber,
+            nextChapterNumber: chapterNumber + 1,
+            chapterFinishedAt: nowIso(),
+            stage: "audit",
+            stageLabel: stageLabel("audit"),
+            stageDetail: `第 ${chapterNumber} 章审计通过${auditScore !== null && auditScore !== undefined ? `，评分 ${auditScore}/100` : ""}`,
+            stageStartedAt: nowIso(),
+            stageUpdatedAt: nowIso(),
+            lastHeartbeatAt: nowIso(),
+            result: {
+              chapterNumber,
+              passed: true,
+              issueCount: 0,
+              summary: null,
+              auditScore,
+              ...auditMetrics,
+              auditChapterStart: auditStart,
+              auditChapterEnd: auditEnd,
+            },
+          });
+          await this.appendTaskEvent("book-task:update", latest);
+          await this.appendTaskLog(
+            latest,
+            "info",
+            auditScore !== null && auditScore !== undefined
+              ? `第 ${chapterNumber} 章审计通过，评分 ${auditScore}/100。`
+              : `第 ${chapterNumber} 章审计通过。`,
+          );
+          this.broadcastAuditComplete({
+            task: latest,
+            chapterNumber,
+            passed: true,
+            score: auditScore,
+            issueCount: 0,
+            summary: null,
+            report: null,
+            issues: [],
+            status: "ready-for-review",
+          });
+          chapterFinished = true;
+          continue;
+        }
+
+        if (chapterAuditPassed && chapterAuditScore !== null && chapterAuditScore < minPassScore) {
+          await this.appendTaskLog(
+            latest,
+            "warn",
+            `第 ${chapterNumber} 章最近审计评分 ${chapterAuditScore}/100，低于 ${minPassScore} 分门槛，进入自动修订。`,
+          );
+        }
+
         latest = await this.store.setStatus(bookId, taskId, "running", {
-          completedChapters: completed,
           currentChapterNumber: chapterNumber,
-          lastChapterNumber: chapterNumber,
           nextChapterNumber: chapterNumber + 1,
           chapterStartedAt: nowIso(),
-          chapterFinishedAt: nowIso(),
+          chapterFinishedAt: null,
           stage: "audit",
           stageLabel: stageLabel("audit"),
-          stageDetail: `第 ${chapterNumber} 章已通过，自动跳过`,
+          stageDetail: `第 ${chapterNumber} 章审计第 ${auditLoopRound} 轮`,
           stageStartedAt: nowIso(),
           stageUpdatedAt: nowIso(),
           lastHeartbeatAt: nowIso(),
-          result: {
-            skipped: true,
-            chapterNumber,
-            reason: "already passed",
-            ...buildAuditMetrics({ auditedChapters, passedChapters, failedChapters }),
-            auditChapterStart: auditStart,
-            auditChapterEnd: auditEnd,
-          },
         });
         await this.appendTaskEvent("book-task:update", latest);
-        await this.appendTaskLog(
-          latest,
-          "info",
-          chapterAuditSnapshot?.score !== null && chapterAuditSnapshot?.score !== undefined
-            ? `第 ${chapterNumber} 章最近审计评分 ${chapterAuditSnapshot.score}/100，已通过，自动跳过。`
-            : `第 ${chapterNumber} 章已通过审计，自动跳过。`,
-        );
-        continue;
-      }
+        clearHeartbeat();
+        heartbeatTimer = setInterval(() => {
+          void (async () => {
+            const current = await this.requireTask(bookId, taskId).catch(() => null);
+            if (!current || current.status !== "running" || current.stage !== "audit") return;
+            await this.beatStage(current, `第 ${chapterNumber} 章审计第 ${auditLoopRound} 轮，已执行中`);
+          })();
+        }, Math.max(3_000, this.deps.resolveWriteStageHeartbeatMs()));
+        await this.appendTaskLog(latest, "info", `开始审计第 ${chapterNumber} 章，第 ${auditLoopRound} 轮。`);
 
-      latest = await this.store.setStatus(bookId, taskId, "running", {
-        currentChapterNumber: chapterNumber,
-        nextChapterNumber: chapterNumber + 1,
-        chapterStartedAt: nowIso(),
-        chapterFinishedAt: null,
-        stage: "audit",
-        stageLabel: stageLabel("audit"),
-        stageDetail: `正在审计第 ${chapterNumber} 章`,
-        stageStartedAt: nowIso(),
-        stageUpdatedAt: nowIso(),
-        lastHeartbeatAt: nowIso(),
-      });
-      await this.appendTaskEvent("book-task:update", latest);
-      clearHeartbeat();
-      heartbeatTimer = setInterval(() => {
-        void (async () => {
-          const current = await this.requireTask(bookId, taskId).catch(() => null);
-          if (!current || current.status !== "running" || current.stage !== "audit") return;
-          await this.beatStage(current, `正在审计第 ${chapterNumber} 章，已执行中`);
-        })();
-      }, Math.max(3_000, this.deps.resolveWriteStageHeartbeatMs()));
-      await this.appendTaskLog(latest, "info", `开始审计第 ${chapterNumber} 章。`);
+        const result = await pipeline.auditDraft(bookId, chapterNumber) as {
+          readonly passed: boolean;
+          readonly issues: ReadonlyArray<{ readonly severity?: string; readonly category?: string; readonly description?: string }>;
+          readonly summary?: string;
+          readonly report?: string;
+        };
+        clearHeartbeat();
+        await this.drainTaskSignals(bookId, taskId);
+        auditedChapters += 1;
+        const refreshedIndex = await this.deps.state.loadChapterIndex(bookId).catch(() => chapterIndex);
+        currentChapterMeta = refreshedIndex.find((chapter) => Number(chapter.number) === chapterNumber) ?? currentChapterMeta;
+        const refreshedSnapshot = extractLatestChapterAuditSnapshot(currentChapterMeta);
+        const refreshed = await this.requireTask(bookId, taskId);
+        if (refreshed.status === "stopping" || refreshed.stopRequestedAt) {
+          const cancelled = await this.store.setStatus(bookId, taskId, "cancelled", {
+            finishedAt: nowIso(),
+            stoppedAt: nowIso(),
+            error: null,
+            result: {
+              cancelled: true,
+              completedChapters: completed,
+              lastChapterNumber: chapterNumber,
+            },
+          });
+          await this.appendTaskEvent("book-task:complete", cancelled);
+          return;
+        }
 
-      const result = await pipeline.auditDraft(bookId, chapterNumber) as {
-        readonly passed: boolean;
-        readonly issues: ReadonlyArray<{ readonly severity?: string; readonly category?: string; readonly description?: string }>;
-        readonly summary?: string;
-        readonly report?: string;
-      };
-      clearHeartbeat();
-      await this.drainTaskSignals(bookId, taskId);
-      completed += 1;
-      auditedChapters += 1;
-      const refreshedIndex = await this.deps.state.loadChapterIndex(bookId).catch(() => chapterIndex);
-      const refreshedChapterMeta = refreshedIndex.find((chapter) => Number(chapter.number) === chapterNumber) ?? chapterMeta;
-      const refreshedSnapshot = extractLatestChapterAuditSnapshot(refreshedChapterMeta);
-
-      const refreshed = await this.requireTask(bookId, taskId);
-      if (refreshed.status === "stopping" || refreshed.stopRequestedAt) {
-        const cancelled = await this.store.setStatus(bookId, taskId, "cancelled", {
-          finishedAt: nowIso(),
-          stoppedAt: nowIso(),
-          error: null,
-          result: {
-            cancelled: true,
+        const initialAuditPassed = Boolean(result.passed) && (refreshedSnapshot?.score === null || refreshedSnapshot?.score === undefined || refreshedSnapshot.score >= MIN_AUDIT_PASS_SCORE);
+        if (initialAuditPassed) {
+          passedChapters += 1;
+          const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
+          const severityCounts = countAuditIssueSeverities(result.issues);
+          const auditScore = estimateAuditScore(severityCounts);
+          const issueTexts = normalizeAuditIssueTexts(result.issues);
+          await persistChapterAuditSummary({
+            state: this.deps.state,
+            bookId,
+            chapterNumber,
+            audit: {
+              passed: true,
+              score: auditScore,
+              issueCount: result.issues.length,
+              summary: result.summary ?? null,
+              report: result.report ?? null,
+              issues: issueTexts,
+              severityCounts,
+            },
+          });
+          latest = await this.store.setStatus(bookId, taskId, "running", {
             completedChapters: completed,
+            currentChapterNumber: chapterNumber,
             lastChapterNumber: chapterNumber,
-          },
-        });
-        await this.appendTaskEvent("book-task:complete", cancelled);
-        return;
-      }
-
-      const initialAuditPassed = Boolean(result.passed) && (refreshedSnapshot?.score === null || refreshedSnapshot?.score === undefined || refreshedSnapshot.score >= MIN_AUDIT_PASS_SCORE);
-      if (initialAuditPassed) {
-        passedChapters += 1;
-        const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
-        const severityCounts = countAuditIssueSeverities(result.issues);
-        const auditScore = estimateAuditScore(severityCounts);
-        const issueTexts = normalizeAuditIssueTexts(result.issues);
-        await persistChapterAuditSummary({
-          state: this.deps.state,
-          bookId,
-          chapterNumber,
-          audit: {
+            nextChapterNumber: chapterNumber + 1,
+            chapterFinishedAt: nowIso(),
+            stage: "audit",
+            stageLabel: stageLabel("audit"),
+            stageDetail: `第 ${chapterNumber} 章审计通过${auditScore !== null && auditScore !== undefined ? `，评分 ${auditScore}/100` : ""}`,
+            stageStartedAt: refreshed.stageStartedAt ?? nowIso(),
+            stageUpdatedAt: nowIso(),
+            lastHeartbeatAt: nowIso(),
+            result: {
+              chapterNumber,
+              passed: true,
+              issueCount: result.issues.length,
+              summary: result.summary ?? null,
+              auditScore,
+              ...auditMetrics,
+              auditChapterStart: auditStart,
+              auditChapterEnd: auditEnd,
+            },
+          });
+          await this.appendTaskEvent("book-task:update", latest);
+          await this.appendTaskLog(
+            latest,
+            "info",
+            auditScore !== null && auditScore !== undefined
+              ? `第 ${chapterNumber} 章审计通过，评分 ${auditScore}/100。`
+              : `第 ${chapterNumber} 章审计通过。`,
+          );
+          this.broadcastAuditComplete({
+            task: latest,
+            chapterNumber,
             passed: true,
             score: auditScore,
             issueCount: result.issues.length,
             summary: result.summary ?? null,
             report: result.report ?? null,
-            issues: issueTexts,
-            severityCounts,
-          },
+            issues: result.issues,
+            status: "ready-for-review",
+          });
+          chapterFinished = true;
+          continue;
+        }
+
+        await this.appendTaskLog(
+          latest,
+          "warn",
+          refreshedSnapshot?.score !== null && refreshedSnapshot?.score !== undefined
+            ? `第 ${chapterNumber} 章审计评分 ${refreshedSnapshot.score}/100，未达标，进入自动修订。`
+            : `第 ${chapterNumber} 章审计未通过，进入自动修订。`,
+        );
+        await this.updateStage(latest, "revise", `第 ${chapterNumber} 章审计未通过，正在自动修订`);
+
+        if (typeof pipeline.reviseDraft !== "function") {
+          throw new Error(`Task pipeline does not support reviseDraft for chapter ${chapterNumber}.`);
+        }
+
+        const reviseSeverityCounts = countAuditIssueSeverities(result.issues);
+        const reviseScore = typeof refreshedSnapshot?.score === "number"
+          ? refreshedSnapshot.score
+          : estimateAuditScore(reviseSeverityCounts);
+        const mustFixFirstIssueIds = buildIssueIdList(result.issues);
+        const reviseContext = {
+          failureGate: reviseSeverityCounts.critical > 0 ? "critical" as const : "score" as const,
+          score: reviseScore,
+          passScoreThreshold: MIN_AUDIT_PASS_SCORE,
+          scoreShortfall: Math.max(0, MIN_AUDIT_PASS_SCORE - reviseScore),
+          mustFixFirstIssueIds: mustFixFirstIssueIds.slice(0, 3),
+        };
+        const revisionBrief = buildTaskCenterRevisionBrief({
+          chapterNumber,
+          score: reviseScore,
+          threshold: MIN_AUDIT_PASS_SCORE,
+          summary: result.summary ?? null,
+          report: result.report ?? null,
+          severityCounts: reviseSeverityCounts,
+          issues: result.issues,
         });
+        const reviseMode = reviseSeverityCounts.critical > 0 ? "rework" : "rewrite";
+        const reviseResult = await pipeline.reviseDraft(bookId, chapterNumber, reviseMode, {
+          userBrief: revisionBrief,
+          reviseContext,
+        }) as {
+          readonly status?: string;
+          readonly applied?: boolean;
+          readonly audit?: {
+            readonly passed?: boolean;
+            readonly score?: number;
+            readonly issueCount?: number;
+            readonly summary?: string;
+            readonly report?: string;
+            readonly severityCounts?: Readonly<{
+              critical: number;
+              warning: number;
+              info: number;
+            }>;
+            readonly issues?: ReadonlyArray<{
+              readonly severity?: string;
+              readonly category?: string;
+              readonly description?: string;
+            }>;
+          };
+        };
+        await this.drainTaskSignals(bookId, taskId);
+
+        const revisionAuditScore = typeof reviseResult?.audit?.score === "number"
+          ? reviseResult.audit.score
+          : null;
+        const revisionIssueCount = typeof reviseResult?.audit?.issueCount === "number"
+          ? reviseResult.audit.issueCount
+          : 0;
+        const revisionPassed = Boolean(reviseResult?.audit?.passed ?? reviseResult?.status === "ready-for-review")
+          && (revisionAuditScore === null || revisionAuditScore >= minPassScore);
+        if (revisionPassed) {
+          passedChapters += 1;
+        } else {
+          failedChapters += 1;
+        }
+        const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
+
         latest = await this.store.setStatus(bookId, taskId, "running", {
           completedChapters: completed,
           currentChapterNumber: chapterNumber,
           lastChapterNumber: chapterNumber,
           nextChapterNumber: chapterNumber + 1,
           chapterFinishedAt: nowIso(),
-          stage: "audit",
-          stageLabel: stageLabel("audit"),
-          stageDetail: `第 ${chapterNumber} 章审计通过${auditScore !== null && auditScore !== undefined ? `，评分 ${auditScore}/100` : ""}`,
+          stage: revisionPassed ? "audit" : "revise",
+          stageLabel: stageLabel(revisionPassed ? "audit" : "revise"),
+          stageDetail: revisionPassed
+            ? `第 ${chapterNumber} 章已自动修订并复审通过${revisionAuditScore !== null ? `，评分 ${revisionAuditScore}/100` : ""}`
+            : `第 ${chapterNumber} 章自动修订后仍未通过`,
           stageStartedAt: refreshed.stageStartedAt ?? nowIso(),
           stageUpdatedAt: nowIso(),
           lastHeartbeatAt: nowIso(),
           result: {
             chapterNumber,
-            passed: true,
-            issueCount: result.issues.length,
-            summary: result.summary ?? null,
-            auditScore,
+            passed: revisionPassed,
+            issueCount: revisionIssueCount,
+            summary: reviseResult?.audit?.summary ?? result.summary ?? null,
+            revisionApplied: reviseResult?.applied ?? false,
+            revisionStatus: reviseResult?.status ?? null,
+            revisionAuditScore,
             ...auditMetrics,
             auditChapterStart: auditStart,
             auditChapterEnd: auditEnd,
@@ -1198,138 +1439,49 @@ export class BookTaskController {
         await this.appendTaskEvent("book-task:update", latest);
         await this.appendTaskLog(
           latest,
-          "info",
-          auditScore !== null && auditScore !== undefined
-            ? `第 ${chapterNumber} 章审计通过，评分 ${auditScore}/100。`
-            : `第 ${chapterNumber} 章审计通过。`,
+          revisionPassed ? "info" : "warn",
+          revisionPassed
+            ? `第 ${chapterNumber} 章已自动修订并复审通过${revisionAuditScore !== null ? `，评分 ${revisionAuditScore}/100` : ""}。`
+            : `第 ${chapterNumber} 章自动修订后仍未通过审计。`,
         );
-        this.broadcastAuditComplete({
-          task: latest,
-          chapterNumber,
-          passed: true,
-          score: auditScore,
-          issueCount: result.issues.length,
-          summary: result.summary ?? null,
-          report: result.report ?? null,
-          issues: result.issues,
-          status: "ready-for-review",
-        });
-        continue;
-      }
-
-      await this.appendTaskLog(
-        latest,
-        "warn",
-        refreshedSnapshot?.score !== null && refreshedSnapshot?.score !== undefined
-          ? `第 ${chapterNumber} 章审计评分 ${refreshedSnapshot.score}/100，未达标，进入自动修订。`
-          : `第 ${chapterNumber} 章审计未通过，进入自动修订。`,
-      );
-      await this.updateStage(latest, "revise", `第 ${chapterNumber} 章审计未通过，正在自动修订`);
-
-      if (typeof pipeline.reviseDraft !== "function") {
-        throw new Error(`Task pipeline does not support reviseDraft for chapter ${chapterNumber}.`);
-      }
-
-      const reviseResult = await pipeline.reviseDraft(bookId, chapterNumber) as {
-        readonly status?: string;
-        readonly applied?: boolean;
-        readonly audit?: {
-          readonly passed?: boolean;
-          readonly score?: number;
-          readonly issueCount?: number;
-          readonly summary?: string;
-          readonly report?: string;
-          readonly severityCounts?: Readonly<{
-            critical: number;
-            warning: number;
-            info: number;
-          }>;
-          readonly issues?: ReadonlyArray<{
-            readonly severity?: string;
-            readonly category?: string;
-            readonly description?: string;
-          }>;
-        };
-      };
-      await this.drainTaskSignals(bookId, taskId);
-
-      const revisionPassed = Boolean(reviseResult?.audit?.passed ?? reviseResult?.status === "ready-for-review");
-      if (revisionPassed) passedChapters += 1;
-      else failedChapters += 1;
-      const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
-
-      latest = await this.store.setStatus(bookId, taskId, "running", {
-        completedChapters: completed,
-        currentChapterNumber: chapterNumber,
-        lastChapterNumber: chapterNumber,
-        nextChapterNumber: chapterNumber + 1,
-        chapterFinishedAt: nowIso(),
-        stage: revisionPassed ? "audit" : "revise",
-        stageLabel: stageLabel(revisionPassed ? "audit" : "revise"),
-        stageDetail: revisionPassed
-          ? `第 ${chapterNumber} 章已自动修订并复审通过${typeof reviseResult?.audit?.score === "number" ? `，评分 ${reviseResult.audit.score}/100` : ""}`
-          : `第 ${chapterNumber} 章自动修订后仍未通过`,
-        stageStartedAt: refreshed.stageStartedAt ?? nowIso(),
-        stageUpdatedAt: nowIso(),
-        lastHeartbeatAt: nowIso(),
-        result: {
-          chapterNumber,
-          passed: revisionPassed,
-          issueCount: typeof reviseResult?.audit?.issueCount === "number"
-            ? reviseResult.audit.issueCount
-            : result.issues.length,
-          summary: reviseResult?.audit?.summary ?? result.summary ?? null,
-          revisionApplied: reviseResult?.applied ?? false,
-          revisionStatus: reviseResult?.status ?? null,
-          revisionAuditScore: typeof reviseResult?.audit?.score === "number" ? reviseResult.audit.score : null,
-          ...auditMetrics,
-          auditChapterStart: auditStart,
-          auditChapterEnd: auditEnd,
-        },
-      });
-      await this.appendTaskEvent("book-task:update", latest);
-      await this.appendTaskLog(
-        latest,
-        revisionPassed ? "info" : "warn",
-        revisionPassed
-          ? `第 ${chapterNumber} 章已自动修订并复审通过${typeof reviseResult?.audit?.score === "number" ? `，评分 ${reviseResult.audit.score}/100` : ""}。`
-          : `第 ${chapterNumber} 章自动修订后仍未通过审计。`,
-      );
-      if (revisionPassed) {
-        const reviseAudit = reviseResult.audit;
-        const reviseSeverityCounts = reviseAudit?.severityCounts ?? countAuditIssueSeverities(reviseAudit?.issues ?? []);
-        const reviseAuditScore = typeof reviseAudit?.score === "number"
-          ? reviseAudit.score
-          : estimateAuditScore(reviseSeverityCounts);
-        const reviseIssueTexts = reviseAudit?.issues ? normalizeAuditIssueTexts(reviseAudit.issues) : [];
-        await persistChapterAuditSummary({
-          state: this.deps.state,
-          bookId,
-          chapterNumber,
-          audit: {
+        if (revisionPassed) {
+          const reviseAudit = reviseResult.audit;
+          const reviseSeverityCounts = reviseAudit?.severityCounts ?? countAuditIssueSeverities(reviseAudit?.issues ?? []);
+          const reviseAuditScore = typeof reviseAudit?.score === "number"
+            ? reviseAudit.score
+            : estimateAuditScore(reviseSeverityCounts);
+          const reviseIssueTexts = reviseAudit?.issues ? normalizeAuditIssueTexts(reviseAudit.issues) : [];
+          await persistChapterAuditSummary({
+            state: this.deps.state,
+            bookId,
+            chapterNumber,
+            audit: {
+              passed: true,
+              score: reviseAuditScore,
+              issueCount: typeof reviseAudit?.issueCount === "number"
+                ? reviseAudit.issueCount
+                : reviseIssueTexts.length,
+              summary: reviseAudit?.summary ?? result.summary ?? null,
+              report: reviseAudit?.report ?? null,
+              issues: reviseIssueTexts,
+              severityCounts: reviseSeverityCounts,
+            },
+          });
+          this.broadcastAuditComplete({
+            task: latest,
+            chapterNumber,
             passed: true,
             score: reviseAuditScore,
-            issueCount: typeof reviseAudit?.issueCount === "number"
-              ? reviseAudit.issueCount
-              : reviseIssueTexts.length,
-            summary: reviseAudit?.summary ?? result.summary ?? null,
-            report: reviseAudit?.report ?? null,
-            issues: reviseIssueTexts,
-            severityCounts: reviseSeverityCounts,
-          },
-        });
-        this.broadcastAuditComplete({
-          task: latest,
-          chapterNumber,
-          passed: true,
-          score: reviseAuditScore,
-          issueCount: typeof reviseResult?.audit?.issueCount === "number"
-            ? reviseResult.audit.issueCount
-            : result.issues.length,
+            issueCount: typeof reviseResult?.audit?.issueCount === "number"
+              ? reviseResult.audit.issueCount
+              : result.issues.length,
           summary: reviseResult?.audit?.summary ?? result.summary ?? null,
           report: reviseAudit?.report ?? null,
           status: "ready-for-review",
         });
+          chapterFinished = true;
+          continue;
+        }
       }
     }
 
@@ -1436,7 +1588,7 @@ export class BookTaskController {
           bookId,
           taskId,
           task,
-          pipeline: pipeline as { readonly auditDraft: (bookId: string, chapterNumber?: number) => Promise<unknown> },
+          pipeline: pipeline as PipelineLike,
         });
         return;
       }
