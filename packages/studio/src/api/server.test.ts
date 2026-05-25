@@ -6411,7 +6411,7 @@ describe("createStudioServer daemon lifecycle", () => {
     const events = await collectSSEEvents(
       eventsResponse,
       ["audit:complete", "agent:usage", "agent:complete"],
-      { timeoutMs: 4_000, minCount: 9 },
+      { timeoutMs: 10_000, minCount: 13 },
     );
     const findEvent = (event: string, runId: string) => [...events].reverse().find((item) => {
       const data = item.data as { sessionId?: unknown; runId?: unknown } | null;

@@ -267,7 +267,7 @@ function computeTaskSummary(tasks: ReadonlyArray<GlobalBookTaskItem>) {
   });
 }
 
-export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunction; sse: { messages: ReadonlyArray<{ event: string; data: unknown; timestamp: number }> } }) {
+export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunction; sse: { messages: ReadonlyArray<{ event: string; data: unknown; timestamp: number }>; stateMessages: ReadonlyArray<{ event: string; data: unknown; timestamp: number }> } }) {
   const { data, loading, error, refetch } = useApi<GlobalBookTaskListResponse>("/tasks");
   const { data: booksData } = useApi<{ books: ReadonlyArray<BookListItem> }>("/books");
   const selectedModel = useChatStore((s) => s.selectedModel);
@@ -419,10 +419,10 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
   }, [data?.tasks]);
 
   useEffect(() => {
-    if (sse.messages.length === 0) return;
+    if (sse.stateMessages.length === 0) return;
     setTasks((prev) => {
       let next = prev;
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         const dataPayload = message.data as { bookId?: string; task?: TaskSnapshot; log?: RunLogEntry; exceptionLog?: RunLogEntry } | null;
         if (!dataPayload?.bookId || !dataPayload.task) continue;
@@ -432,7 +432,7 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
     });
     setTaskLogsByKey((prev) => {
       const next = { ...prev };
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         const dataPayload = message.data as { bookId?: string; task?: TaskSnapshot; log?: RunLogEntry } | null;
         if (!dataPayload?.bookId || !dataPayload.task || message.event !== "book-task:log" || !dataPayload.log) continue;
@@ -449,7 +449,7 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
     });
     setTaskStageHistoryByKey((prev) => {
       const next = { ...prev };
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         const dataPayload = message.data as { bookId?: string; task?: TaskSnapshot } | null;
         if (!dataPayload?.bookId || !dataPayload.task) continue;
@@ -460,7 +460,7 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
     });
     setTaskTokenSamplesByKey((prev) => {
       const next = { ...prev };
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         const dataPayload = message.data as { bookId?: string; task?: TaskSnapshot } | null;
         if (!dataPayload?.bookId || !dataPayload.task) continue;
@@ -472,7 +472,7 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
       }
       return next;
     });
-  }, [sse.messages]);
+  }, [sse.stateMessages]);
 
   useEffect(() => {
     if (!books.length) {

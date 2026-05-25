@@ -39,6 +39,7 @@ import { analyzeHookHealth } from "../utils/hook-health.js";
 import { buildEnglishVarianceBrief } from "../utils/long-span-fatigue.js";
 import { extractChapterTail } from "../utils/chapter-tail.js";
 import type { ChapterPlan } from "../models/chapter-plan.js";
+import { formatAuditPriorityPreview } from "./audit-dimensions.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -254,6 +255,19 @@ export class WriterAgent extends BaseAgent {
         }
       : undefined;
 
+    // ── Build audit gate preview for writer awareness ──
+    const auditGatePreview = formatAuditPriorityPreview(
+      genreProfile,
+      bookRules,
+      resolvedLanguage === "en",
+      {
+        chapterNumber,
+        chapterPlan: input.chapterPlan,
+        hasParentCanon,
+        fanficMode: bookRules?.fanficMode,
+      },
+    );
+
     // ── Phase 1: Creative writing (temperature 0.7) ──
     const creativeSystemPrompt = buildWriterSystemPrompt(
       book, genreProfile, bookRules, bookRulesBody, genreBody, styleGuide, styleFingerprint,
@@ -280,6 +294,7 @@ export class WriterAgent extends BaseAgent {
         dialogueQuoteGuideline,
         foundationBrief,
         externalContext: input.externalContext,
+        auditGatePreview,
       })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -320,6 +335,7 @@ export class WriterAgent extends BaseAgent {
             dialogueQuoteGuideline,
             previousChapterTail,
             maxRecoveryPerChapter: input.chapterPlan?.maxRecoveryPerChapter,
+            auditGatePreview,
           });
         })();
 
@@ -972,6 +988,7 @@ export class WriterAgent extends BaseAgent {
     readonly dialogueQuoteGuideline?: string;
     readonly previousChapterTail?: string;
     readonly maxRecoveryPerChapter?: number;
+    readonly auditGatePreview?: string;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
@@ -1040,6 +1057,10 @@ ${params.parentCanon}\n`
         : `\n## 衔接指引\n本章开头必须无缝衔接上一章结尾的内容，不能出现时间、空间、情绪上的跳跃。\n\n上一章结尾内容：\n${params.previousChapterTail}\n\n写作要求：\n1. 本章第一段应与上一章末尾的情节/情绪自然对接\n2. 如果上一章结尾有对话、动作或场景，本章应从同一场景或紧邻的下一时刻开始\n3. 避免在章节开头重新介绍已存在的角色或设定\n`)
       : "";
 
+    const auditGateBlock = params.auditGatePreview
+      ? `\n${params.auditGatePreview}\n`
+      : "";
+
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
 ${contextBlock}
@@ -1069,6 +1090,7 @@ ${params.volumeOutline}
 ${dialogueQuoteBlock}
 
 ${lengthRequirementBlock}
+${auditGateBlock}
 - Output PRE_WRITE_CHECK first, then the chapter
 - Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT blocks`;
     }
@@ -1101,6 +1123,7 @@ ${params.volumeOutline}
 ${dialogueQuoteBlock}
 
 ${lengthRequirementBlock}
+${auditGateBlock}
 - 先输出写作自检表，再写正文
       - 只需输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块`;
   }
@@ -1118,6 +1141,7 @@ ${lengthRequirementBlock}
     readonly dialogueQuoteGuideline?: string;
     readonly foundationBrief: string;
     readonly externalContext?: string;
+    readonly auditGatePreview?: string;
   }): string {
     const contextSections = params.contextPackage.selectedContext
       .map((entry) => [
@@ -1168,6 +1192,9 @@ ${lengthRequirementBlock}
         ? `\n## External Context\n${params.externalContext}\n`
         : `\n## 外部指令\n${params.externalContext}\n`
       : "";
+    const auditGateBlock = params.auditGatePreview
+      ? `\n${params.auditGatePreview}\n`
+      : "";
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
@@ -1196,6 +1223,7 @@ ${traceNotes}
 ${dialogueQuoteBlock}
 ${varianceBlock}
 ${lengthRequirementBlock}
+${auditGateBlock}
 - Output PRE_WRITE_CHECK first, then the chapter
 - Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT blocks`;
     }
@@ -1226,6 +1254,7 @@ ${traceNotes}
 ${dialogueQuoteBlock}
 ${varianceBlock}
 ${lengthRequirementBlock}
+${auditGateBlock}
 - 先输出写作自检表，再写正文
 - 只需输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块`;
   }

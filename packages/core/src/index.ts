@@ -248,6 +248,7 @@ export {
 } from "./utils/hook-governance.js";
 export { arbitrateRuntimeStateDeltaHooks, type HookArbiterDecision } from "./utils/hook-arbiter.js";
 export { analyzeHookHealth } from "./utils/hook-health.js";
+export { countAuditIssueClasses, resolvePrimaryIssueClass, classifyAuditIssueClass, isStructuralAuditIssue, type AuditIssueClass, type AuditIssueClassCounts, type AuditIssueSignalSource } from "./utils/audit-issue-classification.js";
 
 // Pipeline
 export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type PlanChapterResult, type ComposeChapterResult, type ReviseResult, type TruthFiles, type BookStatusInfo, type ImportChaptersInput, type ImportChaptersResult, type TokenUsageSummary } from "./pipeline/runner.js";

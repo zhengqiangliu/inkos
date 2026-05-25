@@ -33,7 +33,7 @@ interface BookDetailChatDockProps {
   readonly nav: Nav;
   readonly theme: Theme;
   readonly t: TFunction;
-  readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
+  readonly sse: { messages: ReadonlyArray<SSEMessage>; stateMessages: ReadonlyArray<SSEMessage>; connected: boolean };
   readonly width?: number;
   readonly latestChapterNumber?: number | null;
   readonly latestChapterAuditReport?: string | null;
@@ -271,11 +271,11 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
   const sessionTokenSummary = useMemo(() => {
     const session = activeSession;
     if (!session) return null;
-    return resolveLatestAgentTokenSnapshot(sse.messages, session.sessionId, session.currentRunId, nowTick);
-  }, [activeSession, nowTick, sse.messages]);
+    return resolveLatestAgentTokenSnapshot(sse.stateMessages, session.sessionId, session.currentRunId, nowTick);
+  }, [activeSession, nowTick, sse.stateMessages]);
   const taskTokenSummary = useMemo(
-    () => resolveLatestBookTaskTokenSnapshot(sse.messages, bookId, nowTick),
-    [bookId, nowTick, sse.messages],
+    () => resolveLatestBookTaskTokenSnapshot(sse.stateMessages, bookId, nowTick),
+    [bookId, nowTick, sse.stateMessages],
   );
   const tokenSummary = sessionTokenSummary && taskTokenSummary
     ? (taskTokenSummary.latestAt >= sessionTokenSummary.latestAt ? taskTokenSummary.summary : sessionTokenSummary.summary)

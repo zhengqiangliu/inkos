@@ -102,7 +102,7 @@ interface BookDetailProps {
   readonly nav: Nav;
   readonly theme: Theme;
   readonly t: TFunction;
-  readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
+  readonly sse: { messages: ReadonlyArray<SSEMessage>; stateMessages: ReadonlyArray<SSEMessage>; connected: boolean };
 }
 
 const DETAIL_LEFT_WIDTH_KEY = "studio.book-detail.left-width";

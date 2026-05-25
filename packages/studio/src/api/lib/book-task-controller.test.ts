@@ -478,7 +478,7 @@ describe("BookTaskController audit gating", () => {
     expect(reviseDraft).toHaveBeenCalledWith(
       bookId,
       3,
-      "rewrite",
+      "polish",
       expect.objectContaining({
         userBrief: expect.stringContaining("## 任务中心自动修订约束"),
         reviseContext: expect.objectContaining({
@@ -807,7 +807,7 @@ describe("BookTaskController audit gating", () => {
     expect(reviseDraft).toHaveBeenCalledWith(
       bookId,
       3,
-      "rework",
+      "rewrite",
       expect.objectContaining({
         reviseContext: expect.objectContaining({
           failureGate: "critical",
@@ -968,5 +968,221 @@ describe("BookTaskController audit gating", () => {
         unboundedReview: true,
       }),
     );
+  });
+
+  it("revises failed task-center write chapters until they pass before advancing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const writeNextChapter = vi.fn().mockResolvedValue({
+      chapterNumber: 1,
+      title: "Ch 1",
+      wordCount: 1200,
+      status: "audit-failed",
+      passed: false,
+      auditResult: {
+        passed: false,
+        score: 64,
+        issueCount: 3,
+        summary: "needs revision",
+        report: "initial audit report",
+        issues: [
+          { severity: "warning", category: "pacing", description: "too slow", suggestion: "tighten" },
+          { severity: "warning", category: "structure", description: "flat middle", suggestion: "add conflict" },
+          { severity: "warning", category: "hook", description: "weak ending", suggestion: "strengthen hook" },
+        ],
+      },
+      tokenUsage: {
+        promptTokens: 12,
+        completionTokens: 18,
+        totalTokens: 30,
+      },
+    });
+    const reviseDraft = vi.fn()
+      .mockResolvedValueOnce({
+        status: "audit-failed",
+        applied: true,
+        wordCount: 1240,
+        tokenUsage: {
+          promptTokens: 8,
+          completionTokens: 10,
+          totalTokens: 18,
+        },
+        audit: {
+          passed: false,
+          score: 72,
+          issueCount: 2,
+          summary: "still needs work",
+          report: "revision round one",
+          issues: [
+            { severity: "warning", category: "pacing", description: "still slow" },
+            { severity: "warning", category: "hook", description: "ending still weak" },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        status: "ready-for-review",
+        applied: true,
+        wordCount: 1280,
+        tokenUsage: {
+          promptTokens: 8,
+          completionTokens: 12,
+          totalTokens: 20,
+        },
+        audit: {
+          passed: true,
+          score: 88,
+          issueCount: 0,
+          severityCounts: { critical: 0, warning: 0, info: 0 },
+          summary: "fixed",
+          report: "revision round two",
+          issues: [],
+        },
+      });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6, language: "zh" }),
+        loadChapterIndex: async () => [],
+        getNextChapterNumber: async () => 1,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft: async () => ({}),
+        reviseDraft,
+        writeNextChapter,
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "write",
+      source: "task-center",
+      requestedChapters: 1,
+      retryEnabled: false,
+      service: "svc-a",
+      model: "model-a",
+      quickMode: false,
+    });
+
+    await vi.waitFor(async () => {
+      const current = await controller.get(bookId, task.id);
+      expect(current?.status).toBe("succeeded");
+    });
+
+    const finalTask = await controller.get(bookId, task.id);
+    expect(writeNextChapter).toHaveBeenCalledTimes(1);
+    expect(reviseDraft).toHaveBeenCalledTimes(2);
+    expect(reviseDraft.mock.calls[0]?.[1]).toBe(1);
+    expect(reviseDraft.mock.calls[1]?.[1]).toBe(1);
+    expect(finalTask?.completedChapters).toBe(1);
+    expect(finalTask?.result).toMatchObject({
+      auditedChapters: 1,
+      passedChapters: 1,
+      failedChapters: 0,
+      auditPassRate: 100,
+    });
+  });
+
+  it("fails task-center write chapters after exhausting repair rounds", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    const writeNextChapter = vi.fn().mockResolvedValue({
+      chapterNumber: 1,
+      title: "Ch 1",
+      wordCount: 1200,
+      status: "audit-failed",
+      passed: false,
+      auditResult: {
+        passed: false,
+        score: 64,
+        issueCount: 3,
+        summary: "needs revision",
+        report: "initial audit report",
+        issues: [
+          { severity: "warning", category: "pacing", description: "too slow", suggestion: "tighten" },
+          { severity: "warning", category: "structure", description: "flat middle", suggestion: "add conflict" },
+          { severity: "warning", category: "hook", description: "weak ending", suggestion: "strengthen hook" },
+        ],
+      },
+      tokenUsage: {
+        promptTokens: 12,
+        completionTokens: 18,
+        totalTokens: 30,
+      },
+    });
+    const reviseDraft = vi.fn().mockResolvedValue({
+      status: "audit-failed",
+      applied: true,
+      wordCount: 1240,
+      tokenUsage: {
+        promptTokens: 8,
+        completionTokens: 10,
+        totalTokens: 18,
+      },
+      audit: {
+        passed: false,
+        score: 72,
+        issueCount: 2,
+        summary: "still needs work",
+        report: "revision round",
+        issues: [
+          { severity: "warning", category: "pacing", description: "still slow" },
+          { severity: "warning", category: "hook", description: "ending still weak" },
+        ],
+      },
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 6, language: "zh" }),
+        loadChapterIndex: async () => [],
+        getNextChapterNumber: async () => 1,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft: async () => ({}),
+        reviseDraft,
+        writeNextChapter,
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "write",
+      source: "task-center",
+      requestedChapters: 1,
+      retryEnabled: false,
+      service: "svc-a",
+      model: "model-a",
+      quickMode: false,
+    });
+
+    await vi.waitFor(async () => {
+      const current = await controller.get(bookId, task.id);
+      expect(current?.status).toBe("failed");
+    });
+
+    const finalTask = await controller.get(bookId, task.id);
+    expect(writeNextChapter).toHaveBeenCalledTimes(1);
+    expect(reviseDraft).toHaveBeenCalledTimes(3);
+    expect(finalTask?.status).toBe("failed");
+    expect(finalTask?.completedChapters).toBe(0);
+    expect(finalTask?.error).toContain("自动修订 3 轮后仍未通过审计");
   });
 });

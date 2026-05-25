@@ -7390,11 +7390,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         usage: TokenUsageSnapshot | null | undefined,
         source: "model" | "tool" = "tool",
       ): void => {
-        if (!usage) return;
+        const safeUsage: TokenUsageSnapshot = usage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         if (source === "model") {
-          modelAgentTokenUsage = usage;
+          modelAgentTokenUsage = safeUsage;
         } else {
-          toolAgentTokenUsage = addTokenUsage(toolAgentTokenUsage, usage);
+          toolAgentTokenUsage = addTokenUsage(toolAgentTokenUsage, safeUsage);
         }
         agentTokenUsage = addTokenUsage(modelAgentTokenUsage, toolAgentTokenUsage);
         broadcast("agent:usage", {

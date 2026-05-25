@@ -6,6 +6,27 @@ export interface SSEMessage {
   readonly timestamp: number;
 }
 
+/**
+ * 低频关键状态事件 — 保留在独立缓冲区，不会被高频 delta 事件挤出。
+ * 用于 token 用量查询、任务状态追踪等。
+ */
+const STATE_EVENTS: ReadonlySet<string> = new Set([
+  "agent:start",
+  "agent:usage",
+  "agent:complete",
+  "agent:stopped",
+  "agent:error",
+  "book-task:created",
+  "book-task:update",
+  "book-task:progress",
+  "book-task:stage",
+  "book-task:log",
+  "book-task:complete",
+  "book-task:error",
+  "book-task:stop",
+  "book-task:resume",
+]);
+
 export const STUDIO_SSE_EVENTS = [
   "book:creating",
   "book:created",
@@ -83,6 +104,7 @@ export const STUDIO_SSE_EVENTS = [
 
 export function useSSE(url = "/api/v1/events") {
   const [messages, setMessages] = useState<ReadonlyArray<SSEMessage>>([]);
+  const [stateMessages, setStateMessages] = useState<ReadonlyArray<SSEMessage>>([]);
   const [connected, setConnected] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
@@ -96,7 +118,12 @@ export function useSSE(url = "/api/v1/events") {
     const handleEvent = (e: MessageEvent) => {
       try {
         const data = e.data ? JSON.parse(e.data) : null;
-        setMessages((prev) => [...prev.slice(-99), { event: e.type, data, timestamp: Date.now() }]);
+        const msg: SSEMessage = { event: e.type, data, timestamp: Date.now() };
+        if (STATE_EVENTS.has(e.type)) {
+          setStateMessages((prev) => [...prev.slice(-49), msg]);
+        }
+        // 所有事件仍写入 messages（保持向后兼容），但 messages 只保留100条
+        setMessages((prev) => [...prev.slice(-99), msg]);
       } catch {
         // ignore parse errors
       }
@@ -112,7 +139,10 @@ export function useSSE(url = "/api/v1/events") {
     };
   }, [url]);
 
-  const clear = useCallback(() => setMessages([]), []);
+  const clear = useCallback(() => {
+    setMessages([]);
+    setStateMessages([]);
+  }, []);
 
-  return { messages, connected, clear };
+  return { messages, stateMessages, connected, clear };
 }

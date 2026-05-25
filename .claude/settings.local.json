@@ -35,7 +35,8 @@
       "Bash(npx --no tsc --noEmit)",
       "Bash(node_modules/.bin/tsc --noEmit --pretty)",
       "Bash(npm ls *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(Select-Object -First 50)"
     ]
   }
 }

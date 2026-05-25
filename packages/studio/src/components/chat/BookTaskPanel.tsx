@@ -42,7 +42,7 @@ interface BookTaskPanelProps {
   readonly selectedModel: string | null;
   readonly selectedService: string | null;
   readonly onManageModels?: () => void;
-  readonly sse: { messages: ReadonlyArray<SSEMessage>; connected: boolean };
+  readonly sse: { messages: ReadonlyArray<SSEMessage>; stateMessages: ReadonlyArray<SSEMessage>; connected: boolean };
 }
 
 const MAX_TASK_LOGS = 100;
@@ -357,10 +357,10 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
   }, [hasLiveTask]);
 
   useEffect(() => {
-    if (sse.messages.length === 0) return;
+    if (sse.stateMessages.length === 0) return;
     setTasks((prev) => {
       let next = prev;
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         if ((message.data as { bookId?: string } | null)?.bookId !== bookId) continue;
         const eventTask = message.data as { task?: BookTaskSnapshot; log?: RunLogEntry; exceptionLog?: RunLogEntry } | null;
@@ -372,7 +372,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
     });
     setTaskLogsByKey((prev) => {
       const next = { ...prev };
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         if ((message.data as { bookId?: string } | null)?.bookId !== bookId) continue;
         if (message.event !== "book-task:log") continue;
@@ -392,7 +392,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
     });
     setTaskStageHistoryByKey((prev) => {
       const next = { ...prev };
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         if ((message.data as { bookId?: string } | null)?.bookId !== bookId) continue;
         const eventTask = message.data as { task?: BookTaskSnapshot } | null;
@@ -404,7 +404,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
     });
     setTaskTokenSamplesByKey((prev) => {
       const next = { ...prev };
-      for (const message of sse.messages) {
+      for (const message of sse.stateMessages) {
         if (!message.event.startsWith("book-task:")) continue;
         if ((message.data as { bookId?: string } | null)?.bookId !== bookId) continue;
         const eventTask = message.data as { task?: BookTaskSnapshot } | null;
@@ -418,7 +418,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
       }
       return next;
     });
-  }, [bookId, sse.messages]);
+  }, [bookId, sse.stateMessages]);
 
   const handleCreateTask = async () => {
     if (busy) return;
