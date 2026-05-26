@@ -34,11 +34,11 @@ describe("buildHookDebtHardConstraintBlock", () => {
     expect(result).toBeUndefined();
   });
 
-  it("returns stale hooks block for hooks dormant 10+ chapters", () => {
+  it("returns stale hooks block for hooks dormant beyond timing threshold", () => {
     const result = buildHookDebtHardConstraintBlock({
       hooks: [
         makeHook({ hookId: "H01", startChapter: 1, lastAdvancedChapter: 1, type: "character" }),
-        makeHook({ hookId: "H02", startChapter: 5, lastAdvancedChapter: 8 }),
+        makeHook({ hookId: "H02", startChapter: 5, lastAdvancedChapter: 10 }),
       ],
       chapterNumber: 15,
       language: "zh",
@@ -51,7 +51,7 @@ describe("buildHookDebtHardConstraintBlock", () => {
   it("returns resolvable hooks block for hooks ready to pay off", () => {
     const result = buildHookDebtHardConstraintBlock({
       hooks: [
-        makeHook({ hookId: "H01", startChapter: 5, lastAdvancedChapter: 13, expectedPayoff: "reveal truth" }),
+        makeHook({ hookId: "H01", startChapter: 10, lastAdvancedChapter: 13, expectedPayoff: "reveal truth", payoffTiming: "slow-burn" }),
         makeHook({ hookId: "H02", startChapter: 10, lastAdvancedChapter: 14 }),
       ],
       chapterNumber: 15,
@@ -77,7 +77,7 @@ describe("buildHookDebtHardConstraintBlock", () => {
   it("returns dormant block when no 10+ chapter stale hooks exist", () => {
     const result = buildHookDebtHardConstraintBlock({
       hooks: [
-        makeHook({ hookId: "H01", startChapter: 6, lastAdvancedChapter: 6 }),
+        makeHook({ hookId: "H01", startChapter: 6, lastAdvancedChapter: 7 }),
       ],
       chapterNumber: 12,
       language: "zh",

@@ -149,6 +149,72 @@ export const HOOK_HEALTH_DEFAULTS = {
   maxResolvePerChapter: 3,
 } as const;
 
+/**
+ * Per-phase pool size limits and per-chapter new/resolve quotas.
+ *
+ * As the story progresses the pool must shrink, not grow:
+ *   opening  → build up threads (max 6)
+ *   middle   → sustain complexity (max 10)
+ *   late     → begin winding down (max 8, force ≥2 resolves when full)
+ *   endgame  → clear the board (max 4, no new hooks, force ≥3 resolves)
+ */
+export const HOOK_POOL_PHASE_LIMITS: Record<HookPhase | "endgame", {
+  readonly maxActive: number;
+  readonly maxNewPerChapter: number;
+  readonly minResolveWhenFull: number;
+}> = {
+  opening: {
+    maxActive: 6,
+    maxNewPerChapter: 2,
+    minResolveWhenFull: 1,
+  },
+  middle: {
+    maxActive: 10,
+    maxNewPerChapter: 2,
+    minResolveWhenFull: 1,
+  },
+  late: {
+    maxActive: 8,
+    maxNewPerChapter: 1,
+    minResolveWhenFull: 2,
+  },
+  endgame: {
+    maxActive: 4,
+    maxNewPerChapter: 0,
+    minResolveWhenFull: 3,
+  },
+} as const;
+
+/**
+ * Per-timing stale dormancy thresholds (chapters without any advance).
+ *
+ * Replaces the single HOOK_HEALTH_DEFAULTS.staleAfterChapters=10 with
+ * timing-aware values so short-arc hooks are flagged much sooner:
+ *   immediate  → stale after 3 chapters  (overdueAge=3)
+ *   near-term  → stale after 4 chapters  (overdueAge=5)
+ *   mid-arc    → stale after 6 chapters  (overdueAge=8)
+ *   slow-burn  → stale after 10 chapters (overdueAge=12)
+ *   endgame    → stale after 12 chapters (overdueAge=16)
+ */
+export const HOOK_STALE_THRESHOLDS: Record<HookPayoffTiming, number> = {
+  immediate: 3,
+  "near-term": 4,
+  "mid-arc": 6,
+  "slow-burn": 10,
+  endgame: 12,
+} as const;
+
 export function resolveHookVisibilityWindow(timing: HookPayoffTiming): number {
   return HOOK_VISIBILITY_WINDOWS[timing];
+}
+
+/**
+ * Resolve the effective phase-based pool limit for the current chapter.
+ * Returns the HOOK_POOL_PHASE_LIMITS entry for the given phase, falling back
+ * to "middle" when the phase is not one of the four known values.
+ */
+export function resolveHookPoolPhaseLimit(
+  phase: HookPhase | "endgame",
+): typeof HOOK_POOL_PHASE_LIMITS[HookPhase | "endgame"] {
+  return HOOK_POOL_PHASE_LIMITS[phase] ?? HOOK_POOL_PHASE_LIMITS.middle;
 }

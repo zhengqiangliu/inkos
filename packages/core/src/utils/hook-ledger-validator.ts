@@ -119,10 +119,20 @@ export function parseHookLedger(memoBody: string): HookLedger {
  * "揭 1 埋 2" rule is a planner-prompt recommendation, not a hard gate here,
  * because enforcing ×2 would conflict with the "≤ 2 new hooks per chapter"
  * cap on the planner side when resolve=2.
+ *
+ * Pool-size overrides:
+ * - Net-reduction mode (activeHookCount > maxActiveHooks): the "揭 1 埋 1"
+ *   floor is suspended so the pool can actually shrink. The story already has
+ *   too many open threads; forcing equal replacement prevents recovery.
+ * - Strict net-reduction mode (activeHookCount >= maxActiveHooks * 1.5):
+ *   the pool is critically overloaded. Opening as many hooks as you resolve
+ *   is itself a violation — you must open fewer than you resolve.
  */
 export function validateHookLedger(
   memoBody: string,
   draftContent: string,
+  activeHookCount: number = 0,
+  maxActiveHooks: number = 12,
 ): ReadonlyArray<HookLedgerViolation> {
   const ledger = parseHookLedger(memoBody);
   const violations: HookLedgerViolation[] = [];
@@ -140,21 +150,41 @@ export function validateHookLedger(
     }
   }
 
-  // "揭 1 埋 1" hard floor: when anything was resolved, at least the same
-  // number of new hooks must have been opened. We count both `[new]`
-  // placeholder lines (newOpenCount — the normal way planners declare fresh
-  // hooks without an id) and any id-bearing lines under `open:` (rare, but
-  // legal if a planner re-opens a previously paused hook).
   const resolvedCount = ledger.resolve.length;
   const openedCount = ledger.open.length + ledger.newOpenCount;
-  if (resolvedCount > 0 && openedCount < resolvedCount) {
-    violations.push({
-      severity: "critical",
-      category: "hook 账揭 1 埋 1 违规",
-      description: `本章 resolve 了 ${resolvedCount} 个钩子，但 open 只有 ${openedCount} 个新钩子。只揭不埋会让读者豁然开朗后索然无味，本书的前进拉力被削弱。`,
-      suggestion: `在 memo 的 open 段下至少再埋 ${resolvedCount - openedCount} 个与本章已揭钩子相关的新钩子（番茄老师徐二家的猫："掀开一个伏笔的同时，再埋两个伏笔"）。新钩子最好与已揭钩子彼此关联，不要凭空冒出来。`,
-    });
+
+  // Determine pool pressure mode based on active hook count.
+  // strictNetReductionMode: pool is critically overloaded (≥ 1.5× limit).
+  //   Opening as many hooks as you resolve is itself a violation.
+  // netReductionMode: pool is over the limit but not critical.
+  //   "揭 1 埋 1" floor is suspended — allow resolving without opening.
+  // Normal mode: standard "揭 1 埋 1" hard floor applies.
+  const strictNetReductionMode = activeHookCount >= Math.ceil(maxActiveHooks * 1.5);
+  const netReductionMode = !strictNetReductionMode && activeHookCount > maxActiveHooks;
+
+  if (strictNetReductionMode) {
+    // Critical overload: must open fewer hooks than resolved (net reduction required).
+    if (resolvedCount > 0 && openedCount >= resolvedCount) {
+      violations.push({
+        severity: "critical",
+        category: "hook 账净减违规",
+        description: `伏笔池严重超标（当前 ${activeHookCount} 个活跃，上限 ${maxActiveHooks}）。本章 resolve 了 ${resolvedCount} 个但 open 了 ${openedCount} 个，池子未净减。`,
+        suggestion: `严重超标模式下，open 数量必须少于 resolve 数量（建议 open ≤ ${Math.max(0, resolvedCount - 1)} 个）。优先消化旧债，暂停新增伏笔。`,
+      });
+    }
+  } else if (!netReductionMode) {
+    // Normal mode: "揭 1 埋 1" hard floor — resolve N → must open ≥ N.
+    if (resolvedCount > 0 && openedCount < resolvedCount) {
+      violations.push({
+        severity: "critical",
+        category: "hook 账揭 1 埋 1 违规",
+        description: `本章 resolve 了 ${resolvedCount} 个钩子，但 open 只有 ${openedCount} 个新钩子。只揭不埋会让读者豁然开朗后索然无味，本书的前进拉力被削弱。`,
+        suggestion: `在 memo 的 open 段下至少再埋 ${resolvedCount - openedCount} 个与本章已揭钩子相关的新钩子（番茄老师徐二家的猫："掀开一个伏笔的同时，再埋两个伏笔"）。新钩子最好与已揭钩子彼此关联，不要凭空冒出来。`,
+      });
+    }
   }
+  // netReductionMode: pool is over limit but not critical — "揭 1 埋 1" suspended,
+  // no violation emitted regardless of open/resolve ratio.
 
   return violations;
 }

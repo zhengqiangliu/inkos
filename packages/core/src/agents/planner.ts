@@ -11,7 +11,8 @@ import {
   retrieveMemorySelection,
 } from "../utils/memory-retrieval.js";
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
-import { buildPlannerHookAgenda } from "../utils/hook-agenda.js";
+import { buildPlannerHookAgenda, deriveHookDebtBudget } from "../utils/hook-agenda.js";
+import { HOOK_HEALTH_DEFAULTS } from "../utils/hook-policy.js";
 import { readBrief } from "./planner-context.js";
 
 export interface PlanChapterInput {
@@ -93,6 +94,14 @@ export class PlannerAgent extends BaseAgent {
       targetChapters: input.book.targetChapters,
       language: input.book.language ?? "zh",
     });
+    // Derive the numeric hook debt budget so the intent markdown can carry
+    // hard constraints (maxNewHooks, maxRecoveryPerChapter, hardClearMode)
+    // into the governed writer prompt via the "## 本章 hook 账" section.
+    const hookDebtBudget = deriveHookDebtBudget({
+      hooks: memorySelection.activeHooks,
+      chapterNumber: input.chapterNumber,
+      targetChapters: input.book.targetChapters,
+    });
     const directives = this.buildStructuredDirectives({
       chapterNumber: input.chapterNumber,
       language: input.book.language,
@@ -122,6 +131,7 @@ export class PlannerAgent extends BaseAgent {
       renderHookSnapshot(memorySelection.hooks, input.book.language ?? "zh"),
       renderSummarySnapshot(memorySelection.summaries, input.book.language ?? "zh"),
       activeHookCount,
+      hookDebtBudget,
     );
     await writeFile(runtimePath, intentMarkdown, "utf-8");
 
@@ -398,8 +408,8 @@ export class PlannerAgent extends BaseAgent {
   }
 
   private renderHookBudget(activeCount: number, language: "zh" | "en"): string {
-    const cap = 12;
-    if (activeCount < 10) {
+    const cap = HOOK_HEALTH_DEFAULTS.maxActiveHooks;
+    if (activeCount < cap - 2) {
       return language === "en"
         ? `### Hook Budget\n- ${activeCount} active hooks (capacity: ${cap})`
         : `### 伏笔预算\n- 当前 ${activeCount} 条活跃伏笔（容量：${cap}）`;
@@ -408,6 +418,56 @@ export class PlannerAgent extends BaseAgent {
     return language === "en"
       ? `### Hook Budget\n- ${activeCount} active hooks — approaching capacity (${cap}). Only ${remaining} new hook(s) allowed. Prioritize resolving existing debt over opening new threads.`
       : `### 伏笔预算\n- 当前 ${activeCount} 条活跃伏笔——接近容量上限（${cap}）。仅剩 ${remaining} 个新坑位。优先回收旧债，不要轻易开新线。`;
+  }
+
+  /**
+   * Render the structured hook ledger section for the chapter intent markdown.
+   *
+   * This section is parsed by validateHookLedger (P1 gate) and by the governed
+   * writer prompt (P2 injection). It carries the numeric constraints derived
+   * from deriveHookDebtBudget so the writer knows exactly how many hooks to
+   * open/recover this chapter, and which hooks are required.
+   *
+   * Format mirrors the "## 本章 hook 账" / "## Hook ledger for this chapter"
+   * heading that parseHookLedger recognises.
+   */
+  private renderHookLedgerSection(
+    budget: ReturnType<typeof deriveHookDebtBudget>,
+    language: "zh" | "en",
+  ): string {
+    const isEn = language === "en";
+    const heading = isEn ? "## Hook ledger for this chapter" : "## 本章 hook 账";
+
+    const modeNote = budget.hardClearMode
+      ? isEn
+        ? "⚠️ HARD CLEAR MODE — pool is over phase limit. Open 0 new hooks. Resolve required hooks first."
+        : "⚠️ 清债模式——伏笔池已超阶段上限。本章禁止新开伏笔，优先回收旧债。"
+      : "";
+
+    const maxNewLine = isEn
+      ? `- Max new hooks this chapter: **${budget.maxNewHooks}**`
+      : `- 本章最多新开伏笔：**${budget.maxNewHooks}** 条`;
+
+    const maxRecoverLine = isEn
+      ? `- Max hooks to recover this chapter: **${budget.maxRecoveryPerChapter}**`
+      : `- 本章最多回收伏笔：**${budget.maxRecoveryPerChapter}** 条`;
+
+    const requiredLines = budget.requiredRecoverHooks.length > 0
+      ? [
+          isEn ? "- Required to resolve:" : "- 必须回收：",
+          ...budget.requiredRecoverHooks.map((id) => `  - ${id}`),
+        ]
+      : [isEn ? "- Required to resolve: (none)" : "- 必须回收：（无）"];
+
+    const lines = [
+      heading,
+      ...(modeNote ? [modeNote, ""] : []),
+      maxNewLine,
+      maxRecoverLine,
+      ...requiredLines,
+    ];
+
+    return lines.join("\n");
   }
 
   private extractSection(content: string, headings: ReadonlyArray<string>): string | undefined {
@@ -653,6 +713,7 @@ export class PlannerAgent extends BaseAgent {
     pendingHooks: string,
     chapterSummaries: string,
     activeHookCount: number,
+    hookDebtBudget: ReturnType<typeof deriveHookDebtBudget>,
   ): string {
     const conflictLines = intent.conflicts.length > 0
       ? intent.conflicts.map((conflict) => `- ${conflict.type}: ${conflict.resolution}`).join("\n")
@@ -728,6 +789,8 @@ export class PlannerAgent extends BaseAgent {
       "",
       "## Conflicts",
       conflictLines,
+      "",
+      this.renderHookLedgerSection(hookDebtBudget, language),
       "",
       "## Pending Hooks Snapshot",
       pendingHooks,

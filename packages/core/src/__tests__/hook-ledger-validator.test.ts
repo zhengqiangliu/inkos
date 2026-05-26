@@ -183,7 +183,7 @@ advance:
     expect(violations).toEqual([]);
   });
 
-  it("flags 揭 1 埋 1 violation when a chapter resolves hooks without opening any", () => {
+  it("flags 揭 1 埋 1 violation when a chapter resolves hooks without opening any (normal pool)", () => {
     const memo = `## 本章 hook 账
 advance:
 - H007 "胖虎借条" → planted
@@ -191,7 +191,8 @@ resolve:
 - H003 "杂役腰牌" → 林秋主动摘下
 `;
     const draft = "林秋翻看胖虎借条，随后摘下杂役腰牌。";
-    const violations = validateHookLedger(memo, draft);
+    // Normal pool (activeHookCount=5, maxActiveHooks=12) → 揭1埋1 applies
+    const violations = validateHookLedger(memo, draft, 5, 12);
     expect(violations).toHaveLength(1);
     expect(violations[0]!.category).toContain("揭 1 埋 1");
   });
@@ -232,5 +233,69 @@ advance:
     const draft = "旧手机弹出定位结果，林知夏发现店外有人盯梢，安全空间塌了。";
     const violations = validateHookLedger(memo, draft);
     expect(violations).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Net-reduction mode tests (pool overload scenarios)
+  // -------------------------------------------------------------------------
+
+  it("suspends 揭 1 埋 1 in net-reduction mode (pool over limit)", () => {
+    // Pool has 14 active hooks, limit is 12 → net-reduction mode.
+    // Resolving 1 without opening any should NOT be a violation.
+    const memo = `## 本章 hook 账
+advance:
+- H007 "胖虎借条" → planted
+resolve:
+- H003 "杂役腰牌" → 林秋主动摘下
+`;
+    const draft = "林秋翻看胖虎借条，随后摘下杂役腰牌。";
+    const violations = validateHookLedger(memo, draft, 14, 12);
+    expect(violations).toEqual([]);
+  });
+
+  it("flags net-reduction violation in strict mode (pool ≥ 1.5× limit)", () => {
+    // Pool has 18 active hooks, limit is 12 → strict net-reduction mode (18 >= 18).
+    // Resolving 1 and opening 1 is a violation — must open fewer than resolved.
+    const memo = `## 本章 hook 账
+open:
+- [new] 新伏笔 || 理由
+advance:
+- H007 "胖虎借条" → planted
+resolve:
+- H003 "杂役腰牌" → 林秋主动摘下
+`;
+    const draft = "林秋翻看胖虎借条，随后摘下杂役腰牌。";
+    const violations = validateHookLedger(memo, draft, 18, 12);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.category).toContain("净减违规");
+  });
+
+  it("passes in strict net-reduction mode when open < resolve", () => {
+    // Pool has 20 active hooks, limit is 12 → strict net-reduction mode.
+    // Resolving 2 and opening 0 is correct (net reduction of 2).
+    const memo = `## 本章 hook 账
+advance:
+- H007 "胖虎借条" → planted
+resolve:
+- H003 "杂役腰牌" → 林秋主动摘下
+- H005 "通行印验号" → 验号核对完成
+`;
+    const draft = "林秋翻看胖虎借条，随后摘下杂役腰牌，通行印验号核对完成。";
+    const violations = validateHookLedger(memo, draft, 20, 12);
+    expect(violations).toEqual([]);
+  });
+
+  it("uses default activeHookCount=0 when not provided (backward compat)", () => {
+    // Old call sites that don't pass activeHookCount should still work.
+    // With activeHookCount=0, normal mode applies.
+    const memo = `## 本章 hook 账
+resolve:
+- H003 "杂役腰牌" → 林秋主动摘下
+`;
+    const draft = "林秋摘下杂役腰牌。";
+    // No open hooks → 揭1埋1 violation in normal mode
+    const violations = validateHookLedger(memo, draft);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.category).toContain("揭 1 埋 1");
   });
 });

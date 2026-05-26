@@ -2,11 +2,69 @@ import type { HookAgenda } from "../models/input-governance.js";
 import type { HookRecord, HookStatus } from "../models/runtime-state.js";
 import type { StoredHook } from "../state/memory-db.js";
 import { resolveHookPayoffTiming, localizeHookPayoffTiming } from "./hook-lifecycle.js";
-import { HOOK_HEALTH_DEFAULTS } from "./hook-policy.js";
+import {
+  HOOK_HEALTH_DEFAULTS,
+  HOOK_POOL_PHASE_LIMITS,
+  HOOK_STALE_THRESHOLDS,
+  HOOK_TIMING_PROFILES,
+  type HookPhase,
+} from "./hook-policy.js";
 
 export const DEFAULT_HOOK_LOOKAHEAD_CHAPTERS = 3;
 
 export const DEFAULT_MAX_RECOVERY_PER_CHAPTER = 3;
+
+/**
+ * Infer the effective expected-payoff chapter for a hook that has no explicit
+ * expectedChapter set. Uses the timing profile's overdueAge as the deadline
+ * window, measured from the hook's startChapter.
+ *
+ * Only applies when the hook has an explicit payoffTiming field OR has
+ * meaningful payoff signal text (expectedPayoff / notes). Hooks with no
+ * timing signal at all are left without a deadline — they are handled by
+ * the stale/dormant detection path instead.
+ *
+ * This ensures every hook with a declared timing has a soft deadline even
+ * when the planner didn't assign expectedChapter explicitly, while avoiding
+ * false overdue flags for hooks that were never given any timing signal.
+ */
+export function inferExpectedChapter(hook: StoredHook, _currentChapter: number): number | undefined {
+  if (hook.expectedChapter != null && hook.expectedChapter > 0) {
+    return hook.expectedChapter;
+  }
+  // Only infer a deadline when the hook has an explicit timing signal.
+  const hasExplicitTiming = hook.payoffTiming != null && hook.payoffTiming.trim().length > 0;
+  const hasPayoffSignal = (hook.expectedPayoff?.trim().length ?? 0) > 0
+    || (hook.notes?.trim().length ?? 0) > 0;
+  if (!hasExplicitTiming && !hasPayoffSignal) {
+    return undefined;
+  }
+  const timing = resolveHookPayoffTiming(hook);
+  const profile = HOOK_TIMING_PROFILES[timing];
+  return Math.max(1, hook.startChapter) + profile.overdueAge;
+}
+
+/**
+ * Resolve the story phase for a given chapter number.
+ * Mirrors the logic in hook-lifecycle.ts resolveHookPhase but also returns
+ * "endgame" for the final 10% of the story (when targetChapters is known).
+ */
+export function resolveStoryPhase(
+  chapterNumber: number,
+  targetChapters?: number,
+): HookPhase | "endgame" {
+  if (targetChapters && targetChapters > 0) {
+    const progress = chapterNumber / targetChapters;
+    if (progress >= 0.90) return "endgame";
+    if (progress >= 0.72) return "late";
+    if (progress >= 0.33) return "middle";
+    return "opening";
+  }
+  // Fallback when total chapter count is unknown: use absolute chapter numbers.
+  if (chapterNumber >= 32) return "late";
+  if (chapterNumber >= 8) return "middle";
+  return "opening";
+}
 
 export interface HookDebtBudget {
   readonly hardClearMode: boolean;
@@ -24,6 +82,10 @@ export interface HookDebtBudget {
  * Build the hook agenda using simple stalest-first sorting.
  * No lifecycle pressure formulas — just pick the hooks that have been
  * dormant the longest and the ones that are ripe for resolution.
+ *
+ * Stale detection now uses per-timing thresholds (HOOK_STALE_THRESHOLDS)
+ * instead of a single global staleAfterChapters=10, so short-arc hooks
+ * (immediate/near-term) are flagged much sooner.
  */
 export function buildPlannerHookAgenda(params: {
   readonly hooks: ReadonlyArray<StoredHook>;
@@ -49,12 +111,14 @@ export function buildPlannerHookAgenda(params: {
     ))
     .slice(0, params.maxMustAdvance ?? 2);
 
-  // staleDebt: hooks not advanced for 10+ chapters
-  const staleThreshold = params.chapterNumber - 10;
+  // staleDebt: hooks dormant beyond their timing-specific stale threshold.
+  // Uses HOOK_STALE_THRESHOLDS[timing] instead of the old flat 10-chapter window.
   const staleDebtHooks = agendaHooks
     .filter((hook) => {
       const lastTouch = Math.max(hook.startChapter, hook.lastAdvancedChapter);
-      return lastTouch > 0 && lastTouch <= staleThreshold;
+      if (lastTouch <= 0) return false;
+      const staleThreshold = HOOK_STALE_THRESHOLDS[hook.payoffTiming ?? "mid-arc"] ?? 10;
+      return lastTouch <= params.chapterNumber - staleThreshold;
     })
     .sort((left, right) => (
       left.lastAdvancedChapter - right.lastAdvancedChapter
@@ -107,37 +171,77 @@ export function deriveHookDebtBudget(params: {
   });
 
   const activeHooks = normalizedHooks.filter((hook) => hook.status !== "resolved" && hook.status !== "deferred");
+
+  // Use inferExpectedChapter so hooks with explicit timing signals but no
+  // expectedChapter are still caught by overdue detection.
+  // Hooks with no timing signal return undefined and are excluded.
   const overdueHooks = activeHooks
-    .filter((hook) => hook.expectedChapter != null && hook.expectedChapter > 0 && hook.expectedChapter < params.chapterNumber)
-    .sort((left, right) => (
-      (left.expectedChapter ?? 0) - (right.expectedChapter ?? 0)
-      || left.lastAdvancedChapter - right.lastAdvancedChapter
-      || left.startChapter - right.startChapter
-      || left.hookId.localeCompare(right.hookId)
-    ));
+    .filter((hook) => {
+      const storedHook = params.hooks.find((h) => h.hookId === hook.hookId);
+      if (!storedHook) return false;
+      const effectiveExpected = inferExpectedChapter(storedHook, params.chapterNumber);
+      return effectiveExpected != null && effectiveExpected < params.chapterNumber;
+    })
+    .sort((left, right) => {
+      const leftStored = params.hooks.find((h) => h.hookId === left.hookId);
+      const rightStored = params.hooks.find((h) => h.hookId === right.hookId);
+      const leftExp = leftStored ? (inferExpectedChapter(leftStored, params.chapterNumber) ?? 0) : 0;
+      const rightExp = rightStored ? (inferExpectedChapter(rightStored, params.chapterNumber) ?? 0) : 0;
+      return leftExp - rightExp
+        || left.lastAdvancedChapter - right.lastAdvancedChapter
+        || left.startChapter - right.startChapter
+        || left.hookId.localeCompare(right.hookId);
+    });
+
   const activeCount = activeHooks.length;
   const overdueCount = overdueHooks.length;
   const staleCount = agenda.staleDebt.length;
   const eligibleResolveCount = agenda.eligibleResolve.length;
 
-  const hardClearMode = activeCount >= 18 || overdueCount >= 3 || staleCount >= 4 || (activeCount >= HOOK_HEALTH_DEFAULTS.maxActiveHooks && overdueCount + staleCount >= 4);
-  const highPressureMode = hardClearMode || overdueCount > 0 || staleCount >= 2 || activeCount >= HOOK_HEALTH_DEFAULTS.maxActiveHooks;
+  // Resolve the phase-based pool limit for this chapter.
+  const storyPhase = resolveStoryPhase(params.chapterNumber, params.targetChapters);
+  const phaseLimit = HOOK_POOL_PHASE_LIMITS[storyPhase];
+
+  // hardClearMode: triggered when pool exceeds the phase limit (not the old
+  // flat ≥18 threshold). This fires as soon as the pool goes over its
+  // phase-appropriate ceiling, not only when it's 50% over the global max.
+  //
+  // Additional triggers (unchanged): overdueCount≥3 or staleCount≥4.
+  const hardClearMode = activeCount > phaseLimit.maxActive
+    || overdueCount >= 3
+    || staleCount >= 4
+    || (activeCount >= HOOK_HEALTH_DEFAULTS.maxActiveHooks && overdueCount + staleCount >= 4);
+
+  const highPressureMode = hardClearMode
+    || overdueCount > 0
+    || staleCount >= 2
+    || activeCount >= phaseLimit.maxActive;
 
   const baseRecovery = params.maxRecoveryPerChapter ?? DEFAULT_MAX_RECOVERY_PER_CHAPTER;
   const recoveryTarget = hardClearMode
-    ? Math.min(5, Math.max(3, overdueCount + Math.min(staleCount, 2)))
+    ? Math.min(5, Math.max(phaseLimit.minResolveWhenFull, overdueCount + Math.min(staleCount, 2)))
     : overdueCount > 0
       ? Math.min(4, Math.max(2, overdueCount + 1))
       : staleCount >= 3
         ? 3
-        : Math.max(1, Math.min(baseRecovery, eligibleResolveCount > 0 ? 2 : 1));
+        : Math.max(phaseLimit.minResolveWhenFull, Math.min(baseRecovery, eligibleResolveCount > 0 ? 2 : 1));
 
   const maxRecoveryPerChapter = Math.max(1, Math.min(5, Math.max(baseRecovery, recoveryTarget)));
+
+  // maxNewHooks: respect both the caller's cap and the phase-based cap.
+  // In hardClearMode or highPressureMode, clamp to 0.
+  // In endgame phase, always 0 regardless of pressure.
+  const phaseMaxNew = phaseLimit.maxNewPerChapter;
   const maxNewHooks = Math.max(
     0,
     Math.min(
-      params.maxNewHooks ?? 3,
-      hardClearMode || highPressureMode ? 0 : staleCount >= 2 || activeCount >= HOOK_HEALTH_DEFAULTS.maxActiveHooks ? 1 : 2,
+      params.maxNewHooks ?? phaseMaxNew,
+      phaseMaxNew,
+      hardClearMode || highPressureMode
+        ? 0
+        : staleCount >= 2 || activeCount >= phaseLimit.maxActive
+          ? 1
+          : phaseMaxNew,
     ),
   );
 
@@ -153,9 +257,9 @@ export function deriveHookDebtBudget(params: {
   ]).slice(0, maxRecoveryPerChapter);
 
   const reason = hardClearMode
-    ? "伏笔债务已进入清债模式，需要优先回收旧债并停止新增"
+    ? `伏笔债务已进入清债模式（当前 ${activeCount} 个活跃，阶段上限 ${phaseLimit.maxActive}），需要优先回收旧债并停止新增`
     : highPressureMode
-      ? "伏笔债务压力偏高，需要压缩新增并优先回收旧债"
+      ? `伏笔债务压力偏高（当前 ${activeCount} 个活跃），需要压缩新增并优先回收旧债`
       : "伏笔债务处于正常压力区间";
 
   return {
@@ -202,6 +306,13 @@ export function filterActiveHooks(hooks: ReadonlyArray<StoredHook>): StoredHook[
 /**
  * Build a hard constraint block about overdue/stale/resolvable hooks
  * for injection into writer/reviser prompts.
+ *
+ * Overdue detection now uses inferExpectedChapter so hooks without an
+ * explicit expectedChapter are still surfaced when they exceed their
+ * timing-profile deadline.
+ *
+ * Stale detection uses per-timing HOOK_STALE_THRESHOLDS instead of the
+ * old flat 10-chapter window.
  */
 export function buildHookDebtHardConstraintBlock(params: {
   readonly hooks: ReadonlyArray<StoredHook>;
@@ -211,29 +322,47 @@ export function buildHookDebtHardConstraintBlock(params: {
 }): string | undefined {
   const language = params.language ?? "zh";
   const maxRecovery = params.maxRecoveryPerChapter ?? DEFAULT_MAX_RECOVERY_PER_CHAPTER;
-  const staleThreshold = params.chapterNumber - 10;
   const activeHooks = params.hooks
     .filter((hook) => hook.status !== "resolved" && hook.status !== "deferred");
 
-  // Overdue hooks: expectedChapter < currentChapter and not resolved
+  // Overdue hooks: effective expected chapter (explicit or inferred) < currentChapter.
+  // Hooks with no timing signal (inferExpectedChapter returns undefined) are excluded.
   const overdueHooks = activeHooks
-    .filter((hook) => hook.expectedChapter != null && hook.expectedChapter > 0 && hook.expectedChapter < params.chapterNumber)
-    .sort((a, b) => (a.expectedChapter ?? 0) - (b.expectedChapter ?? 0));
+    .filter((hook) => {
+      const eff = inferExpectedChapter(hook, params.chapterNumber);
+      return eff != null && eff < params.chapterNumber;
+    })
+    .sort((a, b) => {
+      const effA = inferExpectedChapter(a, params.chapterNumber) ?? 0;
+      const effB = inferExpectedChapter(b, params.chapterNumber) ?? 0;
+      return effA - effB;
+    });
 
-  // Due this chapter: expectedChapter === currentChapter
+  // Due this chapter: effective expected chapter === currentChapter.
   const dueThisChapterHooks = activeHooks
-    .filter((hook) => hook.expectedChapter === params.chapterNumber);
+    .filter((hook) => inferExpectedChapter(hook, params.chapterNumber) === params.chapterNumber);
 
-  // Approaching: expectedChapter within next 3 chapters
+  // Approaching: effective expected chapter within next 3 chapters.
   const approachingHooks = activeHooks
-    .filter((hook) => hook.expectedChapter != null && hook.expectedChapter > params.chapterNumber && hook.expectedChapter <= params.chapterNumber + 3)
-    .sort((a, b) => (a.expectedChapter ?? 0) - (b.expectedChapter ?? 0));
+    .filter((hook) => {
+      const eff = inferExpectedChapter(hook, params.chapterNumber);
+      return eff != null && eff > params.chapterNumber && eff <= params.chapterNumber + 3;
+    })
+    .sort((a, b) => {
+      const effA = inferExpectedChapter(a, params.chapterNumber) ?? 0;
+      const effB = inferExpectedChapter(b, params.chapterNumber) ?? 0;
+      return effA - effB;
+    });
 
+  // Stale hooks: dormant beyond their timing-specific stale threshold.
   const staleHooks = params.hooks
     .filter((hook) => {
       if (hook.status === "resolved" || hook.status === "deferred") return false;
       const lastTouch = Math.max(hook.startChapter, hook.lastAdvancedChapter);
-      return lastTouch > 0 && lastTouch <= staleThreshold;
+      if (lastTouch <= 0) return false;
+      const timing = resolveHookPayoffTiming(hook);
+      const staleThreshold = HOOK_STALE_THRESHOLDS[timing] ?? 10;
+      return lastTouch <= params.chapterNumber - staleThreshold;
     })
     .sort((a, b) => a.lastAdvancedChapter - b.lastAdvancedChapter)
     .filter((h) => !overdueHooks.includes(h) && !dueThisChapterHooks.includes(h) && !approachingHooks.includes(h))
@@ -269,7 +398,10 @@ export function buildHookDebtHardConstraintBlock(params: {
       lines.push(
         "### Overdue Hooks - Must Resolve",
         `These hooks have passed their expected resolution chapter and MUST be resolved:`,
-        ...overdueHooks.map((h) => `- ${h.hookId} (overdue by ${params.chapterNumber - (h.expectedChapter ?? 0)} chapters, expected ch.${h.expectedChapter})`),
+        ...overdueHooks.map((h) => {
+          const eff = inferExpectedChapter(h, params.chapterNumber) ?? h.startChapter;
+          return `- ${h.hookId} (overdue by ${params.chapterNumber - eff} chapters, expected ch.${eff})`;
+        }),
         "",
       );
     }
@@ -277,7 +409,10 @@ export function buildHookDebtHardConstraintBlock(params: {
       lines.push(
         "### Hooks Due This Chapter",
         `These hooks are scheduled for resolution in this chapter:`,
-        ...dueThisChapterHooks.map((h) => `- ${h.hookId} (expected ch.${h.expectedChapter})`),
+        ...dueThisChapterHooks.map((h) => {
+          const eff = inferExpectedChapter(h, params.chapterNumber) ?? params.chapterNumber;
+          return `- ${h.hookId} (expected ch.${eff})`;
+        }),
         "",
       );
     }
@@ -285,15 +420,22 @@ export function buildHookDebtHardConstraintBlock(params: {
       lines.push(
         "### Upcoming Hook Deadlines",
         "These hooks are due within the next 3 chapters. Consider advancing them:",
-        ...approachingHooks.map((h) => `- ${h.hookId} (expected ch.${h.expectedChapter})`),
+        ...approachingHooks.map((h) => {
+          const eff = inferExpectedChapter(h, params.chapterNumber) ?? params.chapterNumber;
+          return `- ${h.hookId} (expected ch.${eff})`;
+        }),
         "",
       );
     }
     if (staleHooks.length > 0) {
       lines.push(
         "### Hook Debt - Must Advance",
-        `These hooks have been dormant ${params.chapterNumber - staleThreshold}+ chapters. Each MUST show real progress:`,
-        ...staleHooks.map((h) => `- ${h.hookId} (${h.type}, last advanced at ch.${h.lastAdvancedChapter})`),
+        `These hooks have been dormant beyond their timing deadline. Each MUST show real progress:`,
+        ...staleHooks.map((h) => {
+          const timing = resolveHookPayoffTiming(h);
+          const staleThreshold = HOOK_STALE_THRESHOLDS[timing] ?? 10;
+          return `- ${h.hookId} (${h.type}, last advanced at ch.${h.lastAdvancedChapter}, stale after ${staleThreshold} chapters)`;
+        }),
         "",
       );
     }
@@ -322,7 +464,10 @@ export function buildHookDebtHardConstraintBlock(params: {
       lines.push(
         "### 逾期伏笔——强制回收",
         `以下伏笔已超过预期回收章节，本章必须回收：`,
-        ...overdueHooks.map((h) => `- ${h.hookId}（逾期 ${params.chapterNumber - (h.expectedChapter ?? 0)} 章，原预期第${h.expectedChapter}章回收）`),
+        ...overdueHooks.map((h) => {
+          const eff = inferExpectedChapter(h, params.chapterNumber) ?? h.startChapter;
+          return `- ${h.hookId}（逾期 ${params.chapterNumber - eff} 章，原预期第${eff}章回收）`;
+        }),
         "",
       );
     }
@@ -330,7 +475,10 @@ export function buildHookDebtHardConstraintBlock(params: {
       lines.push(
         "### 本章到期伏笔",
         `以下伏笔按计划应在本章回收：`,
-        ...dueThisChapterHooks.map((h) => `- ${h.hookId}（预期第${h.expectedChapter}章回收）`),
+        ...dueThisChapterHooks.map((h) => {
+          const eff = inferExpectedChapter(h, params.chapterNumber) ?? params.chapterNumber;
+          return `- ${h.hookId}（预期第${eff}章回收）`;
+        }),
         "",
       );
     }
@@ -338,15 +486,22 @@ export function buildHookDebtHardConstraintBlock(params: {
       lines.push(
         "### 即将到期伏笔",
         `以下伏笔在未来 3 章内到期，争取推进：`,
-        ...approachingHooks.map((h) => `- ${h.hookId}（预期第${h.expectedChapter}章回收）`),
+        ...approachingHooks.map((h) => {
+          const eff = inferExpectedChapter(h, params.chapterNumber) ?? params.chapterNumber;
+          return `- ${h.hookId}（预期第${eff}章回收）`;
+        }),
         "",
       );
     }
     if (staleHooks.length > 0) {
       lines.push(
         "### 伏笔债务——必须推进",
-        `以下伏笔已沉寂 ${params.chapterNumber - staleThreshold}+ 章，本章必须发生真实推进：`,
-        ...staleHooks.map((h) => `- ${h.hookId}（${h.type}，上次推进：第${h.lastAdvancedChapter}章）`),
+        `以下伏笔已超过其 timing 对应的沉寂上限，本章必须发生真实推进：`,
+        ...staleHooks.map((h) => {
+          const timing = resolveHookPayoffTiming(h);
+          const staleThreshold = HOOK_STALE_THRESHOLDS[timing] ?? 10;
+          return `- ${h.hookId}（${h.type}，上次推进：第${h.lastAdvancedChapter}章，${staleThreshold}章未推进即陈旧）`;
+        }),
         "",
       );
     }

@@ -95,7 +95,6 @@ function nowIso(): string {
 
 const MIN_AUDIT_PASS_SCORE = 80;
 const TASK_CENTER_AUDIT_MIN_PASS_SCORE = AUDIT_PASS_SCORE_THRESHOLD;
-const TASK_CENTER_WRITE_REPAIR_MAX_ROUNDS = 3;
 const TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS = 2;
 
 function normalizeChapterCount(value: unknown, fallback: number): number {
@@ -376,6 +375,16 @@ function normalizeNullableText(value: unknown): string | null | undefined {
   if (typeof value !== "string") return undefined;
   const text = value.trim();
   return text.length > 0 ? text : null;
+}
+
+function extractAutoReviewStopReason(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  const payload = result as {
+    readonly autoReview?: {
+      readonly stopReason?: unknown;
+    };
+  };
+  return normalizeNullableText(payload.autoReview?.stopReason) ?? null;
 }
 
 function extractChapterAuditPassed(result: unknown): boolean | null {
@@ -1813,7 +1822,6 @@ export class BookTaskController {
         const initialWordCount = extractWordCount(result) ?? task.options.wordCount ?? 0;
         const initialTokenUsage = extractTokenUsage(result) ?? latest.tokenUsage ?? null;
         const chapterAuditPassed = extractChapterAuditPassed(result);
-        const chapterRepairable = writeTaskMode.unboundedReview && typeof pipeline.reviseDraft === "function";
         let finalPipelineResult: unknown = result;
         let finalWordCount = initialWordCount;
         let finalTokenUsage = initialTokenUsage;
@@ -1872,128 +1880,12 @@ export class BookTaskController {
           };
         };
 
-        let currentAudit = finalAuditFromResult(result);
-        if (chapterRepairable && currentAudit.passed !== true) {
-          let revisionSourceAudit = currentAudit;
-          let currentIssues = currentAudit.issues;
-          let repairRound = 0;
-          let unresolvedIssueIdsFromPrevRound: string[] = [];
-          const totalRepairRounds = TASK_CENTER_WRITE_REPAIR_MAX_ROUNDS;
-          while (repairRound < totalRepairRounds && finalAuditPassed !== true) {
-            repairRound += 1;
-            const severityCounts = countAuditIssueSeverities(currentIssues);
-            const revisionScore = revisionSourceAudit.score ?? estimateAuditScore(severityCounts);
-            const reviseContext = buildFullReviseContext({
-              issues: currentIssues,
-              severityCounts,
-              score: revisionScore,
-              unresolvedIssueIdsFromPrevRound: unresolvedIssueIdsFromPrevRound.length > 0
-                ? unresolvedIssueIdsFromPrevRound
-                : undefined,
-            });
-            const revisionMode = selectReviseMode(
-              severityCounts,
-              repairRound,
-              reviseContext.primaryIssueClass ?? "none",
-            );
-            const revisionBrief = buildTaskCenterRevisionBrief({
-              chapterNumber: resolvedChapterNumber,
-              score: revisionScore,
-              threshold: MIN_AUDIT_PASS_SCORE,
-              summary: revisionSourceAudit.summary,
-              report: revisionSourceAudit.report,
-              severityCounts,
-              issues: currentIssues,
-            });
-            task = await this.updateStage(
-              latest,
-              "revise",
-              `第 ${resolvedChapterNumber} 章审计未通过，正在自动修订（第 ${repairRound}/${totalRepairRounds} 轮）`,
-            );
-            await this.appendTaskLog(
-              task,
-              "warn",
-              `第 ${resolvedChapterNumber} 章审计未通过，进入任务中心自动修订第 ${repairRound}/${totalRepairRounds} 轮。`,
-            );
-            const reviseResult = await pipeline.reviseDraft(bookId, resolvedChapterNumber, revisionMode, {
-              userBrief: revisionBrief,
-              reviseContext,
-            }) as {
-              readonly status?: string;
-              readonly applied?: boolean;
-              readonly wordCount?: number;
-              readonly tokenUsage?: { promptTokens: number; completionTokens: number; totalTokens: number };
-              readonly audit?: {
-                readonly passed?: boolean;
-                readonly score?: number;
-                readonly issueCount?: number;
-                readonly summary?: string;
-                readonly report?: string;
-                readonly severityCounts?: Readonly<{
-                  critical: number;
-                  warning: number;
-                  info: number;
-                }>;
-                readonly issues?: ReadonlyArray<{
-                  readonly severity?: string;
-                  readonly category?: string;
-                  readonly description?: string;
-                }>;
-              };
-            };
-            finalPipelineResult = reviseResult;
-            finalWordCount = extractWordCount(reviseResult) ?? finalWordCount;
-            finalTokenUsage = addTokenUsage(finalTokenUsage, extractTokenUsage(reviseResult));
-            finalRevisionApplied = finalRevisionApplied || Boolean(reviseResult.applied);
-            finalRevisionStatus = typeof reviseResult.status === "string" ? reviseResult.status : finalRevisionStatus;
-            const revisionAudit = reviseResult.audit ?? null;
-            const revisionSeverityCounts = revisionAudit?.severityCounts
-              ?? countAuditIssueSeverities(revisionAudit?.issues ?? []);
-            finalRevisionAuditScore = typeof revisionAudit?.score === "number"
-              ? revisionAudit.score
-              : estimateAuditScore(revisionSeverityCounts);
-            finalAuditPassed = Boolean(revisionAudit?.passed ?? reviseResult.status === "ready-for-review")
-              && (finalRevisionAuditScore === null || finalRevisionAuditScore >= MIN_AUDIT_PASS_SCORE);
-            if (finalAuditPassed) {
-              currentAudit = {
-                passed: true,
-                score: finalRevisionAuditScore,
-                issueCount: typeof revisionAudit?.issueCount === "number"
-                  ? revisionAudit.issueCount
-                  : currentIssues.length,
-                summary: revisionAudit?.summary ?? null,
-                report: revisionAudit?.report ?? null,
-                issues: revisionAudit?.issues ?? [],
-              };
-              break;
-            }
-            revisionSourceAudit = {
-              passed: false,
-              score: finalRevisionAuditScore,
-              issueCount: typeof revisionAudit?.issueCount === "number"
-                ? revisionAudit.issueCount
-                : currentIssues.length,
-              summary: revisionAudit?.summary ?? currentAudit.summary,
-              report: revisionAudit?.report ?? currentAudit.report,
-              issues: revisionAudit?.issues ?? currentIssues,
-            };
-            // Track unresolved issues for next round
-            const prevIssueIds = buildIssueIdList(currentIssues);
-            const nextIssues = revisionAudit?.issues ?? currentIssues;
-            const prevDescriptions = currentIssues
-              .filter((i) => i.severity === "critical" || i.severity === "warning")
-              .map((i) => (i.description ?? "").slice(0, 50));
-            const nextDescriptions = new Set(
-              nextIssues
-                .filter((i) => i.severity === "critical" || i.severity === "warning")
-                .map((i) => (i.description ?? "").slice(0, 50)),
-            );
-            unresolvedIssueIdsFromPrevRound = prevIssueIds.filter(
-              (_id, index) => index < prevDescriptions.length && nextDescriptions.has(prevDescriptions[index]!),
-            );
-            currentAudit = revisionSourceAudit;
-            currentIssues = revisionAudit?.issues ?? currentIssues;
-          }
+        const currentAudit = finalAuditFromResult(result);
+        if (currentAudit.passed !== true) {
+          finalRevisionStatus = typeof result === "object" && result && "status" in result && typeof (result as { status?: unknown }).status === "string"
+            ? String((result as { status?: unknown }).status)
+            : finalRevisionStatus;
+          finalRevisionAuditScore = currentAudit.score;
         }
 
         const wordCount = finalWordCount;
@@ -2006,7 +1898,7 @@ export class BookTaskController {
           passedChapters: passedChaptersAfterThisRound,
           failedChapters: failedChaptersAfterThisRound,
         });
-        if (chapterAuditPassed !== null || chapterRepairable) {
+        if (chapterAuditPassed !== null) {
           auditTotalChapters = auditedChaptersAfterThisRound;
           if (finalAuditPassed) {
             auditPassedChapters = passedChaptersAfterThisRound;
@@ -2014,8 +1906,12 @@ export class BookTaskController {
             auditFailedChapters = failedChaptersAfterThisRound;
           }
         }
-        if (chapterRepairable && !finalAuditPassed) {
-          const failureMessage = `第 ${resolvedChapterNumber} 章在任务中心自动修订 ${TASK_CENTER_WRITE_REPAIR_MAX_ROUNDS} 轮后仍未通过审计。`;
+        if (!finalAuditPassed) {
+          const autoReviewReason = currentAudit.report?.trim()
+            || currentAudit.summary?.trim()
+            || extractAutoReviewStopReason(result)
+            || "";
+          const failureMessage = `第 ${resolvedChapterNumber} 章未通过自动复审${autoReviewReason ? `：${autoReviewReason}` : ""}。`;
           const failed = await this.store.setStatus(bookId, taskId, "failed", {
             finishedAt: nowIso(),
             error: failureMessage,

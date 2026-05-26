@@ -335,6 +335,8 @@ export class WriterAgent extends BaseAgent {
             dialogueQuoteGuideline,
             previousChapterTail,
             maxRecoveryPerChapter: input.chapterPlan?.maxRecoveryPerChapter,
+            maxNewHooks: input.chapterPlan?.maxNewHooks,
+            requiredRecoverHooks: input.chapterPlan?.requiredRecoverHooks,
             auditGatePreview,
           });
         })();
@@ -575,7 +577,7 @@ export class WriterAgent extends BaseAgent {
         });
       }
 
-      if ((hardHookBudget?.hardClearMode || beforeOverdueCount > 0) && afterOverdueCount >= beforeOverdueCount) {
+      if (beforeOverdueCount > 0 && afterOverdueCount >= beforeOverdueCount) {
         hookBudgetViolations.push({
           rule: "hook-budget-overdue-not-reduced",
           severity: hardHookBudget?.hardClearMode ? "error" : "warning",
@@ -632,12 +634,15 @@ export class WriterAgent extends BaseAgent {
     if (hardHookBudget?.hardClearMode) {
       const hardFailures = hookBudgetViolations.filter((violation) => violation.severity === "error");
       if (hardFailures.length > 0) {
-        const detail = hardFailures.map((violation) => violation.description).join("；");
-        throw new Error(
-          resolvedLanguage === "en"
-            ? `Hook debt clear-mode validation failed for chapter ${chapterNumber}: ${detail}`
-            : `第${chapterNumber}章伏笔清债校验失败：${detail}`,
-        );
+        // Do NOT throw — let the review-cycle reviser handle it.
+        // The violations are already in postWriteErrors; log a warning so the pipeline can see them.
+        this.logWarn(resolvedLanguage, {
+          zh: `第${chapterNumber}章伏笔清债校验失败（${hardFailures.length} 条错误），将进入修订流程。`,
+          en: `Hook debt clear-mode validation failed for chapter ${chapterNumber} (${hardFailures.length} error(s)); entering revision flow.`,
+        });
+        for (const v of hardFailures) {
+          this.ctx.logger?.warn(`[hook-debt] ${v.rule}: ${v.description}`);
+        }
       }
     }
 
@@ -988,6 +993,8 @@ export class WriterAgent extends BaseAgent {
     readonly dialogueQuoteGuideline?: string;
     readonly previousChapterTail?: string;
     readonly maxRecoveryPerChapter?: number;
+    readonly maxNewHooks?: number;
+    readonly requiredRecoverHooks?: ReadonlyArray<string>;
     readonly auditGatePreview?: string;
   }): string {
     const contextBlock = params.externalContext
@@ -1051,6 +1058,18 @@ ${params.parentCanon}\n`
         : `\n## 伏笔债务硬约束（必须遵守）\n${hookDebtConstraint}\n`)
       : "";
 
+    const maxNewHooksBlock = params.maxNewHooks !== undefined
+      ? (params.language === "en"
+        ? `\n## New Hook Cap (Hard Constraint)\nYou may introduce at most **${params.maxNewHooks}** new foreshadowing hooks in this chapter. Do not exceed this limit.\n`
+        : `\n## 新增伏笔上限（硬约束）\n本章最多新增 **${params.maxNewHooks}** 条伏笔。严禁超出此上限。\n`)
+      : "";
+
+    const requiredRecoverBlock = params.requiredRecoverHooks && params.requiredRecoverHooks.length > 0
+      ? (params.language === "en"
+        ? `\n## Required Hook Recoveries (Hard Constraint)\nThe following foreshadowing hooks MUST be explicitly resolved or meaningfully advanced in this chapter's narrative. Do not skip any of them:\n${params.requiredRecoverHooks.map((id) => `- ${id}`).join("\n")}\n`
+        : `\n## 本章必须回收的伏笔（硬约束）\n以下伏笔必须在本章正文中明确回收或有实质性推进，不得遗漏：\n${params.requiredRecoverHooks.map((id) => `- ${id}`).join("\n")}\n`)
+      : "";
+
     const previousChapterTailBlock = params.previousChapterTail
       ? (params.language === "en"
         ? `\n## Seamless Transition Guide\nThis chapter must start in seamless continuation from where the previous chapter left off — no time, space, or emotional leaps.\n\nEnd of previous chapter:\n${params.previousChapterTail}\n\nRules:\n1. The first paragraph should naturally connect to the previous chapter's ending plot/tone.\n2. If the previous chapter ended with dialogue, action, or a scene, start from the same scene or the immediate next moment.\n3. Do not re-introduce existing characters or settings at the chapter opening.\n`
@@ -1066,7 +1085,8 @@ ${params.parentCanon}\n`
 ${contextBlock}
 ${previousChapterTailBlock}
 ${hookDebtConstraintBlock}
-
+${maxNewHooksBlock}
+${requiredRecoverBlock}
 ## Current State
 ${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
@@ -1099,7 +1119,8 @@ ${auditGateBlock}
 ${contextBlock}
 ${previousChapterTailBlock}
 ${hookDebtConstraintBlock}
-
+${maxNewHooksBlock}
+${requiredRecoverBlock}
 ## 当前状态卡
 ${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
@@ -1177,6 +1198,16 @@ ${auditGateBlock}
         ? `\n## Explicit Hook Agenda\n${explicitHookAgenda}\n`
         : `\n## 显式 Hook Agenda\n${explicitHookAgenda}\n`
       : "";
+    // Extract the structured hook ledger section from the chapter intent and
+    // inject it as a hard constraint block. This is the governed-path equivalent
+    // of the legacy path's buildHookDebtHardConstraintBlock injection.
+    const hookLedgerRaw = this.extractMarkdownSection(params.chapterIntent, "## 本章 hook 账")
+      ?? this.extractMarkdownSection(params.chapterIntent, "## Hook ledger for this chapter");
+    const hookLedgerBlock = hookLedgerRaw
+      ? params.language === "en"
+        ? `\n## Hook Ledger — Hard Constraints (MUST FOLLOW)\n${hookLedgerRaw}\n`
+        : `\n## 伏笔账硬约束（必须遵守）\n${hookLedgerRaw}\n`
+      : "";
     const dialogueQuoteBlock = params.dialogueQuoteGuideline
       ? params.language === "en"
         ? `\n## Dialogue Quote Convention\n${params.dialogueQuoteGuideline}\n`
@@ -1208,7 +1239,7 @@ ${externalContextBlock}
 ${contextSections || "(none)"}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
-
+${hookLedgerBlock}
 ## Rule Stack
 - Hard: ${params.ruleStack.sections.hard.join(", ") || "(none)"}
 - Soft: ${params.ruleStack.sections.soft.join(", ") || "(none)"}
@@ -1239,6 +1270,7 @@ ${externalContextBlock}
 ${contextSections || "(无)"}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
+${hookLedgerBlock}
 
 ## 规则栈
 - 硬护栏：${params.ruleStack.sections.hard.join("、") || "(无)"}

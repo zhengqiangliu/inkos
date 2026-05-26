@@ -46,6 +46,9 @@ import { runChapterReviewCycle } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir } from "./persisted-governed-plan.js";
 import { ChapterPlanSchema, type ChapterPlan } from "../models/chapter-plan.js";
+import { parsePendingHooksMarkdown } from "../utils/story-markdown.js";
+import { filterActiveHooks, resolveStoryPhase } from "../utils/hook-agenda.js";
+import { HOOK_POOL_PHASE_LIMITS, HOOK_STALE_THRESHOLDS } from "../utils/hook-policy.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -1482,6 +1485,7 @@ export class PipelineRunner {
         chapterNumber,
         target: "write-next",
         language: book.language ?? gp.language,
+        targetChapters: book.targetChapters,
       });
       const writeInputWithPreflight = this.applyReviewPreflightToWriteInput(
         writeInput,
@@ -1851,6 +1855,7 @@ export class PipelineRunner {
         chapterNumber: targetChapter,
         target: "revise",
         language,
+        targetChapters: book.targetChapters,
       });
       const reviseAuditControlInputWithPreflight = this.withPreflightControlInput(
         reviseAuditControlInput,
@@ -2449,6 +2454,7 @@ export class PipelineRunner {
       chapterNumber,
       target: "write-next",
       language: pipelineLang,
+      targetChapters: book.targetChapters,
     });
     const writeInputWithPreflight = this.applyReviewPreflightToWriteInput(
       writeInput,
@@ -2500,6 +2506,13 @@ export class PipelineRunner {
     // Token usage accumulator
     let totalUsage: TokenUsageSummary = output.tokenUsage ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
+    // Compute active hook count for hook-ledger net-reduction mode detection.
+    const hooksMarkdownForAudit = await readFile(
+      join(bookDir, "story", "pending_hooks.md"), "utf-8",
+    ).catch(() => "");
+    const activeHookCountForAudit = filterActiveHooks(
+      parsePendingHooksMarkdown(hooksMarkdownForAudit),
+    ).length;
     const reviewResult = await runChapterReviewCycle({
       book: { genre: book.genre },
       bookDir,
@@ -2543,6 +2556,17 @@ export class PipelineRunner {
       analyzeAITells,
       analyzeSensitiveWords,
       preflightSignals: reviewPreflight.signals,
+      activeHookCount: activeHookCountForAudit,
+      hookDebtContext: writeInput.chapterPlan
+        ? {
+            requiredRecoverHooks: writeInput.chapterPlan.requiredRecoverHooks,
+            staleDebt: writeInput.chapterPlan.hookAssignment.filter(
+              (id) => !writeInput.chapterPlan!.requiredRecoverHooks.includes(id),
+            ),
+            hardClearMode: writeInput.chapterPlan.maxNewHooks === 0,
+            language: pipelineLang,
+          }
+        : undefined,
       logWarn: (message) => this.logWarn(pipelineLang, message),
       logStage: (message) => this.logStage(stageLanguage, message),
       reviseMode: "spot-fix",
@@ -4969,6 +4993,7 @@ ${matrix}`,
     chapterNumber: number;
     target: "write-next" | "revise";
     language: LengthLanguage;
+    targetChapters?: number;
   }): Promise<ReviewPreflightResult> {
     const storyDir = join(params.bookDir, "story");
     const [volumeOutline, currentState, pendingHooks, ledger, syncProgressRaw] = await Promise.all([
@@ -5026,6 +5051,11 @@ ${matrix}`,
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line.startsWith("|") && !line.includes("---"));
+    // Use phase-aware stale threshold: mid-arc (6 chapters) as the default since
+    // the markdown table doesn't carry per-hook payoffTiming.
+    const storyPhase = resolveStoryPhase(params.chapterNumber, params.targetChapters);
+    const phaseLimit = HOOK_POOL_PHASE_LIMITS[storyPhase] ?? HOOK_POOL_PHASE_LIMITS.middle;
+    const staleAgeThreshold = HOOK_STALE_THRESHOLDS["mid-arc"]; // conservative default: 6 chapters
     const staleHooks = hookRows.filter((line) => {
       const normalized = line.toLowerCase();
       if (normalized.includes("| closed |") || normalized.includes("| 回收 |")) return false;
@@ -5033,9 +5063,10 @@ ${matrix}`,
       const chapterCell = cells.find((cell) => /^\d+$/.test(cell));
       if (!chapterCell) return false;
       const start = Number.parseInt(chapterCell, 10);
-      return Number.isFinite(start) && params.chapterNumber - start >= 8;
+      return Number.isFinite(start) && params.chapterNumber - start >= staleAgeThreshold;
     });
-    if (staleHooks.length >= 3) {
+    // Trigger when stale count reaches the phase's active-pool limit (instead of hardcoded 3).
+    if (staleHooks.length >= phaseLimit.maxActive) {
       signals.push({
         code: "hook_debt_pressure",
         severity: "warning",

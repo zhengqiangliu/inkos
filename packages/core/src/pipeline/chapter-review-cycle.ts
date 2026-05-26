@@ -5,6 +5,8 @@ import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { countChapterLength, isOutsideSoftRange } from "../utils/length-metrics.js";
 import { countAuditIssueClasses, isStructuralAuditIssue, resolvePrimaryIssueClass, splitAuditIssuesByClass } from "../utils/audit-issue-classification.js";
+import { validateHookLedger } from "../utils/hook-ledger-validator.js";
+import { HOOK_HEALTH_DEFAULTS } from "../utils/hook-policy.js";
 
 export interface ChapterReviewCycleUsage {
   readonly promptTokens: number;
@@ -531,6 +533,68 @@ function applyLengthGateToAuditResult(params: {
   };
 }
 
+/**
+ * Build an external-context block for the reviser when hook-budget violations
+ * are detected in clear-debt mode. Tells the LLM exactly which hooks to recover.
+ */
+function buildHookDebtReviseBlock(ctx: {
+  readonly requiredRecoverHooks: ReadonlyArray<string>;
+  readonly staleDebt: ReadonlyArray<string>;
+  readonly hardClearMode: boolean;
+  readonly language: "zh" | "en";
+}): string {
+  const isEn = ctx.language === "en";
+  const lines: string[] = [];
+
+  if (isEn) {
+    lines.push("## Hook Debt Recovery — Mandatory Revision Directive");
+    if (ctx.hardClearMode) {
+      lines.push(
+        "⚠️ HARD CLEAR MODE: The hook pool is over its phase limit.",
+        "This revision MUST reduce the active hook count. Do NOT introduce any new hooks.",
+      );
+    }
+    if (ctx.requiredRecoverHooks.length > 0) {
+      lines.push(
+        "",
+        "The following hooks MUST be explicitly resolved or meaningfully advanced in the revised chapter:",
+        ...ctx.requiredRecoverHooks.map((id) => `- ${id}`),
+      );
+    }
+    if (ctx.staleDebt.length > 0) {
+      lines.push(
+        "",
+        "Additionally, these long-dormant hooks should be advanced if possible:",
+        ...ctx.staleDebt.map((id) => `- ${id}`),
+      );
+    }
+  } else {
+    lines.push("## 伏笔清债修订指令（强制执行）");
+    if (ctx.hardClearMode) {
+      lines.push(
+        "⚠️ 清债模式：伏笔池已超阶段上限。",
+        "本次修订必须减少活跃伏笔数量，严禁新增任何伏笔。",
+      );
+    }
+    if (ctx.requiredRecoverHooks.length > 0) {
+      lines.push(
+        "",
+        "以下伏笔必须在修订后的正文中明确回收或有实质性推进：",
+        ...ctx.requiredRecoverHooks.map((id) => `- ${id}`),
+      );
+    }
+    if (ctx.staleDebt.length > 0) {
+      lines.push(
+        "",
+        "此外，以下长期沉睡的伏笔应尽量推进：",
+        ...ctx.staleDebt.map((id) => `- ${id}`),
+      );
+    }
+  }
+
+  return lines.join("\n");
+}
+
 export async function runChapterReviewCycle(params: {
   readonly book: Pick<{ genre: string }, "genre">;
   readonly bookDir: string;
@@ -608,6 +672,23 @@ export async function runChapterReviewCycle(params: {
     readonly message: string;
     readonly suggestion: string;
   }>;
+  /**
+   * Number of currently active (non-resolved, non-deferred) hooks in the pool.
+   * Used by validateHookLedger to determine net-reduction mode when the pool
+   * is over the phase limit. Defaults to 0 (normal mode) when not provided.
+   */
+  readonly activeHookCount?: number;
+  /**
+   * Hook debt context for clear-debt mode revisions.
+   * When postWriteErrors contain hook-budget violations, this is injected into
+   * the spot-fix reviser's externalContext so the LLM knows which hooks to recover.
+   */
+  readonly hookDebtContext?: {
+    readonly requiredRecoverHooks: ReadonlyArray<string>;
+    readonly staleDebt: ReadonlyArray<string>;
+    readonly hardClearMode: boolean;
+    readonly language: "zh" | "en";
+  };
   readonly logWarn: (message: { zh: string; en: string }) => void;
   readonly logStage: (message: { zh: string; en: string }) => void;
   readonly maxReviseRounds?: number;
@@ -673,6 +754,18 @@ export async function runChapterReviewCycle(params: {
         : {}),
     }));
     const spotFixIssueClassCounts = countIssueClasses(spotFixIssues);
+
+    // Build hook-debt injection block when hook-budget violations are present.
+    const hasHookBudgetViolation = params.initialOutput.postWriteErrors.some(
+      (v) => v.rule === "hook-budget-net-debt" || v.rule === "hook-budget-recovery-floor",
+    );
+    const hookDebtReviseBlock = hasHookBudgetViolation && params.hookDebtContext
+      ? buildHookDebtReviseBlock(params.hookDebtContext)
+      : "";
+    const spotFixExternalContext = [params.externalContext, hookDebtReviseBlock]
+      .filter(Boolean)
+      .join("\n\n") || undefined;
+
     const fixResult = await reviser.reviseChapter(
       params.bookDir,
       finalContent,
@@ -682,7 +775,7 @@ export async function runChapterReviewCycle(params: {
       params.book.genre,
       {
         ...params.reducedControlInput,
-        externalContext: params.externalContext,
+        externalContext: spotFixExternalContext,
         lengthSpec: params.lengthSpec,
         reviseContext: {
           failureGate: "critical",
@@ -767,6 +860,33 @@ export async function runChapterReviewCycle(params: {
     auditResult,
     lengthSpec: params.lengthSpec,
   });
+  // Hook ledger gate: validate that the draft actually acts on every hook the
+  // planner committed to in the memo's "## 本章 hook 账" section. Violations
+  // are injected as critical AuditIssues so they feed into the revise loop.
+  if (params.reducedControlInput?.chapterIntent) {
+    const hookLedgerViolations = validateHookLedger(
+      params.reducedControlInput.chapterIntent,
+      finalContent,
+      params.activeHookCount ?? 0,
+      HOOK_HEALTH_DEFAULTS.maxActiveHooks,
+    );
+    if (hookLedgerViolations.length > 0) {
+      const hookLedgerIssues: AuditIssue[] = hookLedgerViolations.map((v) => ({
+        severity: v.severity,
+        category: v.category,
+        description: v.description,
+        suggestion: v.suggestion,
+      }));
+      auditResult = {
+        ...auditResult,
+        passed: false,
+        issues: [...auditResult.issues, ...hookLedgerIssues],
+        summary: auditResult.summary
+          ? `${auditResult.summary}\n${hookLedgerIssues.map((i) => i.description).join("\n")}`
+          : hookLedgerIssues.map((i) => i.description).join("\n"),
+      };
+    }
+  }
   maxReviseRounds = resolveAdaptiveMaxReviseRounds(configuredMaxReviseRounds, auditResult.issues);
   await params.onAuditComplete?.({
     round: auditRound,

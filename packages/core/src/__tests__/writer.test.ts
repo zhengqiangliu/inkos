@@ -1107,7 +1107,7 @@ describe("WriterAgent", () => {
     }
   });
 
-  it("rejects clear-debt chapters that still expand hook debt", async () => {
+  it("reports clear-debt violations in postWriteErrors instead of throwing", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-writer-hook-debt-test-"));
     const bookDir = join(root, "book");
     const storyDir = join(bookDir, "story");
@@ -1194,7 +1194,7 @@ describe("WriterAgent", () => {
       });
 
     try {
-      await expect(agent.writeChapter({
+      const result = await agent.writeChapter({
         book: {
           id: "writer-book",
           title: "Writer Book",
@@ -1236,7 +1236,9 @@ describe("WriterAgent", () => {
           createdAt: "2026-03-23T00:00:00.000Z",
           updatedAt: "2026-03-23T00:00:00.000Z",
         },
-      })).rejects.toThrow(/清债校验失败|clear-debt validation failed/i);
+      });
+      // New behavior: violations are returned in postWriteErrors, not thrown.
+      expect(result.postWriteErrors.some((e) => e.rule === "hook-budget-net-debt")).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
