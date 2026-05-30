@@ -4,6 +4,7 @@ import {
   detectParagraphLengthDrift,
   detectParagraphShapeWarnings,
   resolveDuplicateTitle,
+  validatePreWriteCommitments,
   validatePostWrite,
   type PostWriteViolation,
 } from "../agents/post-write-validator.js";
@@ -220,6 +221,34 @@ describe("validatePostWrite", () => {
     expect(v?.severity).toBe("error");
   });
 
+  it("treats auto policy as strict double-quote enforcement when autoNormalize is enabled", () => {
+    const bookRules = {
+      version: "1",
+      protagonist: { name: "张三", personalityLock: [], behavioralConstraints: [] },
+      prohibitions: [],
+      genreLock: { primary: "xuanhuan" as const, forbidden: [] },
+      chapterTypesOverride: [],
+      fatigueWordsOverride: [],
+      additionalAuditDimensions: [],
+      enableFullCastTracking: false,
+      allowedDeviations: [],
+      dialogueQuotePolicy: {
+        mode: "auto" as const,
+        strict: true,
+        autoNormalize: true,
+      },
+    };
+    const content = [
+      "「先走。」男人把门拉开。",
+      "“你别回头。”女人低声说。",
+    ].join("\n\n");
+
+    const result = validatePostWrite(content, baseProfile, bookRules);
+    const v = findRule(result, "对话引号强约束");
+    expect(v).toBeDefined();
+    expect(v?.severity).toBe("error");
+  });
+
   it("warns when most speaker-colon dialogue lines are unquoted", () => {
     const content = [
       "男人：先走。",
@@ -363,5 +392,90 @@ describe("validatePostWrite", () => {
     expect(result.issues.some((issue) => issue.rule === "title-collapse")).toBe(true);
     expect(result.title).not.toContain("名单");
     expect(result.title).toContain("塔楼");
+  });
+});
+
+describe("validatePreWriteCommitments", () => {
+  it("accepts real hook ids from the pending hook pool", () => {
+    const preWriteCheck = [
+      "=== PRE_WRITE_CHECK ===",
+      "| 检查项 | 本章记录 | 备注 |",
+      "|--------|----------|------|",
+      "| 待回收伏笔 | 001-旧怀表, relationship-病弱少年的身份与命运-名字被遗忘 | ok |",
+    ].join("\n");
+
+    const pendingHooks = [
+      "# Pending Hooks",
+      "",
+      "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      "| 001-旧怀表 | 1 | mystery | open | 1 | 旧怀表的线索继续回响 | 旧怀表会牵出更大的真相 |",
+      "| relationship-病弱少年的身份与命运-名字被遗忘 | 3 | relationship | open | 3 | 名字被遗忘的身份线继续推进 | 身份与命运继续拉扯 |",
+    ].join("\n");
+
+    const violations = validatePreWriteCommitments(
+      preWriteCheck,
+      "正文只写情节，不写 hook_id。",
+      "zh",
+      pendingHooks,
+    );
+
+    expect(violations).toEqual([]);
+  });
+
+  it("flags rows that contain descriptions or ids outside the pending hook pool", () => {
+    const preWriteCheck = [
+      "=== PRE_WRITE_CHECK ===",
+      "| 检查项 | 本章记录 | 备注 |",
+      "|--------|----------|------|",
+      "| 待回收伏笔 | 001-旧怀表, 父亲之死真相, 019-黑风老怪约见 | ok |",
+    ].join("\n");
+
+    const pendingHooks = [
+      "# Pending Hooks",
+      "",
+      "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      "| 001-旧怀表 | 1 | mystery | open | 1 | 旧怀表的线索继续回响 | 旧怀表会牵出更大的真相 |",
+    ].join("\n");
+
+    const violations = validatePreWriteCommitments(
+      preWriteCheck,
+      "正文只写情节，不写 hook_id。",
+      "zh",
+      pendingHooks,
+    );
+
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.rule).toBe("prewrite-hook-missing");
+    expect(violations[0]!.description).toContain("父亲之死真相");
+    expect(violations[0]!.description).toContain("019-黑风老怪约见");
+  });
+
+  it("flags rows without any real hook ids", () => {
+    const preWriteCheck = [
+      "=== PRE_WRITE_CHECK ===",
+      "| 检查项 | 本章记录 | 备注 |",
+      "|--------|----------|------|",
+      "| 待回收伏笔 | 父亲之死真相 | ok |",
+    ].join("\n");
+
+    const pendingHooks = [
+      "# Pending Hooks",
+      "",
+      "| hook_id | start_chapter | type | status | last_advanced | expected_payoff | notes |",
+      "| --- | --- | --- | --- | --- | --- | --- |",
+      "| 001-旧怀表 | 1 | mystery | open | 1 | 旧怀表的线索继续回响 | 旧怀表会牵出更大的真相 |",
+    ].join("\n");
+
+    const violations = validatePreWriteCommitments(
+      preWriteCheck,
+      "正文只写情节，不写 hook_id。",
+      "zh",
+      pendingHooks,
+    );
+
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.rule).toBe("prewrite-hook-ids");
   });
 });

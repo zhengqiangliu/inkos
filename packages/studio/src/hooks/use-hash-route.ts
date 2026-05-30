@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 export type HashRoute =
   | { page: "dashboard" }
   | { page: "book"; bookId: string }
-  | { page: "book-create" }
+  | { page: "book-create"; draftSessionId?: string }
   | { page: "services" }
   | { page: "service-detail"; serviceId: string }
   | { page: "chapter"; bookId: string; chapterNumber: number }
@@ -30,7 +30,11 @@ function parseHash(hash: string): HashRoute {
   if (path === "import") return { page: "import" };
   if (path === "radar") return { page: "radar" };
   if (path === "doctor") return { page: "doctor" };
-  if (path === "book/new") return { page: "book-create" };
+  const bookCreateMatch = path.match(/^book\/new(?:\/([^/]+))?$/);
+  if (bookCreateMatch) {
+    const draftSessionId = bookCreateMatch[1] ? decodeURIComponent(bookCreateMatch[1]) : undefined;
+    return draftSessionId ? { page: "book-create", draftSessionId } : { page: "book-create" };
+  }
 
   const analyticsMatch = path.match(/^analytics\/([^/]+)$/);
   if (analyticsMatch) return { page: "analytics", bookId: decodeURIComponent(analyticsMatch[1]) };
@@ -60,7 +64,7 @@ function routeToHash(route: HashRoute): string {
   switch (route.page) {
     case "dashboard": return "#/";
     case "book": return `#/book/${encodeURIComponent(route.bookId)}`;
-    case "book-create": return "#/book/new";
+    case "book-create": return route.draftSessionId ? `#/book/new/${encodeURIComponent(route.draftSessionId)}` : "#/book/new";
     case "services": return "#/services";
     case "service-detail": return `#/services/${encodeURIComponent(route.serviceId)}`;
     case "analytics": return `#/analytics/${encodeURIComponent(route.bookId)}`;

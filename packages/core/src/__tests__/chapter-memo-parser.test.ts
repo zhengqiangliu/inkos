@@ -32,11 +32,11 @@ const SECTIONS = `
 
 ## 本章 hook 账
 advance:
-- H03 "七号门异常" → 从 pressured → near_payoff（主角拿到实证）
+- hook-03 "七号门异常" → 从 pressured → near_payoff（主角拿到实证）
 resolve:
-- S004 "锁芯刮痕" → 本章核验完毕
+- subplot-04 "锁芯刮痕" → 本章核验完毕
 defer:
-- H07 "幕后主使" → 压到第 20 章，时机未到
+- hook-07 "幕后主使" → 压到第 20 章，时机未到
 
 ## 不要做
 - 不要让对手突然降智
@@ -77,11 +77,11 @@ function makeRaw(
 
 describe("parseMemo", () => {
   it("parses a valid frontmatter + 7 sections", () => {
-    const memo = parseMemo(makeRaw({ threadRefs: ["H03", "S004"] }), 12, false);
+    const memo = parseMemo(makeRaw({ threadRefs: ["hook-03", "subplot-04"] }), 12, false);
     expect(memo.chapter).toBe(12);
     expect(memo.goal).toBe("把七号门被动过手脚钉成现场实证");
     expect(memo.isGoldenOpening).toBe(false);
-    expect(memo.threadRefs).toEqual(["H03", "S004"]);
+    expect(memo.threadRefs).toEqual(["hook-03", "subplot-04"]);
     expect(memo.body).toContain("## 当前任务");
     expect(memo.body).toContain("## 不要做");
   });
@@ -213,7 +213,7 @@ describe("parseMemo", () => {
         "关系改变：主角和协作者从交易关系微微转向共担风险的同伴。",
         "",
         "## 本章 hook 账",
-        "advance: H03 线索 → 从 planted 推到 pressured（本章让协作者第一次点头）。",
+        "advance: hook-03 线索 → 从 planted 推到 pressured（本章让协作者第一次点头）。",
         "",
         "## 不要做",
         "无",

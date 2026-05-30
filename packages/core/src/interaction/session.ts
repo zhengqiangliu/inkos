@@ -17,6 +17,19 @@ export const MessageAuditDimensionCheckSchema = z.object({
   evidence: z.string().optional(),
 });
 
+export const BookCreationWizardStepSchema = z.enum([
+  "intro",
+  "world",
+  "outline",
+  "volume",
+  "characters",
+  "arc",
+  "relation",
+  "review",
+]);
+
+export type BookCreationWizardStep = z.infer<typeof BookCreationWizardStepSchema>;
+
 export const MessageAuditSummarySchema = z.object({
   chapter: z.number().int().min(1),
   passed: z.boolean(),
@@ -111,6 +124,7 @@ export type ToolExecution = z.infer<typeof ToolExecutionSchema>;
 export const InteractionMessageSchema = z.object({
   role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
+  wizardStep: BookCreationWizardStepSchema.optional(),
   thinking: z.string().optional(),
   thinkingStreaming: z.boolean().optional(),
   toolExecutions: z.array(ToolExecutionSchema).optional(),
@@ -283,18 +297,55 @@ export interface BookCreationConsistencyResult {
   readonly warnings: ReadonlyArray<string>;
 }
 
-export const BookCreationWizardStepSchema = z.enum([
-  "intro",
-  "world",
-  "outline",
-  "volume",
-  "characters",
-  "arc",
-  "relation",
-  "review",
-]);
-
-export type BookCreationWizardStep = z.infer<typeof BookCreationWizardStepSchema>;
+function extractStepDraftPayload(
+  step: BookCreationWizardStep,
+  draft: BookCreationDraft,
+): Record<string, unknown> {
+  switch (step) {
+    case "intro":
+      return {
+        blurb: draft.blurb,
+        storyBackground: draft.storyBackground,
+      };
+    case "world":
+      return {
+        worldPremise: draft.worldPremise,
+        settingNotes: draft.settingNotes,
+      };
+    case "outline":
+      return {
+        novelOutline: draft.novelOutline,
+        conflictCore: draft.conflictCore,
+      };
+    case "volume":
+      return {
+        volumeOutline: draft.volumeOutline,
+      };
+    case "characters":
+      return {
+        protagonist: draft.protagonist,
+        supportingCast: draft.supportingCast,
+        characterMatrix: draft.characterMatrix,
+      };
+    case "arc":
+      return {
+        characterArc: draft.characterArc,
+      };
+    case "relation":
+      return {
+        relationshipMap: draft.relationshipMap,
+      };
+    case "review":
+      return {
+        title: draft.title,
+        genre: draft.genre,
+        platform: draft.platform,
+        language: draft.language,
+        targetChapters: draft.targetChapters,
+        chapterWordCount: draft.chapterWordCount,
+      };
+  }
+}
 
 export const BookCreationWizardStateSchema = z.object({
   currentStep: BookCreationWizardStepSchema.default("intro"),

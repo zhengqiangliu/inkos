@@ -2,6 +2,7 @@ import type { StateCreator } from "zustand";
 import type {
   AutoReviewProgressState,
   ChatStore,
+  BookCreationWizardStep,
   Message,
   MessageActions,
   MessageAuditSummary,
@@ -300,6 +301,17 @@ function mergeStreamMessage(stream: Message, parts: MessagePart[]): Message {
   };
 }
 
+function applyWizardStepToStreamMessage(
+  stream: Message,
+  wizardStep: BookCreationWizardStep | undefined,
+): Message {
+  return wizardStep ? { ...stream, wizardStep } : stream;
+}
+
+function getWizardStep(runtime: { currentWizardStep?: BookCreationWizardStep | null }): BookCreationWizardStep | undefined {
+  return runtime.currentWizardStep ?? undefined;
+}
+
 function appendTextPart(parts: MessagePart[], text: string): MessagePart[] {
   if (!text) return parts;
   const next = [...parts];
@@ -501,7 +513,7 @@ export function attachSessionStreamListeners({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
           const parts = [...(stream.parts ?? []), { type: "thinking" as const, content: "", streaming: true }];
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -530,7 +542,7 @@ export function attachSessionStreamListeners({
           } else {
             parts.push({ type: "thinking", content: data.text, streaming: true });
           }
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -561,7 +573,7 @@ export function attachSessionStreamListeners({
               }
             }
           }
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -577,7 +589,7 @@ export function attachSessionStreamListeners({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
           const parts = appendTextPart([...(stream.parts ?? [])], data.text);
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -656,7 +668,7 @@ export function attachSessionStreamListeners({
             else execution.result = summarizeResult(data.result);
             return { type: "tool" as const, execution };
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
 
@@ -714,7 +726,7 @@ export function attachSessionStreamListeners({
               },
             };
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -762,7 +774,7 @@ export function attachSessionStreamListeners({
               },
             };
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -802,7 +814,7 @@ export function attachSessionStreamListeners({
               },
             };
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -832,7 +844,7 @@ export function attachSessionStreamListeners({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
           const parts = appendTextPart([...(stream.parts ?? [])], text);
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -901,7 +913,7 @@ export function attachSessionStreamListeners({
               },
             };
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -947,7 +959,7 @@ export function attachSessionStreamListeners({
               },
             };
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -991,7 +1003,7 @@ export function attachSessionStreamListeners({
               },
             };
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -1012,7 +1024,7 @@ export function attachSessionStreamListeners({
             data,
             fallbackPhase: "audit",
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -1033,7 +1045,7 @@ export function attachSessionStreamListeners({
             data,
             fallbackPhase: "revise",
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -1054,7 +1066,7 @@ export function attachSessionStreamListeners({
             data,
             fallbackPhase: "revise",
           });
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -1077,7 +1089,7 @@ export function attachSessionStreamListeners({
             data,
             fallbackPhase: "audit",
           });
-          const merged = mergeStreamMessage(stream, parts);
+          const merged = applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime));
           return {
             messages: replaceLast(messages, { ...merged, audit }),
           };

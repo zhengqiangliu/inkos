@@ -23,6 +23,7 @@ import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import { buildLengthSpec, countChapterLength } from "../utils/length-metrics.js";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
+import { normalizeDialogueQuotesByPolicy, resolveDialogueQuotePolicy as resolveBookDialogueQuotePolicy, type ResolvedDialogueQuotePolicy } from "../utils/dialogue-quote-policy.js";
 import { buildHookDebtHardConstraintBlock, deriveHookDebtBudget } from "../utils/hook-agenda.js";
 import {
   buildGovernedCharacterMatrixWorkingSet,
@@ -109,13 +110,6 @@ export interface WriteChapterOutput {
 }
 
 type DialogueQuoteStyle = "double" | "corner" | "none" | "mixed";
-type DialogueQuotePolicyMode = "auto" | "force_double" | "force_corner" | "force_none";
-
-interface ResolvedDialogueQuotePolicy {
-  readonly mode: DialogueQuotePolicyMode;
-  readonly strict: boolean;
-  readonly autoNormalize: boolean;
-}
 
 export class WriterAgent extends BaseAgent {
   get name(): string {
@@ -381,10 +375,9 @@ export class WriterAgent extends BaseAgent {
       });
     }
     const shouldNormalizeDialogueQuotes = resolvedLanguage === "zh"
-      && dialogueQuotePolicy.mode !== "auto"
-      && (dialogueQuotePolicy.autoNormalize || dialogueQuotePolicy.strict);
+      && dialogueQuotePolicy.mode !== "auto";
     if (shouldNormalizeDialogueQuotes) {
-      const normalized = this.normalizeDialogueQuotes(chapterContent, dialogueQuotePolicy.mode);
+      const normalized = normalizeDialogueQuotesByPolicy(chapterContent, dialogueQuotePolicy.mode);
       if (normalized !== chapterContent) {
         chapterContent = normalized;
         this.logInfo(resolvedLanguage, {
@@ -596,7 +589,7 @@ export class WriterAgent extends BaseAgent {
       ...validatePostWrite(chapterContent, genreProfile, bookRules, resolvedLanguage),
       ...detectCrossChapterRepetition(chapterContent, fingerprintChapters, resolvedLanguage),
       ...detectParagraphLengthDrift(chapterContent, fingerprintChapters, resolvedLanguage),
-      ...validatePreWriteCommitments(creative.preWriteCheck, chapterContent, resolvedLanguage),
+      ...validatePreWriteCommitments(creative.preWriteCheck, chapterContent, resolvedLanguage, hooks),
       ...hookBudgetViolations,
     ];
     const aiTellIssues = analyzeAITells(chapterContent, resolvedLanguage).issues;
@@ -1666,44 +1659,7 @@ ${overrides}\n`;
     bookRules: BookRules | null,
     language: "zh" | "en",
   ): ResolvedDialogueQuotePolicy {
-    if (language === "en") {
-      return {
-        mode: "auto",
-        strict: false,
-        autoNormalize: false,
-      };
-    }
-    const policy = bookRules?.dialogueQuotePolicy;
-    if (!policy) {
-      return {
-        mode: "auto",
-        strict: false,
-        autoNormalize: false,
-      };
-    }
-    return {
-      mode: policy.mode ?? "auto",
-      strict: policy.strict ?? false,
-      autoNormalize: policy.autoNormalize ?? false,
-    };
-  }
-
-  private normalizeDialogueQuotes(content: string, mode: DialogueQuotePolicyMode): string {
-    if (mode === "force_double") {
-      return content
-        .replace(/「/g, "“")
-        .replace(/」/g, "”")
-        .replace(/『/g, "“")
-        .replace(/』/g, "”");
-    }
-    if (mode === "force_corner") {
-      return content
-        .replace(/“/g, "「")
-        .replace(/”/g, "」")
-        .replace(/『/g, "「")
-        .replace(/』/g, "」");
-    }
-    return content;
+    return resolveBookDialogueQuotePolicy(bookRules, language);
   }
 
   private buildDialogueQuoteGuideline(

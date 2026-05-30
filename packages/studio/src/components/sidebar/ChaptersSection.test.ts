@@ -7,6 +7,7 @@ import {
   isAuditTaskCompletionForBook,
   normalizeAuditSummary,
   resolveChapterAuditScore,
+  chapterAuditScoreBadgeClass,
   shouldCarryForwardAuditSummary,
   shouldShowChapterAuditSummary,
   sliceUnprocessedSseMessages,
@@ -46,6 +47,15 @@ describe("resolveChapterAuditScore", () => {
         "[warning] pacing too fast",
       ],
     })).toBe(53);
+  });
+});
+
+describe("chapterAuditScoreBadgeClass", () => {
+  it("keeps 80-84 green and 79 amber", () => {
+    expect(chapterAuditScoreBadgeClass(79)).toContain("amber");
+    expect(chapterAuditScoreBadgeClass(80)).toContain("emerald");
+    expect(chapterAuditScoreBadgeClass(84)).toContain("emerald");
+    expect(chapterAuditScoreBadgeClass(85)).toContain("emerald");
   });
 });
 

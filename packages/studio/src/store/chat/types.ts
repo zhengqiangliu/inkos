@@ -1,5 +1,7 @@
 // -- Data types --
 
+export type { BookCreationWizardStep } from "@actalk/inkos-core";
+
 export interface ToolCall {
   readonly name: string;
   readonly arguments: Record<string, unknown>;
@@ -110,6 +112,7 @@ export type MessagePart =
 export interface Message {
   readonly role: "user" | "assistant";
   readonly content: string;
+  readonly wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep;
   readonly thinking?: string;
   readonly thinkingStreaming?: boolean;
   readonly audit?: MessageAuditSummary;
@@ -122,6 +125,7 @@ export interface Message {
 export interface SessionMessage {
   readonly role: "user" | "assistant" | "system";
   readonly content: string;
+  readonly wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep;
   readonly thinking?: string;
   readonly thinkingStreaming?: boolean;
   readonly audit?: MessageAuditSummary;
@@ -134,6 +138,7 @@ export interface SessionSummary {
   readonly bookId: string | null;
   readonly title: string | null;
   readonly messageCount: number;
+  readonly hasWizardStepMessage?: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -215,7 +220,9 @@ export interface SessionRuntime {
   readonly sessionId: string;
   readonly bookId: string | null;
   readonly title: string | null;
+  readonly hasWizardStepMessage?: boolean;
   readonly messages: ReadonlyArray<Message>;
+  readonly currentWizardStep?: import("@actalk/inkos-core").BookCreationWizardStep | null;
   readonly stream: EventSource | null;
   readonly isStreaming: boolean;
   readonly isStopping: boolean;
@@ -223,6 +230,8 @@ export interface SessionRuntime {
   readonly currentRunId: string | null;
   readonly lastError: string | null;
   readonly pendingBookArgs: Record<string, unknown> | null;
+  readonly creationDraft?: import("@actalk/inkos-core").BookCreationDraft;
+  readonly creationWizard?: import("@actalk/inkos-core").BookCreationWizardState;
   // 仅前端存在、尚未持久化到磁盘的草稿会话。发送第一条消息时才调 POST /sessions 把它落盘。
   readonly isDraft: boolean;
 }
@@ -255,12 +264,12 @@ export type ChatState = MessageState & CreateState;
 export interface MessageActions {
   activateSession: (sessionId: string | null) => void;
   setInput: (text: string) => void;
-  addUserMessage: (sessionId: string, content: string) => void;
-  appendAssistantMessage: (sessionId: string, content: string) => void;
+  addUserMessage: (sessionId: string, content: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
+  appendAssistantMessage: (sessionId: string, content: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
   appendStreamChunk: (sessionId: string, text: string, streamTs: number) => void;
   finalizeStream: (sessionId: string, streamTs: number, content: string, toolCall?: ToolCall) => void;
-  replaceStreamWithError: (sessionId: string, streamTs: number, errorMsg: string) => void;
-  addErrorMessage: (sessionId: string, errorMsg: string) => void;
+  replaceStreamWithError: (sessionId: string, streamTs: number, errorMsg: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
+  addErrorMessage: (sessionId: string, errorMsg: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
   loadSessionMessages: (sessionId: string, msgs: ReadonlyArray<SessionMessage>) => void;
   loadSessionList: (bookId: string | null) => Promise<void>;
   createSession: (bookId: string | null) => Promise<string>;
@@ -276,6 +285,8 @@ export interface MessageActions {
       readonly quickMode?: boolean;
       readonly preferFastWriterModel?: boolean;
       readonly skipAutoNewPrefix?: boolean;
+      readonly wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep;
+      readonly forceStream?: boolean;
     },
   ) => Promise<AgentResponse | null>;
   stopMessage: (sessionId: string) => Promise<void>;

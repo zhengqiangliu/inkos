@@ -15,7 +15,7 @@ export type StepFocusCard = {
   readonly missing: ReadonlyArray<string>;
 };
 
-export type StepShortcutKind = "generate" | "revise" | "advance" | "create" | "params";
+export type StepShortcutKind = "generate" | "revise" | "advance" | "create" | "params" | "goto" | "save";
 
 export type StepShortcut = {
   readonly kind: StepShortcutKind;
@@ -45,12 +45,55 @@ export type ChatQuickTemplate = {
   readonly value: string;
 };
 
+export type IntroCandidateLike = {
+  readonly title: string;
+  readonly blurb: string;
+  readonly storyBackground: string;
+  readonly style?: string;
+  readonly reason?: string;
+};
+
+export type CreationDraftFieldTarget =
+  | { readonly kind: "basic" }
+  | { readonly kind: "step"; readonly step: BookCreationWizardStep };
+
+export type ReviewChecklistItem = {
+  readonly key: string;
+  readonly label: string;
+  readonly value: string;
+  readonly done: boolean;
+  readonly target: CreationDraftFieldTarget;
+};
+
+export type WizardAdvanceRequest = {
+  readonly currentStep: BookCreationWizardStep;
+  readonly nextStep: BookCreationWizardStep;
+  readonly title: string;
+  readonly genre: string;
+  readonly platform: string;
+  readonly language: "zh" | "en";
+  readonly targetChapters?: number;
+  readonly chapterWordCount?: number;
+  readonly note?: string;
+};
+
+export type WizardSaveRequest = {
+  readonly currentStep: BookCreationWizardStep;
+  readonly title: string;
+  readonly genre: string;
+  readonly platform: string;
+  readonly language: "zh" | "en";
+  readonly targetChapters?: number;
+  readonly chapterWordCount?: number;
+  readonly note?: string;
+};
+
 export type GenreMappingResult = {
   readonly genre: GenreLike;
   readonly matchedBy: "keyword" | "id" | "name" | "fallback";
 };
 
-const WIZARD_STEPS: ReadonlyArray<{ id: BookCreationWizardStep; title: string; subtitle: string }> = [
+export const WIZARD_STEPS: ReadonlyArray<{ id: BookCreationWizardStep; title: string; subtitle: string }> = [
   { id: "intro", title: "简介 / 故事背景", subtitle: "先把卖点和故事起点定住" },
   { id: "world", title: "世界观", subtitle: "定义规则、势力和边界" },
   { id: "outline", title: "小说大纲", subtitle: "主线、成长路、章节卡点" },
@@ -58,7 +101,7 @@ const WIZARD_STEPS: ReadonlyArray<{ id: BookCreationWizardStep; title: string; s
   { id: "characters", title: "主角 / 配角", subtitle: "角色功能与驱动力" },
   { id: "arc", title: "人物弧光", subtitle: "核心弧光与成长转折" },
   { id: "relation", title: "人物关系", subtitle: "关系动力与剧情引擎" },
-  { id: "review", title: "最终确认", subtitle: "一致性检查后再落库" },
+  { id: "review", title: "收尾校验", subtitle: "一致性检查后再落库" },
 ];
 
 const GENRE_KEYWORDS: Record<string, ReadonlyArray<string>> = {
@@ -97,6 +140,131 @@ function fieldLabelFor(key: string, language: "zh" | "en"): string {
     concept: { zh: "概念", en: "Concept" },
   };
   return labels[key]?.[language] ?? key;
+}
+
+export function resolveCreationDraftFieldTarget(
+  key: string,
+): CreationDraftFieldTarget | null {
+  switch (key) {
+    case "blurb":
+    case "storyBackground":
+      return { kind: "step", step: "intro" };
+    case "worldPremise":
+    case "settingNotes":
+      return { kind: "step", step: "world" };
+    case "novelOutline":
+    case "conflictCore":
+      return { kind: "step", step: "outline" };
+    case "volumeOutline":
+      return { kind: "step", step: "volume" };
+    case "protagonist":
+    case "supportingCast":
+    case "characterMatrix":
+      return { kind: "step", step: "characters" };
+    case "characterArc":
+      return { kind: "step", step: "arc" };
+    case "relationshipMap":
+      return { kind: "step", step: "relation" };
+    case "title":
+    case "genre":
+    case "platform":
+    case "language":
+    case "targetChapters":
+    case "chapterWordCount":
+    case "concept":
+      return { kind: "basic" };
+    case "review":
+      return { kind: "basic" };
+    default:
+      return null;
+  }
+}
+
+export function buildCreationReviewChecklist(
+  draft: Partial<BookCreationDraft>,
+  language: "zh" | "en",
+): ReadonlyArray<ReviewChecklistItem> {
+  const joinValues = (...values: ReadonlyArray<string | undefined>): string => values.map((value) => value?.trim()).filter(Boolean).join(" / ");
+  const basicDone = Boolean(draft.title?.trim() && draft.genre?.trim() && draft.platform?.trim() && typeof draft.targetChapters === "number" && typeof draft.chapterWordCount === "number");
+  const introDone = Boolean(draft.blurb?.trim() || draft.storyBackground?.trim());
+  const worldDone = Boolean(draft.worldPremise?.trim() || draft.settingNotes?.trim());
+  const outlineDone = Boolean(draft.novelOutline?.trim() || draft.conflictCore?.trim());
+  const volumeDone = Boolean(draft.volumeOutline?.trim());
+  const charactersDone = Boolean(draft.protagonist?.trim() || draft.supportingCast?.trim() || draft.characterMatrix?.trim());
+  const arcDone = Boolean(draft.characterArc?.trim());
+  const relationDone = Boolean(draft.relationshipMap?.trim());
+
+  return [
+    {
+      key: "basic",
+      label: language === "en" ? "Basic Parameters" : "基础参数",
+      value: joinValues(
+        draft.title ? `${language === "en" ? "Title" : "书名"}: ${draft.title}` : undefined,
+        draft.genre ? `${language === "en" ? "Genre" : "题材"}: ${draft.genre}` : undefined,
+        draft.platform ? `${language === "en" ? "Platform" : "平台"}: ${draft.platform}` : undefined,
+        typeof draft.targetChapters === "number" ? `${language === "en" ? "Target Chapters" : "目标章数"}: ${draft.targetChapters}` : undefined,
+        typeof draft.chapterWordCount === "number" ? `${language === "en" ? "Words / Chapter" : "每章字数"}: ${draft.chapterWordCount}` : undefined,
+      ),
+      done: basicDone,
+      target: { kind: "basic" },
+    },
+    {
+      key: "intro",
+      label: language === "en" ? "Intro / Blurb" : "简介 / 故事背景",
+      value: joinValues(draft.blurb, draft.storyBackground),
+      done: introDone,
+      target: { kind: "step", step: "intro" },
+    },
+    {
+      key: "world",
+      label: language === "en" ? "World" : "世界观",
+      value: joinValues(draft.worldPremise, draft.settingNotes),
+      done: worldDone,
+      target: { kind: "step", step: "world" },
+    },
+    {
+      key: "outline",
+      label: language === "en" ? "Outline" : "小说大纲",
+      value: joinValues(draft.novelOutline, draft.conflictCore),
+      done: outlineDone,
+      target: { kind: "step", step: "outline" },
+    },
+    {
+      key: "volume",
+      label: language === "en" ? "Volume Plan" : "卷纲规划",
+      value: joinValues(draft.volumeOutline),
+      done: volumeDone,
+      target: { kind: "step", step: "volume" },
+    },
+    {
+      key: "characters",
+      label: language === "en" ? "Characters" : "主角 / 配角",
+      value: joinValues(draft.protagonist, draft.supportingCast, draft.characterMatrix),
+      done: charactersDone,
+      target: { kind: "step", step: "characters" },
+    },
+    {
+      key: "arc",
+      label: language === "en" ? "Character Arc" : "人物弧光",
+      value: joinValues(draft.characterArc),
+      done: arcDone,
+      target: { kind: "step", step: "arc" },
+    },
+    {
+      key: "relation",
+      label: language === "en" ? "Relationships" : "人物关系",
+      value: joinValues(draft.relationshipMap),
+      done: relationDone,
+      target: { kind: "step", step: "relation" },
+    },
+    {
+      key: "review",
+      label: language === "en" ? "Wrap-up Check" : "收尾校验",
+      value: basicDone ? (language === "en" ? "Ready to finish creation." : "已满足收尾创建条件。") : (language === "en" ? "Finish all sections first." : "请先完成所有分项。"),
+      done: canCreateFromDraft(draft as BookCreationDraft),
+      target: { kind: "step", step: "review" },
+    },
+  ];
 }
 function genreKeywordsFor(genreId: string): ReadonlyArray<string> {
   return GENRE_KEYWORDS[genreId] ?? [];
@@ -168,6 +336,52 @@ export function parsePositiveIntegerInput(input: string): number | undefined {
   return value > 0 ? value : undefined;
 }
 
+export function buildWizardStepSeedText(
+  step: BookCreationWizardStep,
+  draft: Partial<BookCreationDraft>,
+  language: "zh" | "en",
+): string {
+  if (language === "en") {
+    switch (step) {
+      case "intro":
+        return composeIntroSeedText(draft.blurb ?? "", draft.storyBackground ?? "");
+      case "world":
+        return [draft.worldPremise ? `World premise: ${draft.worldPremise}` : "", draft.settingNotes ? `Setting notes: ${draft.settingNotes}` : ""].filter(Boolean).join("\n\n");
+      case "outline":
+        return [draft.novelOutline ? `Outline: ${draft.novelOutline}` : "", draft.conflictCore ? `Conflict: ${draft.conflictCore}` : ""].filter(Boolean).join("\n\n");
+      case "volume":
+        return draft.volumeOutline ? `Volume outline: ${draft.volumeOutline}` : "";
+      case "characters":
+        return [draft.protagonist ? `Protagonist: ${draft.protagonist}` : "", draft.supportingCast ? `Supporting cast: ${draft.supportingCast}` : "", draft.characterMatrix ? `Character matrix: ${draft.characterMatrix}` : ""].filter(Boolean).join("\n\n");
+      case "arc":
+        return draft.characterArc ? `Character arc: ${draft.characterArc}` : "";
+      case "relation":
+        return draft.relationshipMap ? `Relationship map: ${draft.relationshipMap}` : "";
+      case "review":
+        return [draft.title ? `Title: ${draft.title}` : "", draft.genre ? `Genre: ${draft.genre}` : "", draft.platform ? `Platform: ${draft.platform}` : "", typeof draft.targetChapters === "number" ? `Target chapters: ${draft.targetChapters}` : "", typeof draft.chapterWordCount === "number" ? `Words per chapter: ${draft.chapterWordCount}` : ""].filter(Boolean).join("\n");
+    }
+  }
+
+  switch (step) {
+    case "intro":
+      return composeIntroSeedText(draft.blurb ?? "", draft.storyBackground ?? "");
+    case "world":
+      return [draft.worldPremise ? `世界观：${draft.worldPremise}` : "", draft.settingNotes ? `补充设定：${draft.settingNotes}` : ""].filter(Boolean).join("\n\n");
+    case "outline":
+      return [draft.novelOutline ? `大纲：${draft.novelOutline}` : "", draft.conflictCore ? `核心冲突：${draft.conflictCore}` : ""].filter(Boolean).join("\n\n");
+    case "volume":
+      return draft.volumeOutline ? `卷纲：${draft.volumeOutline}` : "";
+    case "characters":
+      return [draft.protagonist ? `主角：${draft.protagonist}` : "", draft.supportingCast ? `配角：${draft.supportingCast}` : "", draft.characterMatrix ? `角色矩阵：${draft.characterMatrix}` : ""].filter(Boolean).join("\n\n");
+    case "arc":
+      return draft.characterArc ? `人物弧光：${draft.characterArc}` : "";
+    case "relation":
+      return draft.relationshipMap ? `人物关系：${draft.relationshipMap}` : "";
+    case "review":
+      return [draft.title ? `书名：${draft.title}` : "", draft.genre ? `题材：${draft.genre}` : "", draft.platform ? `平台：${draft.platform}` : "", typeof draft.targetChapters === "number" ? `目标章数：${draft.targetChapters}` : "", typeof draft.chapterWordCount === "number" ? `每章字数：${draft.chapterWordCount}` : ""].filter(Boolean).join("\n");
+  }
+}
+
 export function composeIntroSeedText(blurb: string, storyBackground: string): string {
   const parts: string[] = [];
   const blurbText = blurb.trim();
@@ -175,6 +389,14 @@ export function composeIntroSeedText(blurb: string, storyBackground: string): st
   if (blurbText) parts.push(`简介/卖点：${blurbText}`);
   if (backgroundText) parts.push(`故事背景：${backgroundText}`);
   return parts.join("\n\n");
+}
+
+export function buildIntroCandidateBackfill(candidate: IntroCandidateLike): string {
+  return composeIntroSeedText(candidate.blurb, candidate.storyBackground);
+}
+
+export function resolveIntroCandidateTitle(candidate: IntroCandidateLike): string {
+  return candidate.title.trim() || candidate.style?.trim() || candidate.blurb.trim() || candidate.storyBackground.trim();
 }
 
 export function parseIntroSeedText(input: string): { readonly blurb: string; readonly storyBackground: string } {
@@ -251,6 +473,33 @@ export function parseIntroCandidateResponse(raw: string): ReadonlyArray<{
   const source = raw.trim();
   if (!source) return [];
 
+  const parseCandidateRecord = (value: unknown): ReadonlyArray<{
+    readonly title: string;
+    readonly blurb: string;
+    readonly storyBackground: string;
+    readonly hook?: string;
+    readonly style?: string;
+    readonly reason?: string;
+  }> => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const candidate = value as Record<string, unknown>;
+    const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
+    const blurb = typeof candidate.blurb === "string" ? candidate.blurb.trim() : "";
+    const storyBackground = typeof candidate.storyBackground === "string" ? candidate.storyBackground.trim() : "";
+    const hook = typeof candidate.hook === "string" ? candidate.hook.trim() : "";
+    const style = typeof candidate.style === "string" ? candidate.style.trim() : "";
+    const reason = typeof candidate.reason === "string" ? candidate.reason.trim() : "";
+    if (!title && !blurb && !storyBackground) return [];
+    return [{
+      title: title || blurb || storyBackground || "候选方案",
+      blurb,
+      storyBackground,
+      ...(hook ? { hook } : {}),
+      ...(style ? { style } : {}),
+      ...(reason ? { reason } : {}),
+    }];
+  };
+
   const parseCandidateList = (value: unknown): ReadonlyArray<{
     readonly title: string;
     readonly blurb: string;
@@ -259,26 +508,8 @@ export function parseIntroCandidateResponse(raw: string): ReadonlyArray<{
     readonly style?: string;
     readonly reason?: string;
   }> => {
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item) => {
-      if (!item || typeof item !== "object") return [];
-      const candidate = item as Record<string, unknown>;
-      const title = typeof candidate.title === "string" ? candidate.title.trim() : "";
-      const blurb = typeof candidate.blurb === "string" ? candidate.blurb.trim() : "";
-      const storyBackground = typeof candidate.storyBackground === "string" ? candidate.storyBackground.trim() : "";
-      const hook = typeof candidate.hook === "string" ? candidate.hook.trim() : "";
-      const style = typeof candidate.style === "string" ? candidate.style.trim() : "";
-      const reason = typeof candidate.reason === "string" ? candidate.reason.trim() : "";
-      if (!title && !blurb && !storyBackground) return [];
-      return [{
-        title: title || blurb || storyBackground || "候选方案",
-        blurb,
-        storyBackground,
-        ...(hook ? { hook } : {}),
-        ...(style ? { style } : {}),
-        ...(reason ? { reason } : {}),
-      }];
-    });
+    if (!Array.isArray(value)) return parseCandidateRecord(value);
+    return value.flatMap((item) => parseCandidateRecord(item));
   };
 
   const parseJsonPayload = (payload: string) => {
@@ -295,10 +526,62 @@ export function parseIntroCandidateResponse(raw: string): ReadonlyArray<{
     return [];
   };
 
+  const extractJsonSegments = (text: string): ReadonlyArray<string> => {
+    const segments: string[] = [];
+    const stack: Array<{ char: "{" | "["; index: number }> = [];
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < text.length; i += 1) {
+      const char = text[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{" || char === "[") {
+        stack.push({ char, index: i });
+        continue;
+      }
+
+      if (char !== "}" && char !== "]" || stack.length === 0) {
+        continue;
+      }
+
+      const last = stack[stack.length - 1];
+      if (!last) continue;
+      const matches = last.char === "{" ? char === "}" : char === "]";
+      if (!matches) continue;
+
+      stack.pop();
+      if (stack.length === 0) {
+        segments.push(text.slice(last.index, i + 1));
+      }
+    }
+
+    return segments;
+  };
+
   const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const fencedPayload = fenced?.[1]?.trim();
   const parsedJson = parseJsonPayload(fencedPayload ?? source);
   if (parsedJson.length > 0) return parsedJson;
+
+  for (const segment of extractJsonSegments(source)) {
+    const parsedSegment = parseJsonPayload(segment);
+    if (parsedSegment.length > 0) return parsedSegment;
+  }
 
   const blocks = source
     .replace(/\r/g, "")
@@ -371,6 +654,42 @@ export function parseIntroCandidateResponse(raw: string): ReadonlyArray<{
   }
 }
 
+export function parseLatestIntroCandidates(
+  messages: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly content: string }>,
+): ReadonlyArray<{
+  readonly title: string;
+  readonly blurb: string;
+  readonly storyBackground: string;
+  readonly hook?: string;
+  readonly style?: string;
+  readonly reason?: string;
+}> {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== "assistant" || !message.content.trim()) continue;
+    const parsed = parseIntroCandidateResponse(message.content);
+    if (parsed.length > 0) return parsed;
+  }
+  return [];
+}
+
+export function selectBookCreateDockMessages<T extends {
+  readonly role: "user" | "assistant";
+  readonly content: string;
+  readonly wizardStep?: BookCreationWizardStep;
+}>(
+  messages: ReadonlyArray<T>,
+  currentStep: BookCreationWizardStep,
+): {
+  readonly visibleMessages: ReadonlyArray<T>;
+  readonly legacyMessageCount: number;
+} {
+  return {
+    visibleMessages: messages.filter((message) => message.wizardStep === currentStep),
+    legacyMessageCount: messages.filter((message) => !message.wizardStep).length,
+  };
+}
+
 export function rankIntroCandidates(
   candidates: ReadonlyArray<{
     readonly title: string;
@@ -407,14 +726,14 @@ export function rankIntroCandidates(
 export function buildChatActionLabels(step: BookCreationWizardStep, nextStepTitle: string | undefined, language: "zh" | "en"): ChatActionLabels {
   if (language === "en") {
     return {
-      advanceLabel: step === "review" ? "Confirm and create book" : `Confirm and continue to ${nextStepTitle ?? "next step"}`,
-      createLabel: "Create directly (skip confirm)",
+      advanceLabel: step === "review" ? "Review and finish creation" : `Save and continue to ${nextStepTitle ?? "next step"}`,
+      createLabel: "Finish creation",
     };
   }
 
   return {
-    advanceLabel: step === "review" ? "确认并创建书籍" : `确认并进入 ${nextStepTitle ?? "下一步"}`,
-    createLabel: "直接创建（跳过确认）",
+    advanceLabel: step === "review" ? "复核并完成创建" : `确认并进入 ${nextStepTitle ?? "下一步"}`,
+    createLabel: "完成创建",
   };
 }
 
@@ -423,7 +742,7 @@ export function buildChatGuide(step: BookCreationWizardStep, language: "zh" | "e
   if (language === "en") {
     return {
       placeholder: step === "review"
-        ? "Fill in title, genre, chapters, and words, or confirm creation directly."
+        ? "Fill in title, genre, chapters, and words, or finish creation directly."
         : `Refine the current ${currentMeta.title} page with AI.`,
       examples: step === "intro"
         ? ["Generate several candidate blurbs by genre.", "Use the chat to polish the intro seed."]
@@ -434,31 +753,35 @@ export function buildChatGuide(step: BookCreationWizardStep, language: "zh" | "e
 
   return {
     placeholder: step === "review"
-      ? "补齐书名、题材、章数和字数，或直接确认创建。"
+      ? "补齐书名、题材、章数和字数，然后完成收尾。"
       : step === "intro"
         ? "围绕题材、卖点、故事背景继续修订，优先只改这一页。"
         : `围绕当前${currentMeta.title}页继续修订，优先只改这一页。`,
     examples: step === "intro"
       ? ["按题材生成 3-5 套简介候选池。", "把一句话卖点改得更抓人。"]
       : step === "review"
-        ? ["如果完整就直接确认创建。", "只做缺失项核对，不要扩写。"]
+        ? ["先核对分项是否齐全，再完成创建。", "只做缺失项核对，不要扩写。"]
         : ["只优化当前页面内容。", "若已完成，可直接进入下一步。"],
     advanceLabel: step === "review"
-      ? "确认并创建书籍"
+      ? "复核并完成创建"
       : "确认当前页并进入下一步",
   };
 }
 
 export function buildBookCreateCommand(params: {
-  readonly kind: "intro-revise" | "intro-polish" | "intro-generate" | "params" | "advance" | "create" | "discard" | "back";
+  readonly kind: "intro-revise" | "intro-polish" | "intro-generate" | "params" | "advance" | "create" | "discard" | "back" | "goto" | "save";
   readonly language: "zh" | "en";
   readonly stepTitle: string;
+  readonly currentStep?: BookCreationWizardStep;
   readonly nextStepTitle?: string;
+  readonly nextStep?: BookCreationWizardStep;
+  readonly wizardStep?: BookCreationWizardStep;
   readonly title?: string;
   readonly genre?: string;
   readonly platform?: string;
   readonly targetChapters?: number;
   readonly chapterWordCount?: number;
+  readonly stepContent?: string;
   readonly introBlurb?: string;
   readonly introStoryBackground?: string;
   readonly modifyNote?: string;
@@ -485,6 +808,18 @@ export function buildBookCreateCommand(params: {
         label: language === "en" ? "Send hard params" : "发送基础参数",
         instruction: `/params 书名=${title} 平台=${platform} 题材=${genre} 目标章数=${targetChapters ?? ""} 每章字数=${chapterWordCount ?? ""}`.trim(),
       };
+    case "save":
+      return {
+        kind: "save",
+        label: language === "en" ? "Save current step" : "保存当前页",
+        instruction: `/save step=${params.wizardStep ?? params.currentStep ?? "intro"} title=${title || "未填"} genre=${genre || "未选"} platform=${platform || "未选"} target=${targetChapters ?? ""} words=${chapterWordCount ?? ""}${params.stepContent?.trim() ? `\n\n${params.stepContent.trim()}` : ""}`,
+      };
+    case "advance":
+      return {
+        kind: "advance",
+        label: language === "en" ? "Next step" : "下一步",
+        instruction: `/wizard advance current=${params.currentStep ?? params.wizardStep ?? "intro"} next=${params.nextStep ?? "world"} title=${title || "未填"} genre=${genre || "未选"} platform=${platform || "未选"} target=${targetChapters ?? ""} words=${chapterWordCount ?? ""}`,
+      };
     case "intro-revise":
       return {
         kind: "intro-revise",
@@ -504,13 +839,7 @@ export function buildBookCreateCommand(params: {
         kind: "intro-generate",
         label: language === "en" ? "Generate candidates" : "生成候选池",
         disabled: !theme && !genre,
-        instruction: `请按题材和主题生成${candidateCount && candidateCount > 0 ? candidateCount : 3} 套简介候选，只输出候选池，不要调用创建书籍工具，不要直接进入建书。\n\n书名：${title || "未填"}\n题材：${genre || "未选"}\n主题：${theme || genre || "未填"}\n平台：${platform || "未选"}\n当前简介：${introBlurb || "（空）"}\n当前故事背景：${introStoryBackground || "（空）"}\n\n要求：\n1. 每套都要包含 title、blurb、storyBackground、style、reason。\n2. 候选之间风格要有差异。\n3. 请尽量用 JSON 数组输出；如果无法严格 JSON，也要按清晰分隔的多方案格式输出。\n4. 输出后只提示我可以在左侧候选池选择第几套，不要触发建书流程。`,
-      };
-    case "advance":
-      return {
-        kind: "advance",
-        label: language === "en" ? "Next step" : "下一步",
-        instruction: `请确认当前${params.stepTitle}页，并继续进入${params.nextStepTitle ?? "下一步"}。\n\n书名：${title || "未填"}\n题材：${genre || "未选"}\n平台：${platform || "未选"}\n目标章数：${targetChapters ?? "未填"}\n每章字数：${chapterWordCount ?? "未填"}`,
+        instruction: `请按题材和主题生成${candidateCount && candidateCount > 0 ? candidateCount : 3} 套简介候选，只输出候选池，不要直接进入建书。\n\n书名：${title || "未填"}\n题材：${genre || "未选"}\n主题：${theme || genre || "未填"}\n平台：${platform || "未选"}\n当前简介：${introBlurb || "（空）"}\n当前故事背景：${introStoryBackground || "（空）"}\n\n要求：\n1. 每套都要包含 title、blurb、storyBackground、style、reason。\n2. 候选之间风格要有差异。\n3. 请尽量用 JSON 数组输出；如果无法严格 JSON，也要按清晰分隔的多方案格式输出。\n4. 输出后只提示我可以在左侧候选池选择第几套，不要触发建书流程。`,
       };
     case "back":
       return {
@@ -518,10 +847,16 @@ export function buildBookCreateCommand(params: {
         label: language === "en" ? "Previous step" : "上一步",
         instruction: `请回到上一步，当前页为${params.stepTitle}。`,
       };
+    case "goto":
+      return {
+        kind: "goto",
+        label: language === "en" ? "Go to step" : "跳转步骤",
+        instruction: `/goto ${params.wizardStep ?? "intro"}`,
+      };
     case "create":
       return {
         kind: "create",
-        label: language === "en" ? "Create book" : "创建书籍",
+        label: language === "en" ? "Finish creation" : "完成创建",
         instruction: "/create",
       };
     case "discard":
@@ -619,33 +954,111 @@ export function buildStepFocusCard(
 ): StepFocusCard {
   const meta = WIZARD_STEPS[readStepIndex(step) >= 0 ? readStepIndex(step) : 0] ?? WIZARD_STEPS[0]!;
 
-  const highlights = language === "en"
-    ? [
-        draft.blurb ? `Hook: ${draft.blurb}` : "Write a sharper hook.",
-        draft.storyBackground ? `Background: ${draft.storyBackground}` : "Add the story background seed.",
-      ]
-    : [
-        draft.blurb ? `一句话卖点：${draft.blurb}` : "先写出一句话卖点。",
-        draft.storyBackground ? `故事背景：${draft.storyBackground}` : "补齐故事背景。",
-      ];
+  const highlights = (() => {
+    switch (step) {
+      case "intro":
+        return language === "en"
+          ? [
+              draft.blurb ? `Hook: ${draft.blurb}` : "Write a sharper hook.",
+              draft.storyBackground ? `Background: ${draft.storyBackground}` : "Add the story background seed.",
+            ]
+          : [
+              draft.blurb ? `一句话卖点：${draft.blurb}` : "先写出一句话卖点。",
+              draft.storyBackground ? `故事背景：${draft.storyBackground}` : "补齐故事背景。",
+            ];
+      case "world":
+        return language === "en"
+          ? [
+              draft.worldPremise ? `World premise: ${draft.worldPremise}` : "Define the world premise.",
+              draft.settingNotes ? `Setting notes: ${draft.settingNotes}` : "Add the setting notes.",
+            ]
+          : [
+              draft.worldPremise ? `世界观：${draft.worldPremise}` : "先定义世界观。",
+              draft.settingNotes ? `补充设定：${draft.settingNotes}` : "补齐补充设定。",
+            ];
+      case "outline":
+        return language === "en"
+          ? [
+              draft.novelOutline ? `Outline: ${draft.novelOutline}` : "Write the outline.",
+              draft.conflictCore ? `Core conflict: ${draft.conflictCore}` : "Add the core conflict.",
+            ]
+          : [
+              draft.novelOutline ? `小说大纲：${draft.novelOutline}` : "先写小说大纲。",
+              draft.conflictCore ? `核心冲突：${draft.conflictCore}` : "补齐核心冲突。",
+            ];
+      case "volume":
+        return language === "en"
+          ? [draft.volumeOutline ? `Volume plan: ${draft.volumeOutline}` : "Write the volume plan."]
+          : [draft.volumeOutline ? `卷纲规划：${draft.volumeOutline}` : "先写卷纲规划。"];
+      case "characters":
+        return language === "en"
+          ? [
+              draft.protagonist ? `Protagonist: ${draft.protagonist}` : "Define the protagonist.",
+              draft.supportingCast ? `Supporting cast: ${draft.supportingCast}` : "Add supporting cast.",
+            ]
+          : [
+              draft.protagonist ? `主角：${draft.protagonist}` : "先定义主角。",
+              draft.supportingCast ? `配角：${draft.supportingCast}` : "补齐配角。",
+            ];
+      case "arc":
+        return language === "en"
+          ? [draft.characterArc ? `Character arc: ${draft.characterArc}` : "Write the character arc."]
+          : [draft.characterArc ? `人物弧光：${draft.characterArc}` : "先写人物弧光。"];
+      case "relation":
+        return language === "en"
+          ? [draft.relationshipMap ? `Relationship map: ${draft.relationshipMap}` : "Write the relationship map."]
+          : [draft.relationshipMap ? `人物关系：${draft.relationshipMap}` : "先写人物关系。"];
+      case "review":
+        return language === "en"
+          ? [
+              draft.title ? `Title: ${draft.title}` : "Fill in the title.",
+              draft.genre ? `Genre: ${draft.genre}` : "Fill in the genre.",
+            ]
+          : [
+              draft.title ? `书名：${draft.title}` : "先补书名。",
+              draft.genre ? `题材：${draft.genre}` : "先补题材。",
+            ];
+    }
+  })();
 
   const missing: string[] = [];
   if (step === "intro") {
     if (!draft.blurb?.trim()) missing.push(fieldLabelFor("blurb", language));
     if (!draft.storyBackground?.trim()) missing.push(fieldLabelFor("storyBackground", language));
   }
+  if (step === "world") {
+    if (!draft.worldPremise?.trim()) missing.push(fieldLabelFor("worldPremise", language));
+    if (!draft.settingNotes?.trim()) missing.push(fieldLabelFor("settingNotes", language));
+  }
   if (step === "review") {
     for (const key of ["title", "genre", "targetChapters", "chapterWordCount"] as const) {
       if (!(draft as Record<string, unknown>)[key]) missing.push(fieldLabelFor(key, language));
     }
   }
+  if (step !== "intro") {
+    const introLabels = new Set([fieldLabelFor("blurb", language), fieldLabelFor("storyBackground", language)]);
+    const filteredMissing = missing.filter((item) => !introLabels.has(item));
+    missing.splice(0, missing.length, ...filteredMissing);
+  }
   for (const field of draft.missingFields ?? []) {
     const label = fieldLabelFor(field, language);
+    if (step !== "intro" && (label === fieldLabelFor("blurb", language) || label === fieldLabelFor("storyBackground", language))) continue;
     if (!missing.includes(label)) missing.push(label);
   }
 
+  const titleByStep: Record<BookCreationWizardStep, string> = {
+    intro: language === "en" ? "Intro Focus" : "简介焦点",
+    world: language === "en" ? "World Focus" : "世界观焦点",
+    outline: language === "en" ? "Outline Focus" : "大纲焦点",
+    volume: language === "en" ? "Volume Focus" : "卷纲焦点",
+    characters: language === "en" ? "Characters Focus" : "角色焦点",
+    arc: language === "en" ? "Arc Focus" : "弧光焦点",
+    relation: language === "en" ? "Relation Focus" : "关系焦点",
+    review: language === "en" ? "Wrap-up Focus" : "收尾焦点",
+  };
+
   return {
-    title: language === "en" ? `${step === "review" ? "Review Focus" : "Intro Focus"}: ${meta.title}` : `${step === "review" ? "最终确认" : "简介焦点"}：${meta.title}`,
+    title: `${titleByStep[step]}: ${meta.title}`,
     description: language === "en"
       ? `Focus on ${meta.subtitle.toLowerCase()}.`
       : `围绕${meta.subtitle}收束当前页内容。`,
@@ -662,10 +1075,12 @@ export function buildStepShortcuts(
 ): ReadonlyArray<StepShortcut> {
   const createShortcut: StepShortcut = {
     kind: "create",
-    label: language === "en" ? "Create book" : "直接创建书籍",
+    label: language === "en" ? "Finish creation" : "完成创建",
     value: language === "en"
-      ? "Create the book directly after confirming the draft."
-      : "确认无误后直接创建书籍。",
+      ? "Finish the book creation after reviewing all step drafts."
+      : (step === "review"
+        ? "先完成分项向导，再在收尾页完成创建。"
+        : "保存当前页并继续推进下一步。"),
   };
 
   if (step === "intro") {
@@ -772,7 +1187,7 @@ export function buildStepRecommendedAction(params: {
     const create = shortcuts.find((item) => item.kind === "create") ?? shortcuts[shortcuts.length - 1]!;
     return {
       shortcut: create,
-      reason: params.language === "en" ? "The draft is ready to create." : "草案已满足创建条件，可以直接创建。",
+      reason: params.language === "en" ? "The draft is ready to finish creation." : "草案已满足收尾条件，可以完成创建。",
     };
   }
   return {
@@ -874,5 +1289,3 @@ export async function waitForBookReady(bookId: string, options: WaitForBookReady
 
   throw lastError instanceof Error ? lastError : new Error(`Book "${bookId}" was not ready`);
 }
-
-

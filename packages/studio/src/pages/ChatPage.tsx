@@ -27,12 +27,9 @@ import { Shimmer } from "../components/ai-elements/shimmer";
 import { Message } from "../components/ai-elements/message";
 import { AssistantOutputCard } from "../components/chat/AssistantOutputCard";
 import {
-  clearBookCreateSessionId,
   filterModelGroups,
-  getBookCreateSessionId,
   resolveAssistantPreview,
   resolveModelSelection,
-  setBookCreateSessionId,
 } from "./chat-page-state";
 
 // -- Types --
@@ -166,7 +163,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
   return () => { es.close(); };
   }, [bookCreating, setCreateProgress]);
 
-  // Entering a book loads its latest session; book-create mode persists its orphan session in localStorage.
+  // Entering a book loads its latest session.
   useEffect(() => {
     let cancelled = false;
 
@@ -192,23 +189,8 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
         return;
       }
 
-      const existingId = getBookCreateSessionId();
-      if (existingId) {
-        await loadSessionDetail(existingId);
-        if (cancelled) return;
-
-        const state = useChatStore.getState();
-        const session = state.sessions[existingId];
-        if (session && session.bookId === null) {
-          activateSession(existingId);
-          return;
-        }
-      }
-
-      const newSessionId = await createSession(null);
-      if (!cancelled) {
-        setBookCreateSessionId(newSessionId);
-      }
+      if (cancelled) return;
+      await createSession(null);
     })();
 
   return () => {
@@ -240,10 +222,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
   const onCreateBook = async () => {
     if (!activeSessionId) return;
     const newBookId = await handleCreateBook(activeSessionId, activeBookId);
-    if (newBookId) {
-      clearBookCreateSessionId();
-      nav.toBook(newBookId);
-    }
+    if (newBookId) nav.toBook(newBookId);
   };
 
   const handleQuickAction = (command: string) => {
@@ -406,7 +385,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
                 className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 active:scale-[0.98] transition-all disabled:opacity-50"
               >
                 {bookCreating && <Loader2 size={14} className="animate-spin" />}
-                {bookCreating ? "创建中…" : "开始写这本书"}
+                {bookCreating ? "创建中…" : "进入最终创建"}
               </button>
               <div className="flex-1 flex items-center gap-2 rounded-xl border border-border/40 bg-secondary/30 px-3 py-2">
                 <input

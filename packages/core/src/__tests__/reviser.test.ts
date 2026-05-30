@@ -163,6 +163,54 @@ describe("ReviserAgent", () => {
     }
   });
 
+  it("falls back to the body between FIXED_ISSUES and UPDATED_STATE when REVISED_CONTENT is missing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-reviser-fallback-content-test-"));
+    const bookDir = join(root, "book");
+    await mkdir(join(bookDir, "story"), { recursive: true });
+
+    const agent = new ReviserAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: root,
+    });
+
+    vi.spyOn(ReviserAgent.prototype as never, "chat" as never).mockResolvedValue({
+      content: [
+        "=== FIXED_ISSUES ===",
+        "- [ISSUE-07] 已修复衔接断裂。",
+        "",
+        "修订后的正文第一段。",
+        "修订后的正文第二段。",
+        "",
+        "=== UPDATED_STATE ===",
+        "状态卡",
+        "",
+        "=== UPDATED_HOOKS ===",
+        "伏笔池",
+      ].join("\n"),
+      usage: ZERO_USAGE,
+    });
+
+    try {
+      const result = await agent.reviseChapter(bookDir, "原始正文。", 1, [CRITICAL_ISSUE], "rewrite", "xuanhuan");
+
+      expect(result.revisedContent).toContain("修订后的正文第一段。");
+      expect(result.revisedContent).toContain("修订后的正文第二段。");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("tells the model to preserve the target range when a length spec is provided", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-reviser-test-"));
     const bookDir = join(root, "book");

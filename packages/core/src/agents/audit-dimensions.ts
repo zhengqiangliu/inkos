@@ -387,11 +387,14 @@ export function formatAuditPriorityPreview(
   const selected = priorityIds
     .map((id) => dimensionMap.get(id))
     .filter((dimension): dimension is NonNullable<typeof dimension> => Boolean(dimension))
-    .slice(0, 7);
+    .slice(0, 12);
 
   const targetScoreLine = isEnglish
     ? "- Target: pass the first audit on the first attempt, with critical issues at 0 and score at or above 80."
     : "- 目标：首审一次通过，critical=0，分数达到80分及以上。";
+  const scoringLine = isEnglish
+    ? "- Scoring: each critical issue deducts 35 pts; each warning deducts 12 pts. 1 critical = instant fail; 2 warnings = −24 pts (near fail line)."
+    : "- 扣分规则：每个 critical 扣35分，每个 warning 扣12分。1个critical直接不过；2个warning扣24分，接近失败线。";
   const strategyLine = isEnglish
     ? "- Order of work: structure first, continuity second, character consistency third, then style."
     : "- 处理顺序：先结构，再连续性，再人物一致性，最后才是句面。";
@@ -422,6 +425,6 @@ export function formatAuditPriorityPreview(
   });
 
   return isEnglish
-    ? `## Audit Gate\n\n${targetScoreLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\nPriority checks:\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`
-    : `## 审计门禁\n\n${targetScoreLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\n优先检查：\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`;
+    ? `## Audit Gate\n\n${targetScoreLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\nPriority checks:\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`
+    : `## 审计门禁\n\n${targetScoreLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\n优先检查：\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`;
 }

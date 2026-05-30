@@ -174,6 +174,56 @@ export function routeNaturalLanguageIntent(
     }
   }
 
+  const saveCommand = trimmed.match(/^\/save(?:\s+(.+))?$/i);
+  if (saveCommand) {
+    const payload = saveCommand[1]?.trim() ?? "";
+    const stepMatch = payload.match(/(?:^|\s)step=([^\s]+)/i);
+    const titleMatch = payload.match(/(?:^|\s)title=([^\s]+)/i);
+    const genreMatch = payload.match(/(?:^|\s)genre=([^\s]+)/i);
+    const platformMatch = payload.match(/(?:^|\s)platform=([^\s]+)/i);
+    const targetMatch = payload.match(/(?:^|\s)target=([^\s]+)/i);
+    const wordsMatch = payload.match(/(?:^|\s)words=([^\s]+)/i);
+    return {
+      intent: "save_wizard_step",
+      ...(bookId ? { bookId } : {}),
+      instruction: trimmed,
+      ...(stepMatch?.[1] ? { wizardStep: stepMatch[1].toLowerCase() as InteractionRequest["wizardStep"] } : {}),
+      ...(titleMatch?.[1] ? { title: titleMatch[1] } : {}),
+      ...(genreMatch?.[1] ? { genre: genreMatch[1] } : {}),
+      ...(platformMatch?.[1] ? { platform: platformMatch[1] } : {}),
+      ...(targetMatch?.[1] ? { targetChapters: parsePositiveInteger(targetMatch[1]) } : {}),
+      ...(wordsMatch?.[1] ? { chapterWordCount: parsePositiveInteger(wordsMatch[1]) } : {}),
+    };
+  }
+
+  const gotoCommand = trimmed.match(/^\/goto\s+(intro|world|outline|volume|characters|arc|relation|review)$/i);
+  if (gotoCommand) {
+    return {
+      intent: "goto_book_wizard",
+      ...(bookId ? { bookId } : {}),
+      wizardStep: gotoCommand[1]!.toLowerCase() as InteractionRequest["wizardStep"],
+    };
+  }
+
+  const wizardAdvanceCommand = trimmed.match(/^\/wizard\s+advance\s+current=([^\s]+)\s+next=([^\s]+)\s+title=([\s\S]+?)\s+genre=([\s\S]+?)\s+platform=([\s\S]+?)\s+target=([^\s]*)\s+words=([^\s]*)$/i);
+  if (wizardAdvanceCommand) {
+    const targetChapters = parsePositiveInteger(wizardAdvanceCommand[6] ?? "");
+    const chapterWordCount = parsePositiveInteger(wizardAdvanceCommand[7] ?? "");
+    return {
+      intent: "advance_book_wizard",
+      ...(bookId ? { bookId } : {}),
+      instruction: trimmed,
+      // `current` is the step being saved now; the runtime uses it to verify we did not
+      // accidentally race onto the next page before persisting the current draft.
+      wizardStep: wizardAdvanceCommand[1]!.toLowerCase() as InteractionRequest["wizardStep"],
+      title: wizardAdvanceCommand[3]!.trim(),
+      genre: wizardAdvanceCommand[4]!.trim(),
+      platform: wizardAdvanceCommand[5]!.trim(),
+      ...(targetChapters !== undefined ? { targetChapters } : {}),
+      ...(chapterWordCount !== undefined ? { chapterWordCount } : {}),
+    };
+  }
+
   const candidateCommand = trimmed.match(/^\/candidate\s+(\d+)(?:\s+(select|revise|create))?(?:\s+([\s\S]+))?$/i);
   if (candidateCommand) {
     return {

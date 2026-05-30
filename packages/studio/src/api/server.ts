@@ -5698,10 +5698,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     try {
       await access(join(bookDir, "book.json"));
-      await access(join(bookDir, "story", "story_bible.md"));
       return c.json({ error: `Book "${bookId}" already exists` }, 409);
     } catch {
-      // The target book is not fully initialized yet, so creation can continue.
+      // book.json not found — creation can proceed
     }
 
     broadcast("book:creating", { bookId, title: body.title });
@@ -5709,26 +5708,33 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const pipeline = new PipelineRunner(await buildPipelineConfig());
     const tools = createInteractionToolsFromDeps(pipeline, state);
-    processProjectInteractionRequest({
-      projectRoot: root,
-      request: {
-        intent: "create_book",
-        title: body.title,
-        genre: body.genre,
-        language: body.language === "en" ? "en" : body.language === "zh" ? "zh" : undefined,
-        platform: body.platform,
-        chapterWordCount: body.chapterWordCount,
-        targetChapters: body.targetChapters,
-      },
-      tools,
-    }).then(
+    const timeoutMs = 300_000;
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Book creation timed out after ${timeoutMs / 1000}s`)), timeoutMs),
+    );
+    Promise.race([
+      processProjectInteractionRequest({
+        projectRoot: root,
+        request: {
+          intent: "create_book",
+          title: body.title,
+          genre: body.genre,
+          language: body.language === "en" ? "en" : body.language === "zh" ? "zh" : undefined,
+          platform: body.platform,
+          chapterWordCount: body.chapterWordCount,
+          targetChapters: body.targetChapters,
+        },
+        tools,
+      }),
+      timeoutPromise,
+    ]).then(
       (result: {
-        readonly session: { readonly activeBookId?: string };
+        readonly session: { readonly activeBookId?: string; readonly sessionId?: string };
         readonly details?: Readonly<Record<string, unknown>>;
       }) => {
         const createdBookId = (result.details?.bookId as string | undefined) ?? result.session.activeBookId ?? bookId;
         bookCreateStatus.delete(createdBookId);
-        broadcast("book:created", { bookId: createdBookId });
+        broadcast("book:created", { bookId: createdBookId, sessionId: result.session.sessionId });
       },
       (e: unknown) => {
         const error = e instanceof Error ? e.message : String(e);
@@ -6767,26 +6773,45 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const tools = createInteractionToolsFromDeps(pipeline, state);
     const activeBookId = body.activeBookId?.trim() || undefined;
 
-    const result = body.request !== undefined
-      ? await processProjectInteractionRequest({
-          projectRoot: root,
-          request: InteractionRequestSchema.parse(body.request),
-          tools,
-          activeBookId,
-        })
-      : await processProjectInteractionInput({
-          projectRoot: root,
-          input: body.input ?? "",
-          tools,
-          activeBookId,
-        });
+    try {
+      const result = body.request !== undefined
+        ? await processProjectInteractionRequest({
+            projectRoot: root,
+            request: InteractionRequestSchema.parse(body.request),
+            tools,
+            activeBookId,
+          })
+        : await processProjectInteractionInput({
+            projectRoot: root,
+            input: body.input ?? "",
+            tools,
+            activeBookId,
+          });
 
-    return c.json({
-      response: result.responseText,
-      details: result.details,
-      session: result.session,
-      request: result.request,
-    });
+      return c.json({
+        response: result.responseText,
+        details: result.details,
+        session: result.session,
+        request: result.request,
+      });
+    } catch (error) {
+      if (error && typeof error === "object") {
+        const structured = error as { status?: unknown; code?: unknown; message?: unknown; details?: unknown };
+        if (typeof structured.status === "number" && typeof structured.code === "string" && structured.code.trim() && typeof structured.message === "string") {
+          return new Response(JSON.stringify({
+            error: {
+              code: structured.code,
+              message: structured.message,
+            },
+            ...(structured.details !== undefined ? { details: structured.details } : {}),
+          }), {
+            status: structured.status,
+            headers: { "content-type": "application/json" },
+          });
+        }
+      }
+      throw error;
+    }
   });
 
   // -- Per-book session endpoints --
@@ -6901,6 +6926,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       service?: string;
       quickMode?: boolean;
       preferFastWriterModel?: boolean;
+      forceStream?: boolean;
     }>();
     const {
       instruction,
@@ -6911,6 +6937,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       service: reqService,
       quickMode: reqQuickMode,
       preferFastWriterModel: reqPreferFastWriterModel,
+      forceStream: reqForceStream,
     } = payload;
     const sessionId = reqSessionId;
     const runId = reqRunId?.trim() || createAgentRunId();
@@ -6923,6 +6950,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       || deterministicAction?.kind === "rewrite-batch";
     const quickMode = reqQuickMode ?? writeIntent;
     const preferFastWriterModel = reqPreferFastWriterModel ?? true;
+    const forceStream = reqForceStream === true;
     let writeIndexBefore: ReadonlyArray<ChapterIndexEntryLike> = [];
     if (!instruction?.trim()) {
       return c.json({ error: "No instruction provided" }, 400);
@@ -6967,7 +6995,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     try {
       // Load config + create LLM client (pipeline created after model resolution)
       const config = await loadCurrentProjectConfig({ requireApiKey: false });
-      const client = createLLMClient(config.llm);
+      const client = createLLMClient(forceStream ? { ...config.llm, stream: true } : config.llm);
 
       const loadedBookSession = await loadBookSession(root, sessionId);
       if (!loadedBookSession) {
@@ -7186,7 +7214,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
             model: effectiveReqModel,
             apiKey: resolvedApiKey,
             ...(configuredEntry?.apiFormat ? { apiFormat: configuredEntry.apiFormat } : {}),
-            ...(configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
+            ...(forceStream ? { stream: true } : configuredEntry?.stream !== undefined ? { stream: configuredEntry.stream } : {}),
             baseUrl: configuredEntry?.baseUrl ?? "",
           } as any)
         : client;

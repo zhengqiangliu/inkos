@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useHashRoute } from "./hooks/use-hash-route";
 import type { HashRoute } from "./hooks/use-hash-route";
 import { Sidebar } from "./components/Sidebar";
@@ -78,10 +78,11 @@ export function App() {
 
   useSessionEvents(sse, route, setRoute);
 
-  const nav = {
+  const nav = useMemo(() => ({
     toDashboard: () => setRoute({ page: "dashboard" }),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
     toBookCreate: () => setRoute({ page: "book-create" }),
+    toBookDraft: (draftSessionId: string) => setRoute({ page: "book-create", draftSessionId }),
     toChapter: (bookId: string, chapterNumber: number) =>
       setRoute({ page: "chapter", bookId, chapterNumber }),
     toAnalytics: (bookId: string) => setRoute({ page: "analytics", bookId }),
@@ -96,7 +97,7 @@ export function App() {
     toImport: () => setRoute({ page: "import" }),
     toRadar: () => setRoute({ page: "radar" }),
     toDoctor: () => setRoute({ page: "doctor" }),
-  };
+  }), [setRoute]);
 
   const activeBookId = deriveActiveBookId(route);
   const activePage = deriveSidebarActivePage(route);
@@ -198,7 +199,7 @@ export function App() {
                   sse={sse}
                 />
               ) : (
-                <BookCreate nav={nav} theme={theme} t={t} />
+                <BookCreate nav={nav} theme={theme} t={t} draftSessionId={"draftSessionId" in route ? route.draftSessionId : undefined} />
               )}
             </div>
           )}

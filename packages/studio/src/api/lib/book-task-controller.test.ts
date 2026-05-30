@@ -1042,19 +1042,15 @@ describe("BookTaskController audit gating", () => {
 
     await vi.waitFor(async () => {
       const current = await controller.get(bookId, task.id);
-      expect(current?.status).toBe("succeeded");
+      expect(current?.status).toBe("failed");
     });
 
     const finalTask = await controller.get(bookId, task.id);
     expect(writeNextChapter).toHaveBeenCalledTimes(1);
     expect(reviseDraft).not.toHaveBeenCalled();
-    expect(finalTask?.completedChapters).toBe(1);
-    expect(finalTask?.result).toMatchObject({
-      auditedChapters: 1,
-      passedChapters: 1,
-      failedChapters: 0,
-      auditPassRate: 100,
-    });
+    expect(finalTask?.status).toBe("failed");
+    expect(finalTask?.completedChapters).toBe(0);
+    expect(finalTask?.error).toContain("pipeline review stopped after convergence guardrail");
   });
 
   it("fails task-center write chapters using the pipeline stop reason, not a fixed repair-round cap", async () => {

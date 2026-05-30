@@ -231,7 +231,27 @@ export function parseWriterOutput(
     return match?.[1]?.trim() ?? "";
   };
 
-  const chapterContent = extract("CHAPTER_CONTENT");
+  const extractPreludeAfterSectionTitle = (startTag: string, endTags: ReadonlyArray<string>): string => {
+    const startMarker = `=== ${startTag} ===`;
+    const startIndex = content.indexOf(startMarker);
+    if (startIndex < 0) return "";
+    const afterMarker = content.slice(startIndex + startMarker.length);
+    const firstLineMatch = afterMarker.match(/^\s*[^\n]+\n?/);
+    if (!firstLineMatch) return "";
+    const tail = afterMarker.slice(firstLineMatch[0].length);
+    const endIndices = endTags
+      .map((tag) => {
+        const marker = `=== ${tag} ===`;
+        const index = tail.indexOf(marker);
+        return index >= 0 ? index : Number.POSITIVE_INFINITY;
+      })
+      .filter((value) => Number.isFinite(value));
+    const endIndex = endIndices.length > 0 ? Math.min(...endIndices) : tail.length;
+    return tail.slice(0, endIndex).trim();
+  };
+
+  const chapterContent = extract("CHAPTER_CONTENT")
+    || extractPreludeAfterSectionTitle("CHAPTER_TITLE", ["POST_SETTLEMENT", "UPDATED_STATE", "UPDATED_LEDGER", "UPDATED_HOOKS"]);
 
   return {
     chapterNumber,

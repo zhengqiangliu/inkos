@@ -8,6 +8,8 @@
 import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { GenreProfile } from "../models/genre-profile.js";
+import { resolveDialogueQuotePolicy as resolveBookDialogueQuotePolicy } from "../utils/dialogue-quote-policy.js";
+import { normalizeHookId } from "../utils/story-markdown.js";
 
 export interface PostWriteViolation {
   readonly rule: string;
@@ -733,19 +735,7 @@ function extractParagraphs(content: string): string[] {
 }
 
 function resolveDialogueQuotePolicy(bookRules: BookRules | null): ResolvedDialogueQuotePolicy {
-  const policy = bookRules?.dialogueQuotePolicy;
-  if (!policy) {
-    return {
-      mode: "auto",
-      strict: false,
-      autoNormalize: false,
-    };
-  }
-  return {
-    mode: policy.mode ?? "auto",
-    strict: policy.strict ?? false,
-    autoNormalize: policy.autoNormalize ?? false,
-  };
+  return resolveBookDialogueQuotePolicy(bookRules);
 }
 
 function collectChineseDialoguePunctuationStats(content: string): ChineseDialoguePunctuationStats {
@@ -812,10 +802,12 @@ export function validatePreWriteCommitments(
   preWriteCheck: string,
   chapterContent: string,
   language: "zh" | "en" = "zh",
+  pendingHooksMarkdown: string = "",
 ): ReadonlyArray<PostWriteViolation> {
   if (!preWriteCheck || !chapterContent) return [];
   const violations: PostWriteViolation[] = [];
   const isEnglish = language === "en";
+  const allowedHookIds = new Set(extractPendingHookIds(pendingHooksMarkdown));
 
   // Parse markdown table rows: | key | value | note |
   const tableRows = preWriteCheck.split("\n")
@@ -832,34 +824,33 @@ export function validatePreWriteCommitments(
     if (key.includes("待回收伏笔") || key.includes("hooks to recover")) {
       if (!value || value === "none" || value === "无") continue;
 
-      // Extract hook IDs like H01, H02
-      const promisedHookIds = value.match(/H\d{2,}/g);
-      if (!promisedHookIds || promisedHookIds.length === 0) {
+      const parsedHookIds = parsePreWriteHookIds(value);
+      const promisedHookIds = parsedHookIds.filter((hookId) => allowedHookIds.has(hookId));
+      if (promisedHookIds.length === 0) {
         violations.push({
           rule: "prewrite-hook-ids",
           severity: "warning",
           description: isEnglish
-            ? `PRE_WRITE_CHECK "Hooks to recover" row does not contain valid hook IDs: "${value}"`
-            : `PRE_WRITE_CHECK "待回收伏笔"行未包含有效 hook_id：${value}`,
+            ? `PRE_WRITE_CHECK "Hooks to recover" row does not contain any hook IDs from the pending hook pool: "${value}"`
+            : `PRE_WRITE_CHECK "待回收伏笔"行未包含伏笔池中的真实 hook_id：${value}`,
           suggestion: isEnglish
-            ? "Use real hook IDs (e.g., H01, H02) from the pending hooks pool"
-            : "使用伏笔池中的真实 hook_id（如 H01、H02）",
+            ? "Use only hook IDs that already exist in the pending hook pool; write none if there is nothing to recover"
+            : "只填写伏笔池中已存在的真实 hook_id；如果没有要回收的伏笔，写 none",
         });
         continue;
       }
 
-      // Check if each promised hook is at least mentioned in the content
-      const missingHooks = promisedHookIds.filter((hookId) => !chapterContent.includes(hookId));
+      const missingHooks = parsedHookIds.filter((hookId) => !allowedHookIds.has(hookId));
       if (missingHooks.length > 0) {
         violations.push({
           rule: "prewrite-hook-missing",
           severity: "warning",
           description: isEnglish
-            ? `PRE_WRITE_CHECK promises to recover ${missingHooks.join(", ")}, but these hook IDs are not found in chapter content`
-            : `PRE_WRITE_CHECK 承诺回收 ${missingHooks.join("、")}，但正文中未找到这些伏笔的引用`,
+            ? `PRE_WRITE_CHECK references hook IDs not found in the pending hook pool: ${missingHooks.join(", ")}`
+            : `PRE_WRITE_CHECK 引用了伏笔池中不存在的 hook_id：${missingHooks.join("、")}`,
           suggestion: isEnglish
-            ? "Add scenes or mentions that address these hooks, or update PRE_WRITE_CHECK"
-            : "补充与这些伏笔相关的场景或提及，或更新 PRE_WRITE_CHECK",
+            ? "Update PRE_WRITE_CHECK to use only real hook IDs from the pending hook pool"
+            : "把 PRE_WRITE_CHECK 改成只引用伏笔池里的真实 hook_id",
         });
       }
     }
@@ -898,6 +889,48 @@ export function validatePreWriteCommitments(
   }
 
   return enrichPostWriteViolations(violations);
+}
+
+function parsePreWriteHookIds(value: string): string[] {
+  const parts = value
+    .split(/[\s,，、;；/|:：→]+/g)
+    .map((part) => normalizeHookId(part).replace(/^[\[\]()"“”‘’'`]+|[\[\]()"“”‘’'`]+$/g, "").trim())
+    .filter((part) => part.length > 0 && !/^(无|空|none|nil|null|暂无|n\/a|na|n-a|tbd|todo|待定)$/i.test(part));
+
+  return [...new Set(parts)];
+}
+
+function extractPendingHookIds(markdown: string): string[] {
+  if (!markdown) return [];
+
+  const ids: string[] = [];
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.startsWith("|")) {
+      const cells = line.split("|").map((cell) => cell.trim());
+      const hookId = normalizeHookId(cells[1]);
+      if (hookId && !/^(hook_id|hookid)$/i.test(hookId) && !/^[-\s]+$/.test(hookId)) {
+        ids.push(hookId);
+      }
+      continue;
+    }
+
+    if (!line.startsWith("-")) continue;
+    const bullet = line.replace(/^-+\s*/, "").trim();
+    const candidate = normalizeHookId((bullet.split(/\s+/)[0] ?? "").replace(/^[\[\]()"“”‘’'`]+|[\[\]()"“”‘’'`]+$/g, "").trim());
+    if (!candidate) continue;
+    if (/^(new|无|空|none|nil|null|暂无|n\/a|na|n-a|tbd|todo|待定)$/i.test(candidate)) continue;
+    if (!looksLikeHookId(candidate)) continue;
+    ids.push(candidate);
+  }
+
+  return [...new Set(ids)];
+}
+
+function looksLikeHookId(value: string): boolean {
+  return /[\u4e00-\u9fff0-9_-]/.test(value);
 }
 
 /**

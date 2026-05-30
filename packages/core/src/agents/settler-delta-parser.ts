@@ -23,6 +23,18 @@ export function parseSettlerDeltaOutput(content: string): SettlerDeltaOutput {
     return match?.[1]?.trim() ?? "";
   };
 
+  const extractPreludeBeforeSection = (endTags: ReadonlyArray<string>): string => {
+    const endIndices = endTags
+      .map((tag) => {
+        const marker = `=== ${tag} ===`;
+        const index = content.indexOf(marker);
+        return index >= 0 ? index : Number.POSITIVE_INFINITY;
+      })
+      .filter((value) => Number.isFinite(value));
+    const endIndex = endIndices.length > 0 ? Math.min(...endIndices) : content.length;
+    return content.slice(0, endIndex).trim();
+  };
+
   const rawDelta = extract("RUNTIME_STATE_DELTA");
   if (!rawDelta) {
     throw new Error("runtime state delta block is missing");
@@ -38,7 +50,7 @@ export function parseSettlerDeltaOutput(content: string): SettlerDeltaOutput {
 
   try {
     return {
-      postSettlement: extract("POST_SETTLEMENT"),
+      postSettlement: extract("POST_SETTLEMENT") || extractPreludeBeforeSection(["RUNTIME_STATE_DELTA"]),
       runtimeStateDelta: RuntimeStateDeltaSchema.parse(parsed),
     };
   } catch (error) {

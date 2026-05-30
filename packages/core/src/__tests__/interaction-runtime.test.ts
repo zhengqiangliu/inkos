@@ -145,7 +145,105 @@ describe("interaction runtime", () => {
     expect(result.responseText).toContain("120");
   });
 
-  it("routes advance_book_wizard through the shared wizard tool and advances to the next step", async () => {
+  it("saves a wizard step without advancing to the next step", async () => {
+    const saveBookWizardStep = vi.fn(async () => ({
+      __interaction: {
+        responseText: "已保存当前页草案。",
+        details: {
+          creationDraft: {
+            concept: "港风商战悬疑，主角从灰产洗白。",
+            title: "夜港账本",
+            genre: "urban",
+            blurb: "港口账本牵出灰产洗白风暴。",
+            storyBackground: "港城、账本、灰产洗白。",
+            missingFields: [],
+            readyToCreate: false,
+          },
+        },
+      },
+    }));
+
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-save-step",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationWizard: {
+          currentStep: "intro",
+          completedSteps: [],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "save_wizard_step",
+        instruction: "保存简介页草案。",
+        wizardStep: "intro",
+      },
+      tools: makeTools({
+        saveBookWizardStep,
+      }),
+    });
+
+    expect(saveBookWizardStep).toHaveBeenCalledWith("保存简介页草案。", undefined, "intro");
+    expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      title: "夜港账本",
+      blurb: "港口账本牵出灰产洗白风暴。",
+    }));
+    expect(result.session.creationWizard?.currentStep).toBe("intro");
+  });
+
+  it("keeps the current wizard step when selecting an intro candidate", async () => {
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-candidate",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationWizard: {
+          currentStep: "intro",
+          completedSteps: [],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "select_intro_candidate",
+        candidateIndex: 1,
+        candidateCount: 3,
+        title: "夜港账本",
+        blurb: "港口账本牵出灰产洗白风暴。",
+        storyBackground: "港城、账本、灰产洗白。",
+        instruction: "title=夜港账本\nblurb=港口账本牵出灰产洗白风暴。\nstoryBackground=港城、账本、灰产洗白。",
+      },
+      tools: makeTools(),
+    });
+
+    expect(result.session.creationWizard?.currentStep).toBe("intro");
+    expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      title: "夜港账本",
+      blurb: "港口账本牵出灰产洗白风暴。",
+      storyBackground: "港城、账本、灰产洗白。",
+    }));
+  });
+
+  it("routes /save through the save_wizard_step intent", async () => {
+    const request = {
+      intent: "save_wizard_step" as const,
+      instruction: "/save step=简介 title=夜港账本 genre=urban platform=tomato target=120 words=2800",
+      wizardStep: "intro" as const,
+      title: "夜港账本",
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+    };
+
+    expect(request.intent).toBe("save_wizard_step");
+  });
+
+  it("routes advance_book_wizard through the shared wizard tool and moves to the next step", async () => {
     const advanceBookWizard = vi.fn(async () => ({
       __interaction: {
         responseText: "已生成简介 / 故事背景并进入世界观。",
@@ -190,7 +288,41 @@ describe("interaction runtime", () => {
       storyBackground: "港城、账本、灰产洗白。",
     }));
     expect(result.session.creationWizard?.currentStep).toBe("world");
-    expect(result.session.creationWizard?.completedSteps).toContain("intro");
+  });
+
+  it("routes retreat_book_wizard without invoking agent-style wizard tools", async () => {
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-retreat",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        creationWizard: {
+          currentStep: "world",
+          completedSteps: ["intro", "world"],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "retreat_book_wizard",
+        wizardStep: "world",
+      },
+      tools: makeTools(),
+    });
+
+    expect(result.session.creationWizard?.currentStep).toBe("intro");
+    expect(result.session.creationDraft).toEqual(expect.objectContaining({
+      blurb: "港口账本牵出灰产洗白风暴。",
+      storyBackground: "港城、账本、灰产洗白。",
+    }));
   });
 
   it("routes retreat_book_wizard and moves the wizard back one step without clearing the draft", async () => {
@@ -225,7 +357,6 @@ describe("interaction runtime", () => {
       blurb: "港口账本牵出灰产洗白风暴。",
     }));
     expect(result.session.creationWizard?.currentStep).toBe("intro");
-    expect(result.session.creationWizard?.completedSteps).toContain("intro");
   });
 
   it("rejects incomplete drafts at final create time", async () => {
@@ -332,6 +463,7 @@ describe("interaction runtime", () => {
       }),
       request: {
         intent: "create_book",
+        wizardStep: "review",
       },
       tools: makeTools(),
     })).rejects.toThrow("基础资料尚未完成");

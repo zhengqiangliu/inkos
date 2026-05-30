@@ -142,11 +142,42 @@ describe("book-session-store", () => {
       expect(list[2].updatedAt).toBe(100);
     });
 
-    it("lists null bookId sessions", async () => {
-      const s = createBookSession(null);
+    it("lists non-empty null bookId sessions", async () => {
+      const s = {
+        ...createBookSession(null),
+        title: "草稿一",
+        messages: [{ role: "user" as const, content: "先写个开头", wizardStep: "intro" as const, timestamp: 1 }],
+      };
       await persistBookSession(tempDir, s);
       const list = await listBookSessions(tempDir, null);
       expect(list).toHaveLength(1);
+      expect(list[0].title).toBe("草稿一");
+      expect(list[0].hasWizardStepMessage).toBe(true);
+    });
+
+    it("hides empty null bookId sessions", async () => {
+      const s = createBookSession(null);
+      await persistBookSession(tempDir, s);
+      const list = await listBookSessions(tempDir, null);
+      expect(list).toHaveLength(0);
+    });
+
+    it("deduplicates sessions with the same session id", async () => {
+      const dir = join(tempDir, ".inkos", "sessions");
+      await mkdir(dir, { recursive: true });
+      const session = {
+        ...createBookSession(null),
+        title: "duplicate one",
+        messages: [{ role: "user" as const, content: "intro", wizardStep: "intro" as const, timestamp: 1 }],
+        updatedAt: 100,
+      };
+      await writeFile(join(dir, `${session.sessionId}.json`), JSON.stringify(session, null, 2), "utf-8");
+      await writeFile(join(dir, `${session.sessionId}.dup.json`), JSON.stringify({ ...session, title: "duplicate two", updatedAt: 200 }, null, 2), "utf-8");
+
+      const list = await listBookSessions(tempDir, null);
+
+      expect(list).toHaveLength(1);
+      expect(list[0].title).toBe("duplicate two");
     });
   });
 

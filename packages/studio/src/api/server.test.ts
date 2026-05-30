@@ -10037,4 +10037,99 @@ describe("createStudioServer daemon lifecycle", () => {
       }),
     }));
   });
+
+  it("posts retreat wizard requests through the shared interaction session endpoint without streaming", async () => {
+    processProjectInteractionRequestMock.mockResolvedValueOnce({
+      request: { intent: "retreat_book_wizard" },
+      session: {
+        sessionId: "session-5",
+        projectRoot: root,
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        creationWizard: {
+          currentStep: "intro",
+          completedSteps: ["intro"],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      },
+      responseText: "已返回上一页。",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/interaction/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: {
+          intent: "retreat_book_wizard",
+          wizardStep: "world",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      response: "已返回上一页。",
+      session: expect.objectContaining({
+        creationWizard: expect.objectContaining({
+          currentStep: "intro",
+        }),
+      }),
+    });
+    expect(processProjectInteractionRequestMock).toHaveBeenCalledWith(expect.objectContaining({
+      projectRoot: root,
+      activeBookId: undefined,
+      request: expect.objectContaining({
+        intent: "retreat_book_wizard",
+        wizardStep: "world",
+      }),
+    }));
+  });
+
+  it("returns structured 409 errors for blocked wizard control requests", async () => {
+    processProjectInteractionRequestMock.mockRejectedValueOnce(Object.assign(new Error("当前页已变化，请重新点击保存并进入。"), {
+      status: 409,
+      code: "WIZARD_STEP_CHANGED",
+      details: {
+        currentStep: "intro",
+        targetStep: "world",
+      },
+    }));
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/interaction/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: {
+          intent: "goto_book_wizard",
+          wizardStep: "world",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "WIZARD_STEP_CHANGED",
+        message: "当前页已变化，请重新点击保存并进入。",
+      },
+      details: {
+        currentStep: "intro",
+        targetStep: "world",
+      },
+    });
+  });
 });

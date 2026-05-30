@@ -73,6 +73,23 @@ function makeTextStream(text: string): AsyncIterable<Record<string, unknown>> {
   ]);
 }
 
+/** Stream that emits only text_end and then done. */
+function makeTextEndStream(text: string): AsyncIterable<Record<string, unknown>> {
+  const msg = makeAssistantMessage(text);
+  return makeEventStream([
+    { type: "text_end", contentIndex: 0, content: text, partial: msg },
+    { type: "done", reason: "stop", message: msg },
+  ]);
+}
+
+/** Stream that emits only done with text in the final message. */
+function makeDoneOnlyTextStream(text: string): AsyncIterable<Record<string, unknown>> {
+  const msg = makeAssistantMessage(text);
+  return makeEventStream([
+    { type: "done", reason: "stop", message: msg },
+  ]);
+}
+
 /** Stream that emits only done with empty content. */
 function makeEmptyStream(): AsyncIterable<Record<string, unknown>> {
   const msg = makeAssistantMessage("");
@@ -158,6 +175,28 @@ describe("chatCompletion via pi-ai", () => {
     expect(result.usage.completionTokens).toBe(7);
     expect(result.usage.totalTokens).toBe(18);
     expect(mockStreamSimple).toHaveBeenCalledOnce();
+  });
+
+  it("returns text content when the stream only emits text_end", async () => {
+    mockStreamSimple.mockReturnValue(makeTextEndStream("hello end"));
+
+    const client = makeClient();
+    const result = await chatCompletion(client, "test-model", [
+      { role: "user", content: "ping" },
+    ]);
+
+    expect(result.content).toBe("hello end");
+  });
+
+  it("falls back to the final done message content when no text_delta is emitted", async () => {
+    mockStreamSimple.mockReturnValue(makeDoneOnlyTextStream("hello done"));
+
+    const client = makeClient();
+    const result = await chatCompletion(client, "test-model", [
+      { role: "user", content: "ping" },
+    ]);
+
+    expect(result.content).toBe("hello done");
   });
 
   it("throws when stream produces no text content", async () => {

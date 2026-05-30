@@ -109,6 +109,12 @@ function applyTemplate(template: string, replacements: Record<string, string>): 
   return output;
 }
 
+export function chapterAuditScoreBadgeClass(score: number): string {
+  if (score >= 80) return "bg-emerald-500/10 text-emerald-600";
+  if (score >= 60) return "bg-amber-500/10 text-amber-600";
+  return "bg-destructive/10 text-destructive";
+}
+
 function normalizeAuditIssueTexts(raw: unknown, limit = 6): string[] {
   if (!Array.isArray(raw)) return [];
   const result: string[] = [];
@@ -1474,7 +1480,7 @@ export function ChaptersSection({
                         {statusLabel(ch.status, t)}
                       </span>
                       {showAuditScore && (
-                        <span className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums", scoreBadgeClass(auditScore))}>
+                        <span className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium tabular-nums", chapterAuditScoreBadgeClass(auditScore))}>
                           评分 {auditScore}
                         </span>
                       )}

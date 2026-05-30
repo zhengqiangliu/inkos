@@ -62,7 +62,7 @@ Output format (simple, NOT JSON):
 Example:
 PASS
 [unsupported_change] State card says character moved to the forest, but text only shows intent
-[minor] Hook H03 advanced but text mention is brief
+[minor] Hook hook-03 advanced but text mention is brief
 
 Or if there are hard contradictions:
 FAIL

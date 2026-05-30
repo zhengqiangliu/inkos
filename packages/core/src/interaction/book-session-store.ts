@@ -67,6 +67,7 @@ export interface BookSessionSummary {
   readonly bookId: string | null;
   readonly title: string | null;
   readonly messageCount: number;
+  readonly hasWizardStepMessage: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -122,11 +123,22 @@ export async function listBookSessions(
           }
         }
 
+        const messageCount = Array.isArray(data.messages) ? data.messages.length : 0;
+        const hasWizardStepMessage = Array.isArray(data.messages)
+          && data.messages.some((message) => Boolean(message && typeof message === "object" && typeof (message as { wizardStep?: unknown }).wizardStep === "string"));
+        if (parsedBookId === null && messageCount === 0 && persistedTitle === null) {
+          return null;
+        }
+        if (parsedBookId === null && !hasWizardStepMessage) {
+          return null;
+        }
+
         return {
           sessionId: data.sessionId,
           bookId: parsedBookId,
           title: persistedTitle,
-          messageCount: Array.isArray(data.messages) ? data.messages.length : 0,
+          messageCount,
+          hasWizardStepMessage,
           createdAt: typeof data.createdAt === "number" ? data.createdAt : 0,
           updatedAt: typeof data.updatedAt === "number" ? data.updatedAt : 0,
         };
@@ -136,9 +148,16 @@ export async function listBookSessions(
     }),
   );
 
-  return summaries
-    .filter((summary): summary is BookSessionSummary => summary !== null)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const deduped = new Map<string, BookSessionSummary>();
+  for (const summary of summaries) {
+    if (!summary) continue;
+    const existing = deduped.get(summary.sessionId);
+    if (!existing || summary.updatedAt > existing.updatedAt) {
+      deduped.set(summary.sessionId, summary);
+    }
+  }
+
+  return [...deduped.values()].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function renameBookSession(

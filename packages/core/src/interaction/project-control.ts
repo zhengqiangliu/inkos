@@ -39,6 +39,14 @@ function summarizeStructuredRequest(request: InteractionRequest): string {
   return parts.join(" | ");
 }
 
+function resolveRequestWizardStep(request: InteractionRequest, sessionStep?: string | null): InteractionRequest["wizardStep"] {
+  if (request.wizardStep) return request.wizardStep;
+  if (sessionStep === "intro" || sessionStep === "world" || sessionStep === "outline" || sessionStep === "volume" || sessionStep === "characters" || sessionStep === "arc" || sessionStep === "relation" || sessionStep === "review") {
+    return sessionStep;
+  }
+  return undefined;
+}
+
 async function processProjectInteractionRequestInternal(params: {
   readonly projectRoot: string;
   readonly request: InteractionRequest;
@@ -53,9 +61,11 @@ async function processProjectInteractionRequestInternal(params: {
   const sessionWithBook = resolvedBookId && session.activeBookId !== resolvedBookId
     ? { ...session, activeBookId: resolvedBookId }
     : session;
+  const wizardStep = resolveRequestWizardStep(localizedRequest, sessionWithBook.creationWizard?.currentStep ?? null);
   const userSession = appendInteractionMessage(sessionWithBook, {
     role: "user",
     content: summarizeStructuredRequest(localizedRequest),
+    ...(wizardStep ? { wizardStep } : {}),
     timestamp: Date.now(),
   });
 
@@ -70,6 +80,7 @@ async function processProjectInteractionRequestInternal(params: {
       ? appendInteractionMessage(result.session, {
           role: "assistant",
           content: responseText,
+          ...(wizardStep ? { wizardStep } : {}),
           timestamp: Date.now(),
         })
       : result.session;
@@ -109,21 +120,23 @@ export async function processProjectInteractionInput(params: {
   readonly activeBookId?: string;
 }) {
   const requestLanguage = await detectProjectInteractionLanguage(params.projectRoot);
+  const request = attachRequestLanguage(routeNaturalLanguageIntent(params.input, {
+    activeBookId: params.activeBookId,
+    hasCreationDraft: false,
+  }), requestLanguage);
   const session = await loadProjectSession(params.projectRoot);
   const restoredBookId = await resolveSessionActiveBook(params.projectRoot, session);
   const resolvedBookId = params.activeBookId ?? restoredBookId;
   const sessionWithBook = resolvedBookId && session.activeBookId !== resolvedBookId
     ? { ...session, activeBookId: resolvedBookId }
     : session;
+  const wizardStep = resolveRequestWizardStep(request, sessionWithBook.creationWizard?.currentStep ?? null);
   const userSession = appendInteractionMessage(sessionWithBook, {
     role: "user",
     content: params.input,
+    ...(wizardStep ? { wizardStep } : {}),
     timestamp: Date.now(),
   });
-  const request = attachRequestLanguage(routeNaturalLanguageIntent(params.input, {
-    activeBookId: userSession.activeBookId,
-    hasCreationDraft: Boolean(userSession.creationDraft),
-  }), requestLanguage);
   try {
     const result = await runInteractionRequest({
       session: userSession,
@@ -135,6 +148,7 @@ export async function processProjectInteractionInput(params: {
       ? appendInteractionMessage(result.session, {
           role: "assistant",
           content: responseText,
+          ...(wizardStep ? { wizardStep } : {}),
           timestamp: Date.now(),
         })
       : result.session;

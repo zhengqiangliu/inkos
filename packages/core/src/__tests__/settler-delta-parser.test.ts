@@ -130,4 +130,28 @@ describe("parseSettlerDeltaOutput", () => {
       }),
     ]);
   });
+
+  it("falls back to the settlement prose when POST_SETTLEMENT is not tagged", () => {
+    const result = parseSettlerDeltaOutput([
+      "开场结算摘要。",
+      "本章推进了师债线索。",
+      "",
+      "=== RUNTIME_STATE_DELTA ===",
+      "```json",
+      JSON.stringify({
+        chapter: 22,
+        hookOps: {
+          upsert: [],
+          mention: [],
+          resolve: [],
+          defer: [],
+        },
+        notes: [],
+      }),
+      "```",
+    ].join("\n"));
+
+    expect(result.postSettlement).toContain("开场结算摘要");
+    expect(result.postSettlement).toContain("师债线索");
+  });
 });

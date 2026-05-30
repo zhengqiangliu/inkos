@@ -124,6 +124,23 @@ describe("WriterAgent parseOutput", () => {
     expect(result.wordCount).toBe(0);
   });
 
+  it("falls back to the body between CHAPTER_TITLE and POST_SETTLEMENT when CHAPTER_CONTENT is missing", () => {
+    const output = [
+      "=== CHAPTER_TITLE ===",
+      "A Title",
+      "",
+      "正文第一段。",
+      "正文第二段。",
+      "",
+      "=== POST_SETTLEMENT ===",
+      "结算信息。",
+    ].join("\n");
+
+    const result = callParseOutput(1, output);
+    expect(result.content).toContain("正文第一段。");
+    expect(result.content).toContain("正文第二段。");
+  });
+
   it("returns fallback strings for missing state sections", () => {
     const output = [
       "=== CHAPTER_TITLE ===",

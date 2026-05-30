@@ -21,6 +21,7 @@ import {
   Eye,
 } from "lucide-react";
 import { countChapterLengthByLanguage } from "../utils/chapter-length";
+import { normalizeDialogueQuotesToDouble } from "../utils/dialogue-quotes";
 import { resolveChapterReaderSelectionState } from "./chapter-reader-state";
 
 interface ChapterData {
@@ -126,6 +127,10 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme: _theme, t }: 
     }
   }, [bookId, chapterNumber, editContent, refetch]);
 
+  const handleNormalizeDialogueQuotes = useCallback(() => {
+    setEditContent((current) => normalizeDialogueQuotesToDouble(current));
+  }, []);
+
   const handleApprove = useCallback(async () => {
     try {
       await postApi(`/books/${bookId}/chapters/${chapterNumber}/approve`);
@@ -229,6 +234,14 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme: _theme, t }: 
           </button>
           {editing ? (
             <>
+              <button
+                onClick={handleNormalizeDialogueQuotes}
+                className="flex items-center gap-2 rounded-xl border border-border/50 bg-secondary px-4 py-2 text-xs font-bold text-muted-foreground transition-all hover:bg-primary/10 hover:text-primary"
+                title="将「」统一替换为双引号"
+              >
+                <Type size={14} />
+                统一双引号
+              </button>
               <button onClick={handleSave} disabled={saving} className="flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-bold text-primary-foreground disabled:opacity-50">
                 <Save size={14} />
                 {saving ? t("book.saving") : t("book.save")}
@@ -272,11 +285,11 @@ export function ChapterReader({ bookId, chapterNumber, nav, theme: _theme, t }: 
 
         <div ref={viewerRef} className="mt-5 min-w-0">
           {editing ? (
-            <textarea
-              ref={editorRef}
-              value={editContent}
-              onChange={(e) => setEditContent(e.target.value)}
-              onSelect={syncEditorSelection}
+          <textarea
+            ref={editorRef}
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
+            onSelect={syncEditorSelection}
               onMouseUp={syncEditorSelection}
               onKeyUp={syncEditorSelection}
               onBlur={syncEditorSelection}

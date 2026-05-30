@@ -23,8 +23,20 @@ export function parseSettlementOutput(
     return match?.[1]?.trim() ?? "";
   };
 
+  const extractPreludeBeforeSection = (endTags: ReadonlyArray<string>): string => {
+    const endIndices = endTags
+      .map((tag) => {
+        const marker = `=== ${tag} ===`;
+        const index = content.indexOf(marker);
+        return index >= 0 ? index : Number.POSITIVE_INFINITY;
+      })
+      .filter((value) => Number.isFinite(value));
+    const endIndex = endIndices.length > 0 ? Math.min(...endIndices) : content.length;
+    return content.slice(0, endIndex).trim();
+  };
+
   return {
-    postSettlement: extract("POST_SETTLEMENT"),
+    postSettlement: extract("POST_SETTLEMENT") || extractPreludeBeforeSection(["UPDATED_STATE", "UPDATED_LEDGER", "UPDATED_HOOKS", "CHAPTER_SUMMARY", "UPDATED_SUBPLOTS", "UPDATED_EMOTIONAL_ARCS", "UPDATED_CHARACTER_MATRIX"]),
     updatedState: extract("UPDATED_STATE") || "(状态卡未更新)",
     updatedLedger: genreProfile.numericalSystem
       ? (extract("UPDATED_LEDGER") || "(账本未更新)")

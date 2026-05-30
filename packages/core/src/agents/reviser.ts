@@ -17,6 +17,7 @@ import {
   mergeTableMarkdownByKey,
 } from "../utils/governed-working-set.js";
 import { applySpotFixPatches, parseSpotFixPatches } from "../utils/spot-fix-patches.js";
+import { resolveDialogueQuotePolicy as resolveBookDialogueQuotePolicy } from "../utils/dialogue-quote-policy.js";
 import type { ChapterPlan } from "../models/chapter-plan.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -301,8 +302,15 @@ export class ReviserAgent extends BaseAgent {
     const primaryIssueClassBlock = primaryIssueClass
       ? `\n- 主问题类型：${primaryIssueClass}`
       : "";
+    const minFixPathBlock = failureGate === "score" && typeof scoreShortfall === "number" && scoreShortfall > 0
+      ? (() => {
+          const warningsNeeded = Math.ceil(scoreShortfall / 12);
+          const currentWarnings = issues.filter((i) => i.severity === "warning").length;
+          return `\n- 最小修复路径：需消除至少 ${warningsNeeded} 个 warning（当前共 ${currentWarnings} 个 warning，每个扣12分）。优先修复影响最大的 warning，不要平均用力。`;
+        })()
+      : "";
     const auditGateBlock = failureGate || Number.isFinite(Number(reviseContext?.score)) || Number.isFinite(Number(reviseContext?.passScoreThreshold)) || mustFixFirstBlock.length > 0 || revisionStagnationBlock.length > 0
-      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${typeof currentScore === "number" ? `\n- 当前评分: ${currentScore}` : ""}${typeof passScoreThreshold === "number" ? `\n- 通过阈值: ${passScoreThreshold}` : ""}${typeof scoreShortfall === "number" ? `\n- 距离通过阈值还差: ${scoreShortfall}` : ""}${failureGateStrategyBlock}${structureOverloadBlock}${revisionStagnationBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
+      ? `\n## 审计门禁信息\n- failureGate: ${failureGate ?? "none"}${typeof currentScore === "number" ? `\n- 当前评分: ${currentScore}` : ""}${typeof passScoreThreshold === "number" ? `\n- 通过阈值: ${passScoreThreshold}` : ""}${typeof scoreShortfall === "number" ? `\n- 距离通过阈值还差: ${scoreShortfall}` : ""}${minFixPathBlock}${failureGateStrategyBlock}${structureOverloadBlock}${revisionStagnationBlock}${issueClassCountsBlock}${primaryIssueClassBlock}${mustFixFirstBlock}${unresolvedIssueBlock}\n`
       : "";
     const hooksWorkingSet = governedMode && options?.contextPackage
       ? buildGovernedHookWorkingSet({
@@ -616,6 +624,23 @@ ${chapterContent}`;
       return match?.[1]?.trim() ?? "";
     };
 
+    const extractRange = (startTag: string, endTags: ReadonlyArray<string>): string => {
+      const startMarker = `=== ${startTag} ===`;
+      const startIndex = content.indexOf(startMarker);
+      if (startIndex < 0) return "";
+      const startOffset = startIndex + startMarker.length;
+      const tail = content.slice(startOffset);
+      const endIndices = endTags
+        .map((tag) => {
+          const marker = `=== ${tag} ===`;
+          const index = tail.indexOf(marker);
+          return index >= 0 ? index : Number.POSITIVE_INFINITY;
+        })
+        .filter((value) => Number.isFinite(value));
+      const endIndex = endIndices.length > 0 ? Math.min(...endIndices) : tail.length;
+      return tail.slice(0, endIndex).trim();
+    };
+
     const fixedRaw = extract("FIXED_ISSUES");
     const fixedIssues = this.normalizeFixedIssues(fixedRaw, issues);
 
@@ -637,7 +662,7 @@ ${chapterContent}`;
       };
     }
 
-    const revisedContent = extract("REVISED_CONTENT");
+    const revisedContent = extract("REVISED_CONTENT") || extractRange("FIXED_ISSUES", ["UPDATED_STATE", "UPDATED_LEDGER", "UPDATED_HOOKS"]);
     const boundaryChecked = this.enforceChapterBoundary({
       revisedContent,
       originalChapter,
@@ -791,8 +816,8 @@ ${overrides}\n`;
     if (language === "en") {
       return "Keep direct speech punctuation consistent with recent chapters. Do not switch quote style mid-chapter.";
     }
-    const policy = bookRules?.dialogueQuotePolicy;
-    if (!policy || policy.mode === "auto") {
+    const policy = resolveBookDialogueQuotePolicy(bookRules, language);
+    if (policy.mode === "auto") {
       return "保持原章的对话标点习惯（如「……」或“……”）；除非用户明确要求切换，否则不得更换对白引号体系";
     }
     if (policy.mode === "force_double") {

@@ -20,6 +20,7 @@ import type { RadarSource } from "../agents/radar-source.js";
 import { readBookRules, readGenreProfile } from "../agents/rules-reader.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
+import { resolveDialogueQuotePolicy as resolveBookDialogueQuotePolicy } from "../utils/dialogue-quote-policy.js";
 import { StateManager } from "../state/manager.js";
 import { MemoryDB, type Fact } from "../state/memory-db.js";
 import { dispatchNotification, dispatchWebhookEvent } from "../notify/dispatcher.js";
@@ -929,7 +930,7 @@ export class PipelineRunner {
     const issues = hasScoreGateIssue
       ? params.auditResult.issues
       : [...params.auditResult.issues, {
-          severity: "warning",
+          severity: "info",
           category,
           description,
           suggestion,
@@ -1821,9 +1822,10 @@ export class PipelineRunner {
       const language = book.language ?? gp.language;
       const countingMode = resolveLengthCountingMode(language);
       const parsedBookRules = await readBookRules(bookDir).catch(() => null);
-      const dialogueQuotePolicy = language === "zh"
-        ? parsedBookRules?.rules?.dialogueQuotePolicy
-        : undefined;
+      const dialogueQuotePolicy = resolveBookDialogueQuotePolicy(
+        parsedBookRules?.rules ?? null,
+        language,
+      );
       const chapterLengthTarget = chapterMeta.lengthTelemetry?.target ?? book.chapterWordCount;
       const lengthLanguage = chapterMeta.lengthTelemetry?.countingMode === "en_words"
         ? "en"
@@ -2431,9 +2433,10 @@ export class PipelineRunner {
     const { profile: gp } = await this.loadGenreProfile(book.genre);
     const pipelineLang = book.language ?? gp.language;
     const parsedBookRules = await readBookRules(bookDir).catch(() => null);
-    const dialogueQuotePolicy = pipelineLang === "zh"
-      ? parsedBookRules?.rules?.dialogueQuotePolicy
-      : undefined;
+    const dialogueQuotePolicy = resolveBookDialogueQuotePolicy(
+      parsedBookRules?.rules ?? null,
+      pipelineLang,
+    );
     const lengthSpec = buildLengthSpec(
       wordCount ?? book.chapterWordCount,
       pipelineLang,

@@ -374,6 +374,7 @@ export class ContinuityAuditor extends BaseAgent {
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
       previousAuditIssues?: ReadonlyArray<AuditIssue>;
+      revisionClaims?: ReadonlyArray<string>;
       truthFileOverrides?: {
         currentState?: string;
         ledger?: string;
@@ -590,7 +591,7 @@ ${dimList}
       : "";
 
     const deltaAuditBlock = options?.previousAuditIssues && options.previousAuditIssues.length > 0
-      ? this.buildDeltaAuditPromptBlock(options.previousAuditIssues, isEnglish)
+      ? this.buildDeltaAuditPromptBlock(options.previousAuditIssues, isEnglish, options.revisionClaims)
       : "";
 
     const userPrompt = isEnglish
@@ -712,6 +713,7 @@ ${chapterContent}`;
   private buildDeltaAuditPromptBlock(
     previousIssues: ReadonlyArray<AuditIssue>,
     isEnglish: boolean,
+    revisionClaims?: ReadonlyArray<string>,
   ): string {
   if (isEnglish) {
       const issueLines = previousIssues
@@ -722,14 +724,17 @@ ${chapterContent}`;
           return `- [${issueId}] [${i.severity}] [${dimensionId}] ${i.category}: ${i.description}`;
         })
         .join("\n");
+      const claimsBlock = revisionClaims && revisionClaims.length > 0
+        ? `\nThe reviser claimed to have made the following fixes:\n${revisionClaims.map((c) => `- ${c}`).join("\n")}\nVerify whether these claims are accurate based on the revised content.\n`
+        : "";
       return `
 
 ## Delta Audit Prompt (this is a revision re-audit)
 The chapter below has been revised from a previous version. The previous audit found these blocking issues:
 
 ${issueLines}
-
-**Instruction**: First check whether each of the above issues has been resolved. Only report NEW issues if they are genuinely severe—do not report different issues merely because the reviser changed unrelated parts of the chapter. If all previous blocking issues are resolved, set passed=true even if minor new issues exist.`;
+${claimsBlock}
+**Instruction**: First check whether each of the above issues has been resolved. Only report NEW issues if they are genuinely severe—do not report different issues merely because the reviser changed unrelated parts of the chapter. If all previous blocking issues are resolved, set passed=true even if minor new issues exist. **Important**: Even if old issues are resolved, any newly introduced warning-level issues must still be reported (each warning deducts 12 pts from the score; the pass threshold is 80).`;
     }
     const issueLines = previousIssues
       .filter((i) => i.severity === "critical" || i.severity === "warning")
@@ -739,14 +744,17 @@ ${issueLines}
         return `- [${issueId}] [${i.severity}] [${dimensionId}] ${i.category}: ${i.description}`;
       })
       .join("\n");
+    const claimsBlockZh = revisionClaims && revisionClaims.length > 0
+      ? `\n修订员声称已做出以下修改：\n${revisionClaims.map((c) => `- ${c}`).join("\n")}\n请根据修订后的正文内容，验证以上声明是否属实。\n`
+      : "";
     return `
 
 ## 增量审计提示（本轮为重审）
 以下章节是在上一版基础上修订后的版本。上一轮审稿发现了以下阻塞性问题：
 
 ${issueLines}
-
-**指令**：请优先检查以上各项问题是否已解决。仅当确实出现严重的新问题时才报告新问题——不要因为修订者修改了无关段落而报告完全不同的维度问题。如果以上阻塞性问题均已解决，即使存在少量新问题也应判定 passed=true。`;
+${claimsBlockZh}
+**指令**：请优先检查以上各项问题是否已解决。仅当确实出现严重的新问题时才报告新问题——不要因为修订者修改了无关段落而报告完全不同的维度问题。如果以上阻塞性问题均已解决，即使存在少量新问题也应判定 passed=true。**注意**：即使旧问题已解决，修订过程中新引入的 warning 级问题仍必须报告（每个 warning 扣12分，通过阈值为80分，新 warning 可能导致评分不足）。`;
   }
 
   private buildReducedControlBlock(

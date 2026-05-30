@@ -220,7 +220,8 @@ function buildGovernedInputContract(language: "zh" | "en", governed: boolean): s
 - 如果提供了 Hook Debt 简报，里面包含每个伏笔种下时的**原始文本片段**。用这些原文来写延续或兑现场景——不是模糊地提一嘴，而是接着读者已经看到的具体承诺来写。
 - 如果显式 hook agenda 里出现了可回收目标，本章必须写出具体兑现片段，回答种子章节中读者的原始疑问。
 - 如果存在 stale debt，先消化旧承诺的压力，再决定是否开新坑；同类 sibling hook 不得随手再开。
-- 多角色场景里，至少给出一轮带阻力的直接交锋，不要把人物关系写成纯解释或纯总结。`;
+- 多角色场景里，至少给出一轮带阻力的直接交锋，不要把人物关系写成纯解释或纯总结。
+- 【大纲偏离 critical 警告】只能推进当前章节对应的卷纲节点，严禁提前消耗后续节点的剧情内容。提前消耗未来节点会被审计判定为 critical 级大纲偏离，直接导致审计不通过。`;
 }
 
 function buildLengthGuidance(lengthSpec: LengthSpec, language: "zh" | "en"): string {
@@ -297,7 +298,15 @@ function buildCoreRules(lengthSpec: LengthSpec): string {
 
 - 【硬性禁令】全文严禁出现"不是……而是……""不是……，是……""不是A，是B"句式，出现即判定违规。改用直述句
 - 【硬性禁令】全文严禁出现破折号"——"，用逗号或句号断句
-- 正文中禁止出现hook_id/账本式数据（如"余量由X%降到Y%"），数值结算只放POST_SETTLEMENT`;
+- 正文中禁止出现hook_id/账本式数据（如"余量由X%降到Y%"），数值结算只放POST_SETTLEMENT
+
+## 结构与节奏铁律（审计高频失分项）
+
+- 【流水账禁令】每段必须带来新信息、态度变化或利益变化；纯事件堆砌无情感推进即判流水账。日常/过渡段落必须埋伏笔、推进关系或建立反差，否则删除
+- 【公式化转折禁令】禁止使用套路化反转结构（"就在此时""然而就在这时""正当……之际"引导的意外）；转折必须由前文铺垫的矛盾自然爆发，不得凭空降临
+- 【列表式结构禁令】禁止用"第一……第二……第三……"或连续三个以上并列句描述同类事物；每2000字内最多出现1次三件事并列，超出时改写为叙事推进
+- 【支线/弧线/节奏】支线不得连续3章无进展；角色弧线不得在同一情绪层级停滞超过2章；每5章内至少有1次明显的节奏变化（高潮→缓和或缓和→爆发）
+- 【章节衔接铁律】本章开头必须与上章结尾在时间、空间、情绪上自然衔接；禁止无过渡的场景跳切；如需跳切，必须用一句明确的时空标记交代`;
 }
 
 // ---------------------------------------------------------------------------
@@ -624,11 +633,13 @@ function buildGovernedPreWriteChecklist(book: BookConfig, gp: GenreProfile): str
   const lines = [
     "## Governed Pre-Write Checklist",
     "",
-    `${idx++}. 本章必须推进哪个卷纲节点？`,
+    `${idx++}. 本章必须推进哪个卷纲节点？不得跳过或提前消耗后续节点。`,
     `${idx++}. 本章的主冲突是什么，谁在施压？`,
     `${idx++}. 本章结束时读者要记住什么钩子？`,
     `${idx++}. 需要回收的伏笔有哪些？`,
     `${idx++}. 当前视角能知道什么，不能知道什么？`,
+    `${idx++}. 【章节衔接确认】本章开头与上章结尾在时间、空间、情绪上是否自然衔接？如需跳切，是否已写明时空标记？`,
+    `${idx++}. 【审计预演】本章最可能被审不过的三项是什么？对应的规避动作是否已经写进正文结构里？`,
     `${idx++}. 本章最容易挂审计的三项是什么？是否已经按优先级预留处理位？`,
   ];
 
@@ -709,7 +720,7 @@ function buildCreativeOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpe
 ${chapterDesignRow}| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
 | 上下文范围 | 第X章至第Y章 / 状态卡 / 设定文件 | |
 | 当前锚点 | 地点 / 对手 / 收益目标 | 锚点必须具体 |
-${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） | 与伏笔池一致 |
+${resourceRow}| 待回收伏笔 | 只填伏笔池中的真实 hook_id，多个用逗号分隔；禁止写名称/摘要/解释（无则写 none） | 与伏笔池一致 |
 ${isEnglish ? "| Audit Gate | critical=0 / score>=80 / structure first | Keep the highest-risk checks in view |" : "| 审计门禁 | critical=0 / score>=80 / 结构优先 | 先盯高风险项再写句面 |"}
 | 本章冲突 | 一句话概括 | |
 | 章节类型 | ${gp.chapterTypes.join("/")} | |
@@ -752,7 +763,7 @@ function buildOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: Lengt
 ${chapterDesignRow}| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
 | 上下文范围 | 第X章至第Y章 / 状态卡 / 设定文件 | |
 | 当前锚点 | 地点 / 对手 / 收益目标 | 锚点必须具体 |
-${resourceRow}| 待回收伏笔 | 用真实 hook_id 填写（无则写 none） | 与伏笔池一致 |
+${resourceRow}| 待回收伏笔 | 只填伏笔池中的真实 hook_id，多个用逗号分隔；禁止写名称/摘要/解释（无则写 none） | 与伏笔池一致 |
 ${isEnglish ? "| Audit Gate | critical=0 / score>=80 / structure first | Keep the highest-risk checks in view |" : "| 审计门禁 | critical=0 / score>=80 / 结构优先 | 先盯高风险项再写句面 |"}
 | 本章冲突 | 一句话概括 | |
 | 章节类型 | ${gp.chapterTypes.join("/")} | |
@@ -804,7 +815,7 @@ ${updatedLedger}
 (本章摘要，Markdown表格格式，必须包含以下列)
 | 章节 | 标题 | 出场人物 | 关键事件 | 状态变化 | 伏笔动态 | 情绪基调 | 章节类型 |
 |------|------|----------|----------|----------|----------|----------|----------|
-| N | 本章标题 | 角色1,角色2 | 一句话概括 | 关键变化 | H01埋设/H02推进 | 情绪走向 | ${gp.chapterTypes.length > 0 ? gp.chapterTypes.join("/") : "过渡/冲突/高潮/收束"} |
+| N | 本章标题 | 角色1,角色2 | 一句话概括 | 关键变化 | hook_idA埋设/hook_idB推进 | 情绪走向 | ${gp.chapterTypes.length > 0 ? gp.chapterTypes.join("/") : "过渡/冲突/高潮/收束"} |
 
 === UPDATED_SUBPLOTS ===
 (更新后的完整支线进度板，Markdown表格格式)

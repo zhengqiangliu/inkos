@@ -4,6 +4,7 @@ import type { InteractionRequest } from "./intents.js";
 import type { ExecutionState, InteractionEvent } from "./events.js";
 import type { PendingDecision, InteractionSession, DraftRound } from "./session.js";
 import {
+  appendInteractionMessage,
   appendInteractionEvent,
   bindActiveBook,
   advanceCreationWizardState,
@@ -19,6 +20,19 @@ import {
 
 type ReviseMode = "local-fix" | "rewrite";
 type RuntimeLanguage = "zh" | "en";
+
+class InteractionBlockedError extends Error {
+  readonly status = 409;
+  readonly code: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+
+  constructor(message: string, code: string, details?: Readonly<Record<string, unknown>>) {
+    super(message);
+    this.name = "InteractionBlockedError";
+    this.code = code;
+    this.details = details;
+  }
+}
 
 export interface InteractionRuntimeTools {
   readonly listBooks: () => Promise<ReadonlyArray<string>>;
@@ -143,6 +157,10 @@ function resolveRuntimeLanguage(request: InteractionRequest): RuntimeLanguage {
 
 function localize<T>(language: RuntimeLanguage, messages: { zh: T; en: T }): T {
   return language === "en" ? messages.en : messages.zh;
+}
+
+function blocked(language: RuntimeLanguage, code: string, zh: string, en: string, details?: Readonly<Record<string, unknown>>): never {
+  throw new InteractionBlockedError(localize(language, { zh, en }), code, details);
 }
 
 function localizeMode(mode: AutomationMode, language: RuntimeLanguage): string {
@@ -786,12 +804,6 @@ async function handleDraftLifecycleRequest(params: {
       };
     }
     case "select_intro_candidate": {
-      if (!tools.reviseBookIntro) {
-        throw new Error(localize(language, {
-          zh: "简介候选落库暂未实现。",
-          en: "Intro candidate selection is not implemented yet.",
-        }));
-      }
       if (!request.candidateIndex || request.candidateIndex < 1) {
         throw new Error(localize(language, {
           zh: "请选择第几套候选。",
@@ -839,12 +851,11 @@ async function handleDraftLifecycleRequest(params: {
         ],
       });
       const withDraft = updateCreationDraft(session, selectedDraft);
-      const wizard = inferCreationWizardState(selectedDraft, session.creationWizard);
       const nextSession = {
-        ...updateCreationWizard(withDraft, wizard ?? {
-          currentStep: "intro",
-          completedSteps: [],
-          stepNotes: {},
+        ...updateCreationWizard(withDraft, {
+          currentStep: session.creationWizard?.currentStep ?? "intro",
+          completedSteps: session.creationWizard?.completedSteps ?? [],
+          stepNotes: session.creationWizard?.stepNotes ?? {},
           updatedAt: Date.now(),
         }),
         draftRounds: [...(withDraft.draftRounds ?? []), {
@@ -965,62 +976,7 @@ async function handleDraftLifecycleRequest(params: {
         },
       };
     }
-    case "advance_book_wizard": {
-      const saveWizardStep = tools.saveBookWizardStep ?? tools.advanceBookWizard;
-      if (!saveWizardStep) {
-        throw new Error(localize(language, {
-          zh: "建书向导推进暂未实现。",
-          en: "Book wizard advancement is not implemented yet.",
-        }));
-      }
-      const currentStep = session.creationWizard?.currentStep ?? "intro";
-      const toolResult = await saveWizardStep(request.instruction ?? "", session.creationDraft, currentStep);
-      const metadata = extractToolMetadata(toolResult);
-      const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
-      if (!draft) {
-        throw new Error(localize(language, {
-          zh: "向导工具没有返回草案数据。",
-          en: "Wizard tool did not return draft data.",
-        }));
-      }
-      const newRound: DraftRound = {
-        roundId: (session.draftRounds?.length ?? 0) + 1,
-        userMessage: request.instruction ?? "",
-        assistantRaw: metadata.details?.draftRaw as string ?? "",
-        fieldsUpdated: (metadata.details?.fieldsUpdated as string[]) ?? [],
-        summary: metadata.details?.draftSummary as string ?? "",
-        timestamp: Date.now(),
-      };
-      const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
-        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
-      }));
-      const wizard = advanceCreationWizardState(updateCreationWizard(withDraft, session.creationWizard ?? {
-        currentStep: request.wizardStep ?? currentStep,
-        completedSteps: [],
-        stepNotes: {},
-        updatedAt: Date.now(),
-      }), request.wizardStep ?? currentStep);
-      const nextSession = appendToolEvents({
-        ...updateCreationWizard(withDraft, wizard),
-        draftRounds: [...(withDraft.draftRounds ?? []), newRound],
-      }, metadata.events);
-      const completed = {
-        ...markCompleted(nextSession),
-        currentExecution: metadata.currentExecution ?? markCompleted(nextSession).currentExecution,
-      };
-      return {
-        session: addEvent(completed, "task.completed", "completed", localize(language, {
-          zh: `已完成 ${request.wizardStep ?? currentStep} 页并进入下一步。`,
-          en: `Completed ${request.wizardStep ?? currentStep} and moved to the next step.`,
-        })),
-        responseText: metadata.responseText ?? localize(language, {
-          zh: `已完成 ${request.wizardStep ?? currentStep} 页并进入下一步。`,
-          en: `Completed ${request.wizardStep ?? currentStep} and moved to the next step.`,
-        }),
-        details: metadata.details,
-      };
-    }
-    case "set_book_draft_params": {
+    case "save_wizard_step": {
       if (!tools.saveBookWizardStep) {
         throw new Error(localize(language, {
           zh: "当前环境暂未实现分步保存草案。",
@@ -1028,7 +984,14 @@ async function handleDraftLifecycleRequest(params: {
         }));
       }
       const currentStep = session.creationWizard?.currentStep ?? "intro";
-      const toolResult = await tools.saveBookWizardStep(request.instruction ?? "", session.creationDraft, currentStep);
+      const targetStep = request.wizardStep ?? currentStep;
+      if (targetStep !== currentStep) {
+        blocked(language, "WIZARD_STEP_CHANGED", "当前页已变化，请重新点击保存并进入。", "The current step changed. Please click save and continue again.", {
+          currentStep,
+          targetStep,
+        });
+      }
+      const toolResult = await tools.saveBookWizardStep(request.instruction ?? "", session.creationDraft, targetStep);
       const metadata = extractToolMetadata(toolResult);
       const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
       if (!draft) {
@@ -1048,14 +1011,13 @@ async function handleDraftLifecycleRequest(params: {
       const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
         confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
       }));
-      const wizard = advanceCreationWizardState(updateCreationWizard(withDraft, session.creationWizard ?? {
-        currentStep: request.wizardStep ?? currentStep,
-        completedSteps: [],
-        stepNotes: {},
-        updatedAt: Date.now(),
-      }), request.wizardStep ?? currentStep);
       const nextSession = appendToolEvents({
-        ...updateCreationWizard(withDraft, wizard),
+        ...updateCreationWizard(withDraft, {
+          currentStep: targetStep,
+          completedSteps: session.creationWizard?.completedSteps ?? [],
+          stepNotes: session.creationWizard?.stepNotes ?? {},
+          updatedAt: Date.now(),
+        }),
         draftRounds: [...(withDraft.draftRounds ?? []), newRound],
       }, metadata.events);
       const completed = {
@@ -1063,19 +1025,181 @@ async function handleDraftLifecycleRequest(params: {
         currentExecution: metadata.currentExecution ?? markCompleted(nextSession).currentExecution,
       };
       return {
-        session: addEvent(completed, "task.completed", "completed", localize(language, {
-          zh: `已保存 ${request.wizardStep ?? currentStep} 页草案。`,
-          en: `Saved ${request.wizardStep ?? currentStep} draft step.`,
-        })),
+        session: appendInteractionMessage(
+          addEvent(completed, "task.completed", "completed", localize(language, {
+            zh: `已保存 ${targetStep} 页草案。`,
+            en: `Saved ${targetStep} draft.`,
+          })),
+          {
+            role: "assistant",
+            content: metadata.responseText ?? localize(language, {
+              zh: `已保存 ${targetStep} 页草案。`,
+              en: `Saved ${targetStep} draft.`,
+            }),
+            wizardStep: targetStep,
+            timestamp: Date.now(),
+          },
+        ),
         responseText: metadata.responseText ?? localize(language, {
-          zh: `已保存 ${request.wizardStep ?? currentStep} 页草案。`,
-          en: `Saved ${request.wizardStep ?? currentStep} draft step.`,
+          zh: `已保存 ${targetStep} 页草案。`,
+          en: `Saved ${targetStep} draft.`,
+        }),
+        details: metadata.details,
+      };
+    }
+    case "advance_book_wizard": {
+      const generateWizardStep = tools.advanceBookWizard;
+      if (!generateWizardStep) {
+        throw new Error(localize(language, {
+          zh: "建书向导推进暂未实现。",
+          en: "Book wizard advancement is not implemented yet.",
+        }));
+      }
+      const currentStep = session.creationWizard?.currentStep ?? "intro";
+      const targetStep = request.wizardStep ?? currentStep;
+      if (targetStep !== currentStep) {
+        blocked(language, "WIZARD_STEP_CHANGED", "当前页已变化，请重新点击保存并进入。", "The current step changed. Please click save and continue again.", {
+          currentStep,
+          targetStep,
+        });
+      }
+      const wizardOrder = ["intro", "world", "outline", "volume", "characters", "arc", "relation", "review"] as const;
+      const currentIndex = wizardOrder.indexOf(currentStep as typeof wizardOrder[number]);
+      const nextStep = wizardOrder[Math.min(currentIndex + 1, wizardOrder.length - 1)] ?? "review";
+      const toolResult = await generateWizardStep(request.instruction ?? "", session.creationDraft, targetStep);
+      const metadata = extractToolMetadata(toolResult);
+      const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
+      if (!draft) {
+        throw new Error(localize(language, {
+          zh: "向导工具没有返回草案数据。",
+          en: "Wizard tool did not return draft data.",
+        }));
+      }
+      const newRound: DraftRound = {
+        roundId: (session.draftRounds?.length ?? 0) + 1,
+        userMessage: request.instruction ?? "",
+        assistantRaw: metadata.details?.draftRaw as string ?? "",
+        fieldsUpdated: (metadata.details?.fieldsUpdated as string[]) ?? [],
+        summary: metadata.details?.draftSummary as string ?? "",
+        timestamp: Date.now(),
+      };
+      const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
+        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+      }));
+      const nextSession = appendToolEvents({
+        ...updateCreationWizard(withDraft, {
+          currentStep: nextStep,
+          completedSteps: session.creationWizard?.completedSteps ?? [],
+          stepNotes: session.creationWizard?.stepNotes ?? {},
+          updatedAt: Date.now(),
+        }),
+        draftRounds: [...(withDraft.draftRounds ?? []), newRound],
+      }, metadata.events);
+      const completed = {
+        ...markCompleted(nextSession),
+        currentExecution: metadata.currentExecution ?? markCompleted(nextSession).currentExecution,
+      };
+      return {
+        session: appendInteractionMessage(
+          addEvent(completed, "task.completed", "completed", localize(language, {
+            zh: `已生成 ${targetStep} 页草案并进入 ${nextStep}。`,
+            en: `Generated ${targetStep} draft and moved to ${nextStep}.`,
+          })),
+          {
+            role: "assistant",
+            content: metadata.responseText ?? localize(language, {
+              zh: `已生成 ${targetStep} 页草案并进入 ${nextStep}。`,
+              en: `Generated ${targetStep} draft and moved to ${nextStep}.`,
+            }),
+            wizardStep: nextStep,
+            timestamp: Date.now(),
+          },
+        ),
+        responseText: metadata.responseText ?? localize(language, {
+          zh: `已生成 ${targetStep} 页草案并进入 ${nextStep}。`,
+          en: `Generated ${targetStep} draft and moved to ${nextStep}.`,
+        }),
+        details: metadata.details,
+      };
+    }
+    case "goto_book_wizard": {
+      const currentStep = session.creationWizard?.currentStep ?? "intro";
+      const targetStep = request.wizardStep ?? currentStep;
+      if (targetStep === currentStep) {
+        blocked(language, "WIZARD_STEP_ALREADY_ACTIVE", "当前已经在这一页。", "This step is already active.", {
+          currentStep,
+          targetStep,
+        });
+      }
+      if (!tools.advanceBookWizard && !tools.saveBookWizardStep) {
+        throw new Error(localize(language, {
+          zh: "建书向导切页暂未实现。",
+          en: "Book wizard navigation is not implemented yet.",
+        }));
+      }
+      const toolResult = await (tools.advanceBookWizard ?? tools.saveBookWizardStep!)(request.instruction ?? "", session.creationDraft, targetStep);
+      const metadata = extractToolMetadata(toolResult);
+      const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
+      if (!draft) {
+        throw new Error(localize(language, {
+          zh: "向导工具没有返回草案数据。",
+          en: "Wizard tool did not return draft data.",
+        }));
+      }
+      const newRound: DraftRound = {
+        roundId: (session.draftRounds?.length ?? 0) + 1,
+        userMessage: request.instruction ?? "",
+        assistantRaw: metadata.details?.draftRaw as string ?? "",
+        fieldsUpdated: (metadata.details?.fieldsUpdated as string[]) ?? [],
+        summary: metadata.details?.draftSummary as string ?? "",
+        timestamp: Date.now(),
+      };
+      const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
+        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+      }));
+      const nextSession = appendToolEvents({
+        ...updateCreationWizard(withDraft, {
+          currentStep: targetStep,
+          completedSteps: session.creationWizard?.completedSteps ?? [],
+          stepNotes: session.creationWizard?.stepNotes ?? {},
+          updatedAt: Date.now(),
+        }),
+        draftRounds: [...(withDraft.draftRounds ?? []), newRound],
+      }, metadata.events);
+      const completed = {
+        ...markCompleted(nextSession),
+        currentExecution: metadata.currentExecution ?? markCompleted(nextSession).currentExecution,
+      };
+      return {
+        session: appendInteractionMessage(
+          addEvent(completed, "task.completed", "completed", localize(language, {
+            zh: `已切换到 ${targetStep} 页。`,
+            en: `Moved to ${targetStep}.`,
+          })),
+          {
+            role: "assistant",
+            content: metadata.responseText ?? localize(language, {
+              zh: `已切换到 ${targetStep} 页。`,
+              en: `Moved to ${targetStep}.`,
+            }),
+            wizardStep: targetStep,
+            timestamp: Date.now(),
+          },
+        ),
+        responseText: metadata.responseText ?? localize(language, {
+          zh: `已切换到 ${targetStep} 页。`,
+          en: `Moved to ${targetStep}.`,
         }),
         details: metadata.details,
       };
     }
     case "retreat_book_wizard": {
       const currentStep = session.creationWizard?.currentStep ?? "intro";
+      if (currentStep === "intro") {
+        blocked(language, "WIZARD_STEP_ROOT", "已在第一步，不能再上一步。", "Already at the first step.", {
+          currentStep,
+        });
+      }
       const wizard = retreatCreationWizardState(session, currentStep);
       const nextSession = {
         ...updateCreationWizard(session, wizard),
@@ -1116,7 +1240,7 @@ async function handleDraftLifecycleRequest(params: {
         }));
       }
       const effectiveDraft = session.creationDraft;
-      const shouldValidateFoundation = request.wizardStep === "review" || Boolean(effectiveDraft);
+      const shouldValidateFoundation = request.wizardStep === "review";
       if (shouldValidateFoundation) {
         const consistency = validateCreationDraftConsistency(effectiveDraft);
         if (!consistency.readyToCreate) {

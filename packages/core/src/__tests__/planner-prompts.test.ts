@@ -52,7 +52,7 @@ describe("buildPlannerUserMessage", () => {
       protagonistMatrixRow: "| 阿泽 | 主角 | ... |",
       opponentRows: "| 老李 | 对手 | ... |",
       collaboratorRows: "| 小白 | 盟友 | ... |",
-      relevantThreads: "- H03: 未解码信\n- S004: 七号门异常",
+      relevantThreads: "- hook-03: 未解码信\n- subplot-04: 七号门异常",
       recyclableHooks: "（暂无陈旧 hook——账本干净）",
       isGoldenOpening: false,
       bookRulesRelevant: "- 禁止主角降智",
@@ -65,7 +65,7 @@ describe("buildPlannerUserMessage", () => {
     expect(out).toContain("| 阿泽 | 主角 | ... |");
     expect(out).toContain("| 老李 | 对手 | ... |");
     expect(out).toContain("| 小白 | 盟友 | ... |");
-    expect(out).toContain("- H03: 未解码信");
+    expect(out).toContain("- hook-03: 未解码信");
     expect(out).toContain("是否黄金三章：否");
     expect(out).toContain("- 禁止主角降智");
     expect(out).not.toContain("{{");

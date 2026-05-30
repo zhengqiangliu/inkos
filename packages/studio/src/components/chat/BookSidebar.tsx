@@ -24,6 +24,7 @@ import { estimateAuditScoreFromIssueTexts, scoreBadgeClass } from "../../utils/a
 import { countChapterLengthByLanguage } from "../../utils/chapter-length";
 import { useTextSelection } from "../../hooks/use-text-selection";
 import { useHighlightApi } from "../../hooks/use-highlight-api";
+import { normalizeDialogueQuotesToDouble } from "../../utils/dialogue-quotes";
 import { ChapterSelectionToolbar } from "../sidebar/ChapterSelectionToolbar";
 import { ChapterRevisionSection } from "../sidebar/ChapterRevisionSection";
 import { ChapterFullscreenModal } from "../sidebar/ChapterFullscreenModal";
@@ -343,6 +344,10 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
     }
   }, [bookId, artifactFile, artifactChapter, isChapter, editContent]);
 
+  const handleNormalizeDialogueQuotes = useCallback(() => {
+    setEditContent((current) => normalizeDialogueQuotesToDouble(current));
+  }, []);
+
   const handleApplyDialogueQuotePolicy = useCallback(async () => {
     if (!isBookRules) return;
     const source = editing ? editContent : (content ?? "");
@@ -519,6 +524,13 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
         )}
         {editing && (
           <div className="flex items-center gap-1">
+            <button
+              onClick={handleNormalizeDialogueQuotes}
+              className="w-6 h-6 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+              title="将「」统一替换为双引号"
+            >
+              <span className="text-[10px] font-bold leading-none">引</span>
+            </button>
             <button
               onClick={handleSave}
               disabled={saving}

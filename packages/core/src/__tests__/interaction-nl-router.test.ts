@@ -207,6 +207,39 @@ describe("interaction natural-language router", () => {
     });
   });
 
+
+  it("maps goto wizard commands to goto_book_wizard", () => {
+    expect(routeNaturalLanguageIntent("/goto world", { activeBookId: "harbor" })).toEqual({
+      intent: "goto_book_wizard",
+      bookId: "harbor",
+      wizardStep: "world",
+    });
+  });
+
+  it("maps wizard advance commands to advance_book_wizard with the target step id", () => {
+    expect(routeNaturalLanguageIntent("/wizard advance current=intro next=world title=夜港账本 genre=urban platform=tomato target=120 words=2800", { activeBookId: "harbor" })).toEqual({
+      intent: "advance_book_wizard",
+      bookId: "harbor",
+      instruction: "/wizard advance current=intro next=world title=夜港账本 genre=urban platform=tomato target=120 words=2800",
+      wizardStep: "intro",
+      title: "夜港账本",
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+    });
+  });
+
+  it("maps save wizard commands to save_wizard_step", () => {
+    expect(routeNaturalLanguageIntent("/save step=intro title=夜港账本", { activeBookId: "harbor" })).toEqual({
+      intent: "save_wizard_step",
+      bookId: "harbor",
+      instruction: "/save step=intro title=夜港账本",
+      wizardStep: "intro",
+      title: "夜港账本",
+    });
+  });
+
   it("maps rename and chapter patch requests from natural language", () => {
     expect(routeNaturalLanguageIntent("open beta", { activeBookId: "harbor" })).toEqual({
       intent: "select_book",

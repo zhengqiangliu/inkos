@@ -9,6 +9,7 @@ import type {
   Api as PiApi,
   Model as PiModel,
   Context as PiContext,
+  AssistantMessage as PiAssistantMessage,
   AssistantMessageEvent,
   Tool as PiTool,
   TextContent as PiTextContent,
@@ -437,6 +438,13 @@ function extractResponsesContent(json: any): string {
 
 function extractAnthropicContent(json: any): string {
   const content = Array.isArray(json?.content) ? json.content : [];
+  return content
+    .map((part: any) => typeof part?.text === "string" ? part.text : "")
+    .join("");
+}
+
+function extractAssistantTextContent(message: PiAssistantMessage | undefined | null): string {
+  const content = Array.isArray(message?.content) ? message.content : [];
   return content
     .map((part: any) => typeof part?.text === "string" ? part.text : "")
     .join("");
@@ -952,24 +960,62 @@ async function chatCompletionViaPiAi(
   }
 
   const eventStream = piStreamSimple(piModel, context, streamOpts);
-  const chunks: string[] = [];
+  const textBlocks = new Map<number, string>();
   const monitor = createStreamMonitor(onStreamProgress);
   let inputTokens = 0;
   let outputTokens = 0;
 
+  const emitTextDelta = (delta: string): void => {
+    if (!delta) return;
+    monitor.onChunk(delta);
+    onTextDelta?.(delta);
+  };
+
+  const appendTextDelta = (contentIndex: number, delta: string): void => {
+    const current = textBlocks.get(contentIndex) ?? "";
+    const next = current + delta;
+    textBlocks.set(contentIndex, next);
+    emitTextDelta(delta);
+  };
+
+  const replaceTextBlock = (contentIndex: number, content: string): void => {
+    const current = textBlocks.get(contentIndex) ?? "";
+    if (content === current) return;
+    const delta = content.startsWith(current) ? content.slice(current.length) : content;
+    textBlocks.set(contentIndex, content);
+    emitTextDelta(delta);
+  };
+
+  const collectText = (): string => [...textBlocks.keys()].sort((a, b) => a - b).map((index) => textBlocks.get(index) ?? "").join("");
+
   try {
     for await (const event of eventStream) {
       if (event.type === "text_delta") {
-        chunks.push(event.delta);
-        monitor.onChunk(event.delta);
-        onTextDelta?.(event.delta);
+        appendTextDelta(event.contentIndex, event.delta);
+      }
+      if (event.type === "text_end") {
+        replaceTextBlock(event.contentIndex, event.content);
       }
       if (event.type === "done" || event.type === "error") {
         const msg = event.type === "done" ? event.message : event.error;
         inputTokens = msg.usage.input;
         outputTokens = msg.usage.output;
+        if (event.type === "done") {
+          const finalText = extractAssistantTextContent(msg);
+          if (finalText) {
+            const currentText = collectText();
+            if (!currentText) {
+              textBlocks.set(0, finalText);
+            } else if (finalText.startsWith(currentText)) {
+              const delta = finalText.slice(currentText.length);
+              if (delta) {
+                appendTextDelta(0, delta);
+              }
+            }
+          }
+        }
         if (event.type === "error" && msg.errorMessage) {
-          const partial = chunks.join("");
+          const partial = collectText();
           if (partial.length >= MIN_SALVAGEABLE_CHARS) {
             throw new PartialResponseError(partial, new Error(msg.errorMessage));
           }
@@ -980,7 +1026,7 @@ async function chatCompletionViaPiAi(
   } catch (streamError) {
     monitor.stop();
     if (streamError instanceof PartialResponseError) throw streamError;
-    const partial = chunks.join("");
+    const partial = collectText();
     if (partial.length >= MIN_SALVAGEABLE_CHARS) {
       throw new PartialResponseError(partial, streamError);
     }
@@ -989,7 +1035,7 @@ async function chatCompletionViaPiAi(
     monitor.stop();
   }
 
-  const content = chunks.join("");
+  const content = collectText();
   if (!content) {
     const diag = `usage=${inputTokens}+${outputTokens}`;
     console.warn(`[inkos] LLM 流式响应无文本内容 (${diag})`);

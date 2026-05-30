@@ -644,6 +644,7 @@ export async function runChapterReviewCycle(params: {
         contextPackage?: ContextPackage;
         ruleStack?: RuleStack;
         previousAuditIssues?: ReadonlyArray<AuditIssue>;
+        revisionClaims?: ReadonlyArray<string>;
         onThinkingDelta?: (text: string) => void;
         onThinkingEnd?: () => void;
       },
@@ -1081,8 +1082,8 @@ export async function runChapterReviewCycle(params: {
       params.chapterNumber,
       params.book.genre,
       params.reducedControlInput
-        ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd, previousAuditIssues: priorRoundIssues }
-        : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}), previousAuditIssues: priorRoundIssues },
+        ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd, previousAuditIssues: priorRoundIssues, revisionClaims: reviseOutput.fixedIssues.length > 0 ? reviseOutput.fixedIssues : undefined }
+        : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}), previousAuditIssues: priorRoundIssues, revisionClaims: reviseOutput.fixedIssues.length > 0 ? reviseOutput.fixedIssues : undefined },
     );
     totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
     const reAuditReturnedNoIssues = Array.isArray(reAudit.issues) && reAudit.issues.length === 0;
@@ -1129,7 +1130,9 @@ export async function runChapterReviewCycle(params: {
       unboundedReview,
       audit: reviseAuditSummary,
     });
-    priorRoundIssues = issuesForRound;
+    priorRoundIssues = auditResult.issues.filter(
+      (issue) => issue.severity === "critical" || issue.severity === "warning",
+    );
     priorAuditScore = estimateAuditScore(countIssueSeverities(auditResult.issues));
     priorWordCount = finalWordCount;
     if (!auditResult.passed && reAuditReturnedNoIssues) {

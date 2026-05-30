@@ -2212,6 +2212,65 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("normalizes corner dialogue quotes to double quotes when auto policy is strict and autoNormalize is enabled in writeNextChapter", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+
+    await writeFile(join(storyDir, "book_rules.md"), [
+      "---",
+      "dialogueQuotePolicy:",
+      "  mode: auto",
+      "  strict: true",
+      "  autoNormalize: true",
+      "---",
+      "",
+      "# 叙事规则",
+    ].join("\n"), "utf-8");
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        content: "江砚盯着雨棚外的人影。",
+        wordCount: "江砚盯着雨棚外的人影。".length,
+        postWriteErrors: [
+          {
+            severity: "error",
+            rule: "post-write",
+            description: "Needs quote fix",
+            suggestion: "Repair quote style",
+          },
+        ],
+      }),
+    );
+    vi.spyOn(ReviserAgent.prototype, "reviseChapter").mockResolvedValue(
+      createReviseOutput({
+        revisedContent: "「不是钓鱼，是换个战场。」江砚压低声音说。",
+        wordCount: "「不是钓鱼，是换个战场。」江砚压低声音说。".length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter").mockResolvedValue(
+      createAuditResult({
+        passed: true,
+        issues: [],
+        summary: "clean",
+      }),
+    );
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        content: "「不是钓鱼，是换个战场。」江砚压低声音说。",
+        wordCount: "「不是钓鱼，是换个战场。」江砚压低声音说。".length,
+      }),
+    );
+
+    try {
+      await runner.writeNextChapter(bookId);
+      const savedChapter = await readFile(join(state.bookDir(bookId), "chapters", "0001_Test_Chapter.md"), "utf-8");
+      expect(savedChapter).toContain("“不是钓鱼，是换个战场。”江砚压低声音说。");
+      expect(savedChapter).not.toContain("「不是钓鱼，是换个战场。」");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("skips truth rebuild when only dialogue quote policy normalization changes content", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const storyDir = join(state.bookDir(bookId), "story");

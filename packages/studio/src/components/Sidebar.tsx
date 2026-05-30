@@ -57,6 +57,7 @@ interface Nav {
   toDashboard: () => void;
   toBook: (id: string) => void;
   toBookCreate: () => void;
+  toBookDraft?: (draftSessionId: string) => void;
   toServices: () => void;
   toDaemon: () => void;
   toLogs: () => void;
@@ -91,6 +92,25 @@ export function getBookBadgeInitial(title: string): string {
   return /[a-z]/i.test(fallback) ? fallback.toUpperCase() : fallback;
 }
 
+export function selectSidebarDraftSessions<T extends { readonly sessionId: string }>(
+  sessionIdsByBook: Record<string, ReadonlyArray<string> | undefined>,
+  sessions: Record<string, (T & { readonly title?: string | null; readonly messages?: ReadonlyArray<unknown> }) | undefined>,
+): ReadonlyArray<T> {
+  const seen = new Set<string>();
+  return (sessionIdsByBook.__null__ ?? [])
+    .filter((sessionId) => {
+      if (seen.has(sessionId)) return false;
+      seen.add(sessionId);
+      return true;
+    })
+    .map((sessionId) => sessions[sessionId])
+    .filter((session): session is T & { readonly title?: string | null; readonly messages?: ReadonlyArray<unknown> } => Boolean(session))
+    .filter((session) => Boolean(
+      (session as { readonly hasWizardStepMessage?: boolean }).hasWizardStepMessage
+      || session.messages?.some((message) => Boolean(message && typeof message === "object" && typeof (message as { wizardStep?: unknown }).wizardStep === "string")),
+    ));
+}
+
 export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCollapsed }: SidebarProps) {
   const { data, refetch: refetchBooks } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { data: daemon, refetch: refetchDaemon } = useApi<{ running: boolean }>("/daemon");
@@ -101,12 +121,12 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
   const loadSessionList = useChatStore((s) => s.loadSessionList);
   const loadSessionDetail = useChatStore((s) => s.loadSessionDetail);
   const activateSession = useChatStore((s) => s.activateSession);
-  const createDraftSession = useChatStore((s) => s.createDraftSession);
   const renameSession = useChatStore((s) => s.renameSession);
   const deleteSession = useChatStore((s) => s.deleteSession);
   const [renameTarget, setRenameTarget] = useState<{ sessionId: string; currentTitle: string } | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<{ sessionId: string; title: string } | null>(null);
+  const [clearDraftsConfirmOpen, setClearDraftsConfirmOpen] = useState(false);
   const [expandedBooks, setExpandedBooks] = useState<Set<string>>(new Set());
 
   const books = data?.books ?? [];
@@ -121,6 +141,10 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
   useEffect(() => {
     for (const bookId of expandedBooks) void loadSessionList(bookId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookDataVersion, loadSessionList]);
+
+  useEffect(() => {
+    void loadSessionList(null);
   }, [bookDataVersion, loadSessionList]);
 
   const toggleBook = (bookId: string) => {
@@ -151,6 +175,11 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
     [books, sessionIdsByBook, sessions],
   );
 
+  const draftSessions = useMemo(
+    () => selectSidebarDraftSessions(sessionIdsByBook, sessions),
+    [sessionIdsByBook, sessions],
+  );
+
   const openSession = (bookId: string, sessionId: string) => {
     activateSession(sessionId);
     nav.toBook(bookId);
@@ -159,8 +188,13 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
 
   const handleCreateSession = (bookId: string) => {
     setExpandedBooks((prev) => new Set(prev).add(bookId));
-    createDraftSession(bookId);
-    nav.toBook(bookId);
+    nav.toBookCreate();
+  };
+
+  const openDraftSession = (sessionId: string) => {
+    activateSession(sessionId);
+    nav.toBookDraft?.(sessionId);
+    void loadSessionDetail(sessionId);
   };
 
   const handleRenameConfirm = async () => {
@@ -176,6 +210,14 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
     if (!deleteTarget) return;
     await deleteSession(deleteTarget.sessionId);
     setDeleteTarget(null);
+  };
+
+  const handleClearDraftsConfirm = async () => {
+    const draftIds = [...new Set(sessionIdsByBook.__null__ ?? [])];
+    setClearDraftsConfirmOpen(false);
+    for (const sessionId of draftIds) {
+      await deleteSession(sessionId);
+    }
   };
 
   return (
@@ -224,6 +266,75 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
 
         <div className={`flex-1 overflow-y-auto ${collapsed ? "px-2 py-2" : "px-4 py-2"} space-y-6`}>
           <div>
+            {!collapsed && (
+              <div className="px-3 mb-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] uppercase tracking-widest text-muted-foreground font-bold">草稿文件夹</span>
+                  <button
+                    type="button"
+                    onClick={() => setClearDraftsConfirmOpen(true)}
+                    disabled={draftSessions.length === 0}
+                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-30 disabled:hover:bg-transparent"
+                    title="清空所有草稿"
+                    aria-label="清空所有草稿"
+                  >
+                    <Trash2 size={11} />
+                    <span>{draftSessions.length}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+            {!collapsed && (
+              <div className="mb-4 space-y-0.5">
+                {draftSessions.map((session) => {
+                  const isActiveDraft = activeSessionId === session.sessionId;
+                  const label = getSessionLabel(session);
+                  return (
+                    <div
+                      key={session.sessionId}
+                      className={`group/session flex items-center rounded-md ${isActiveDraft ? "bg-secondary/50" : "hover:bg-secondary/30"}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => openDraftSession(session.sessionId)}
+                        className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-[13px] transition-colors"
+                      >
+                        <span
+                          className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px] font-semibold leading-none ${
+                            isActiveDraft
+                              ? "border-primary/30 bg-primary/10 text-primary"
+                              : "border-border/60 bg-secondary/40 text-muted-foreground"
+                          }`}
+                        >
+                          D
+                        </span>
+                        <span className={`truncate flex-1 ${isActiveDraft ? "text-foreground" : "text-muted-foreground group-hover/session:text-foreground"}`}>
+                          {label}
+                        </span>
+                        {session.isStreaming ? (
+                          <Loader2 size={12} className="shrink-0 animate-spin text-primary" />
+                        ) : (
+                          <span className="shrink-0 text-[11px] text-muted-foreground/40">{formatRelativeTime(session.sessionId)}</span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openDraftSession(session.sessionId)}
+                        className="mr-2 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+                      >
+                        继续创建
+                      </button>
+                    </div>
+                  );
+                })}
+                {draftSessions.length === 0 && (
+                  <div className="px-3 py-2 text-xs text-muted-foreground/50">
+                    暂无草稿
+                  </div>
+                )}
+              </div>
+            )}
+
             {!collapsed && (
               <div className="px-3 mb-3 flex items-center justify-between">
                 <span className="text-[11px] uppercase tracking-widest text-muted-foreground font-bold">{t("nav.books")}</span>
@@ -489,6 +600,17 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
           onConfirm={() => void handleDeleteConfirm()}
           onCancel={() => setDeleteTarget(null)}
         />
+
+        <ConfirmDialog
+          open={clearDraftsConfirmOpen}
+          title="清空草稿"
+          message="确认清空全部草稿吗？该操作会删除草稿文件夹中的所有会话，无法撤销。"
+          confirmLabel="清空"
+          cancelLabel="取消"
+          variant="danger"
+          onConfirm={() => void handleClearDraftsConfirm()}
+          onCancel={() => setClearDraftsConfirmOpen(false)}
+        />
       </aside>
     </TooltipProvider>
   );
@@ -496,12 +618,7 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
 
 function getSessionLabel(session: { sessionId: string; title: string | null; messages: ReadonlyArray<{ role: string; content: string }> }): string {
   if (session.title) return session.title;
-  const firstUserMsg = session.messages.find((m) => m.role === "user")?.content?.trim();
-  if (firstUserMsg) {
-    const oneLine = firstUserMsg.replace(/\s+/g, " ");
-    return oneLine.length > 20 ? `${oneLine.slice(0, 20)}…` : oneLine;
-  }
-  return "新会话";
+  return "未命名草稿";
 }
 
 function formatRelativeTime(sessionId: string): string {

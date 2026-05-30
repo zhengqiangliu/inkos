@@ -152,14 +152,20 @@ export function createSessionRuntime(input: {
   sessionId: string;
   bookId: string | null;
   title: string | null;
+  hasWizardStepMessage?: boolean;
   messages?: ReadonlyArray<Message>;
+  currentWizardStep?: Message["wizardStep"] | null;
+  creationDraft?: SessionRuntime["creationDraft"];
+  creationWizard?: SessionRuntime["creationWizard"];
   isDraft?: boolean;
 }): SessionRuntime {
   return {
     sessionId: input.sessionId,
     bookId: input.bookId,
     title: input.title,
+    hasWizardStepMessage: input.hasWizardStepMessage,
     messages: input.messages ?? [],
+    currentWizardStep: input.currentWizardStep ?? null,
     stream: null,
     isStreaming: false,
     isStopping: false,
@@ -167,6 +173,8 @@ export function createSessionRuntime(input: {
     currentRunId: null,
     lastError: null,
     pendingBookArgs: null,
+    ...(input.creationDraft ? { creationDraft: input.creationDraft } : {}),
+    ...(input.creationWizard ? { creationWizard: input.creationWizard } : {}),
     isDraft: input.isDraft ?? false,
   };
 }
@@ -195,6 +203,7 @@ export function deserializeMessages(
       return {
         role: message.role as "user" | "assistant",
         content: message.content,
+        wizardStep: message.wizardStep as Message["wizardStep"],
         thinking: message.thinking,
         thinkingStreaming: message.thinkingStreaming,
         audit: (message as { audit?: unknown }).audit as Message["audit"],
@@ -223,13 +232,13 @@ export function updateSession(
 
 export function upsertSessionSummary(
   sessions: Record<string, SessionRuntime>,
-  summary: Pick<SessionSummary, "sessionId" | "bookId" | "title">,
+  summary: Pick<SessionSummary, "sessionId" | "bookId" | "title" | "hasWizardStepMessage">,
 ): Record<string, SessionRuntime> {
   const existing = sessions[summary.sessionId];
   return {
     ...sessions,
     [summary.sessionId]: existing
-      ? { ...existing, bookId: summary.bookId, title: summary.title }
+      ? { ...existing, bookId: summary.bookId, title: summary.title, hasWizardStepMessage: summary.hasWizardStepMessage ?? existing.hasWizardStepMessage }
       : createSessionRuntime(summary),
   };
 }

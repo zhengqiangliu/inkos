@@ -23,6 +23,14 @@ describe("hash route", () => {
       expect(parseHash("#/book/new")).toEqual({ page: "book-create" });
     });
 
+    it("parses book/new/{draftSessionId} as book-create with a draft session", () => {
+      expect(parseHash("#/book/new/draft-123")).toEqual({ page: "book-create", draftSessionId: "draft-123" });
+    });
+
+    it("parses book/new/{draftSessionId} as book-create with draft session", () => {
+      expect(parseHash("#/book/new/draft-123")).toEqual({ page: "book-create", draftSessionId: "draft-123" });
+    });
+
     it("parses config as services (redirect)", () => {
       expect(parseHash("#/config")).toEqual({ page: "services" });
     });
@@ -101,6 +109,14 @@ describe("hash route", () => {
 
     it("book-create -> #/book/new", () => {
       expect(routeToHash({ page: "book-create" })).toBe("#/book/new");
+    });
+
+    it("book-create with draft session -> #/book/new/{draftSessionId}", () => {
+      expect(routeToHash({ page: "book-create", draftSessionId: "draft-123" })).toBe("#/book/new/draft-123");
+    });
+
+    it("book-create with draft session -> #/book/new/{draftSessionId}", () => {
+      expect(routeToHash({ page: "book-create", draftSessionId: "draft-123" })).toBe("#/book/new/draft-123");
     });
 
     it("services -> #/services", () => {

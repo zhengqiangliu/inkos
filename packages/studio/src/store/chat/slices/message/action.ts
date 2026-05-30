@@ -22,6 +22,7 @@ import {
   updateSession,
   upsertSessionSummary,
 } from "./runtime";
+import type { BookCreationDraft, BookCreationWizardState } from "@actalk/inkos-core";
 
 function supportsEventSourceListeners(es: EventSource): es is EventSource & {
   addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
@@ -29,6 +30,16 @@ function supportsEventSourceListeners(es: EventSource): es is EventSource & {
 } {
   return typeof (es as { addEventListener?: unknown }).addEventListener === "function"
     && typeof (es as { removeEventListener?: unknown }).removeEventListener === "function";
+}
+
+function normalizeBookCreationDraft(value: unknown): BookCreationDraft | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return value as BookCreationDraft;
+}
+
+function normalizeBookCreationWizard(value: unknown): BookCreationWizardState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  return value as BookCreationWizardState;
 }
 
 interface AgentRunStatusResponse {
@@ -328,18 +339,18 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
 
   setInput: (text) => set({ input: text }),
 
-  addUserMessage: (sessionId, content) =>
+  addUserMessage: (sessionId, content, wizardStep) =>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (session) => ({
-        messages: [...session.messages, { role: "user", content, timestamp: Date.now() }],
+        messages: [...session.messages, { role: "user", content, ...(wizardStep ? { wizardStep } : {}), timestamp: Date.now() }],
         lastError: null,
       })),
     })),
 
-  appendAssistantMessage: (sessionId, content) =>
+  appendAssistantMessage: (sessionId, content, wizardStep) =>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (session) => ({
-        messages: [...session.messages, { role: "assistant", content, timestamp: Date.now() }],
+        messages: [...session.messages, { role: "assistant", content, ...(wizardStep ? { wizardStep } : {}), timestamp: Date.now() }],
       })),
     })),
 
@@ -380,14 +391,14 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       })),
     })),
 
-  replaceStreamWithError: (sessionId, streamTs, errorMsg) =>
+  replaceStreamWithError: (sessionId, streamTs, errorMsg, wizardStep) =>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (session) => ({
         messages: [
           ...session.messages.filter(
             (message) => !(message.timestamp === streamTs && message.role === "assistant"),
           ),
-          { role: "assistant", content: `\u2717 ${errorMsg}`, timestamp: Date.now() },
+          { role: "assistant", content: `\u2717 ${errorMsg}`, ...(wizardStep ? { wizardStep } : {}), timestamp: Date.now() },
         ],
         isStreaming: false,
         lastError: errorMsg,
@@ -395,10 +406,10 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       })),
     })),
 
-  addErrorMessage: (sessionId, errorMsg) =>
+  addErrorMessage: (sessionId, errorMsg, wizardStep) =>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (session) => ({
-        messages: [...session.messages, { role: "assistant", content: `\u2717 ${errorMsg}`, timestamp: Date.now() }],
+        messages: [...session.messages, { role: "assistant", content: `\u2717 ${errorMsg}`, ...(wizardStep ? { wizardStep } : {}), timestamp: Date.now() }],
         lastError: errorMsg,
       })),
     })),
@@ -482,6 +493,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         sessionId,
         bookId,
         title: null,
+        hasWizardStepMessage: true,
         isDraft: true,
       });
       return {
@@ -550,11 +562,6 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   loadSessionDetail: async (sessionId) => {
-    // 閼藉顭堟导姘崇樈閿涙氨顥嗛惄妯圭瑐鏉╂ɑ鐥呴張澶嬫瀮娴犺绱濋惄瀛樺复鐠哄疇绻冩潻婊咁伂閹峰褰囬妴?
-    // 閺堫剙婀村鍙夋箒濞戝牊浼呴敍姘瑝閹峰褰囨潻婊咁伂閿涘矂浼╅崗宥嗙ウ瀵繋鑵戦幋鏍ㄦ弓閹镐椒绠欓崠鏍畱濞戝牊浼呯悮顐ヮ洬閻╂牓鈧?
-    const existing = get().sessions[sessionId];
-    if (existing?.isDraft) return;
-
     try {
       const data = await fetchJson<SessionResponse>(`/sessions/${sessionId}`);
       const detail = data.session;
@@ -571,6 +578,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           bookId: nextBookId,
           title: detail.title ?? null,
         });
+        const detailDraft = normalizeBookCreationDraft(detail.creationDraft);
+        const detailWizard = normalizeBookCreationWizard(detail.creationWizard);
         return {
           sessions: {
             ...state.sessions,
@@ -585,6 +594,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
               stoppedByUser: hasLiveStream ? runtime?.stoppedByUser ?? false : false,
               currentRunId: hasLiveStream ? runtime?.currentRunId ?? null : null,
               lastError: hasLiveStream ? runtime?.lastError ?? null : null,
+              ...(detailDraft ? { creationDraft: detailDraft } : {}),
+              ...(detailWizard ? { creationWizard: detailWizard } : {}),
             },
           },
           sessionIdsByBook: {
@@ -647,7 +658,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     const expectsPersistedWrite = Boolean(activeBookId && isExplicitWriteNextCommand(trimmed));
 
     if (!get().selectedModel) {
-      get().addUserMessage(sessionId, trimmed);
+      get().addUserMessage(sessionId, trimmed, options?.wizardStep);
       get().addErrorMessage(sessionId, "请选择一个模型。");
       return null;
     }
@@ -699,10 +710,11 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         stoppedByUser: false,
         currentRunId: runId,
         lastError: null,
+        ...(options?.wizardStep ? { currentWizardStep: options.wizardStep } : {}),
       })),
     }));
 
-    get().addUserMessage(sessionId, trimmed);
+    get().addUserMessage(sessionId, trimmed, options?.wizardStep);
     session.stream?.close();
     const streamEs = new EventSource("/api/v1/events");
     set((state) => ({
@@ -727,10 +739,12 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           activeBookId,
           sessionId,
           runId,
+          ...(options?.wizardStep ? { wizardStep: options.wizardStep } : {} ),
           model: get().selectedModel ?? undefined,
           service: get().selectedService ?? undefined,
           ...(options?.quickMode !== undefined ? { quickMode: options.quickMode } : {}),
           ...(options?.preferFastWriterModel !== undefined ? { preferFastWriterModel: options.preferFastWriterModel } : {}),
+          ...(options?.forceStream !== undefined ? { forceStream: options.forceStream } : {}),
         }),
       });
 
@@ -748,9 +762,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           ),
         );
         if (hasStream) {
-          get().replaceStreamWithError(sessionId, streamTs, writeError);
+          get().replaceStreamWithError(sessionId, streamTs, writeError, options?.wizardStep);
         } else {
-          get().addErrorMessage(sessionId, writeError);
+          get().addErrorMessage(sessionId, writeError, options?.wizardStep);
         }
         return data;
       }
@@ -766,9 +780,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       if (data.error) {
         const errorMessage = withErrorGuidance(extractErrorMessage(data.error));
         if (hasStream) {
-          get().replaceStreamWithError(sessionId, streamTs, errorMessage);
+          get().replaceStreamWithError(sessionId, streamTs, errorMessage, options?.wizardStep);
         } else {
-          get().addErrorMessage(sessionId, errorMessage);
+          get().addErrorMessage(sessionId, errorMessage, options?.wizardStep);
         }
       } else if (finalContent) {
         if (hasStream) {
@@ -781,6 +795,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
                 {
                   role: "assistant",
                   content: finalContent,
+                  ...(options?.wizardStep ? { wizardStep: options.wizardStep } : {}),
                   timestamp: Date.now(),
                   toolCall,
                 },
@@ -800,9 +815,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           "模型未返回正文。请检查对话类型（chat/responses）、流式开关或上游服务兼容性。"
         );
         if (hasStream) {
-          get().replaceStreamWithError(sessionId, streamTs, emptyMessage);
+          get().replaceStreamWithError(sessionId, streamTs, emptyMessage, options?.wizardStep);
         } else {
-          get().addErrorMessage(sessionId, emptyMessage);
+          get().addErrorMessage(sessionId, emptyMessage, options?.wizardStep);
         }
       }
       return data;
@@ -824,9 +839,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         ),
       );
       if (hasStream) {
-        get().replaceStreamWithError(sessionId, streamTs, errorMessage);
+        get().replaceStreamWithError(sessionId, streamTs, errorMessage, options?.wizardStep);
       } else {
-        get().addErrorMessage(sessionId, errorMessage);
+        get().addErrorMessage(sessionId, errorMessage, options?.wizardStep);
       }
       return null;
     } finally {

@@ -4,7 +4,8 @@ import {
   buildChatGuide,
   buildChatQuickTemplates,
   buildConceptSplitSummary,
-  buildCreationDraftSummary,
+  buildCreationReviewChecklist,
+  buildIntroCandidateBackfill,
   buildHardParamsSummary,
   canCreateFromDraft,
   defaultChapterWordsForLanguage,
@@ -14,12 +15,14 @@ import {
   resolveDraftInstruction,
   parsePositiveIntegerInput,
   parseIntroCandidateResponse,
+  parseLatestIntroCandidates,
   rankIntroCandidates,
   buildStepFocusCard,
   buildStepActionSections,
   buildStepRecommendedAction,
   buildStepShortcuts,
   resolveInitialGenreSelection,
+  selectBookCreateDockMessages,
   shouldSubmitChatOnKeyDown,
   waitForBookReady,
 } from "./BookCreate";
@@ -140,19 +143,35 @@ describe("buildChatGuide", () => {
   });
 });
 
-describe("buildCreationDraftSummary", () => {
-  it("includes genre in the shared foundation summary", () => {
-    expect(buildCreationDraftSummary({
-      concept: "港风商战悬疑，主角从灰产洗白。",
+describe("buildCreationReviewChecklist", () => {
+  it("renders step-level review items with completion states and jump targets", () => {
+    const checklist = buildCreationReviewChecklist({
       title: "夜港账本",
       genre: "urban",
-      missingFields: [],
-      readyToCreate: false,
-    }, "zh")).toContainEqual({
-      key: "genre",
-      label: "题材",
-      value: "urban",
-    });
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 3000,
+      blurb: "港口账本牵出灰产链。",
+      storyBackground: "港城、账本、洗白、反转。",
+      novelOutline: "主线清晰",
+    }, "zh");
+
+    expect(checklist.map((item) => item.key)).toEqual([
+      "basic",
+      "intro",
+      "world",
+      "outline",
+      "volume",
+      "characters",
+      "arc",
+      "relation",
+      "review",
+    ]);
+    expect(checklist[0]?.done).toBe(true);
+    expect(checklist[1]?.done).toBe(true);
+    expect(checklist[2]?.done).toBe(false);
+    expect(checklist[2]?.target.kind).toBe("step");
+    expect(checklist[2]?.target.kind === "step" ? checklist[2]?.target.step : undefined).toBe("world");
   });
 });
 
@@ -219,8 +238,8 @@ describe("buildChatGuide", () => {
     expect(intro.advanceLabel).toBe("确认当前页并进入下一步");
 
     expect(review.placeholder).toContain("书名");
-    expect(review.examples).toContain("如果完整就直接确认创建。");
-    expect(review.advanceLabel).toBe("确认并创建书籍");
+    expect(review.examples).toContain("先核对分项是否齐全，再完成创建。");
+    expect(review.advanceLabel).toBe("复核并完成创建");
   });
 });
 
@@ -249,9 +268,24 @@ describe("buildChatActionLabels", () => {
     const review = buildChatActionLabels("review", undefined, "zh");
 
     expect(intro.advanceLabel).toBe("确认并进入 世界观");
-    expect(intro.createLabel).toBe("直接创建（跳过确认）");
-    expect(review.advanceLabel).toBe("确认并创建书籍");
-    expect(review.createLabel).toBe("直接创建（跳过确认）");
+    expect(intro.createLabel).toBe("完成创建");
+    expect(review.advanceLabel).toBe("复核并完成创建");
+    expect(review.createLabel).toBe("完成创建");
+  });
+});
+
+describe("selectBookCreateDockMessages", () => {
+  it("keeps the dock scoped to the current wizard step and counts legacy messages", () => {
+    const result = selectBookCreateDockMessages([
+      { role: "user", content: "intro question", wizardStep: "intro" },
+      { role: "assistant", content: "intro answer", wizardStep: "intro" },
+      { role: "assistant", content: "world answer", wizardStep: "world" },
+      { role: "assistant", content: "legacy answer" },
+    ], "intro");
+
+    expect(result.visibleMessages).toHaveLength(2);
+    expect(result.visibleMessages.every((item: { wizardStep?: string }) => item.wizardStep === "intro")).toBe(true);
+    expect(result.legacyMessageCount).toBe(1);
   });
 });
 
@@ -333,6 +367,64 @@ reason: 适合强悬念开局
       },
     ]);
   });
+
+  it("extracts candidates from noisy mixed text that wraps a JSON array", () => {
+    expect(parseIntroCandidateResponse(`
+先给你三套候选，直接选即可。
+[
+  {
+    "title": "候选 A",
+    "blurb": "卖点 A",
+    "storyBackground": "背景 A",
+    "style": "都市商战",
+    "reason": "节奏快"
+  },
+  {
+    "title": "候选 B",
+    "blurb": "卖点 B",
+    "storyBackground": "背景 B",
+    "style": "都市悬疑",
+    "reason": "悬念强"
+  },
+  {
+    "title": "候选 C",
+    "blurb": "卖点 C",
+    "storyBackground": "背景 C",
+    "style": "都市情感",
+    "reason": "情绪重"
+  }
+]
+如果要我继续，我可以按 1/2/3 展开。
+    `)).toHaveLength(3);
+  });
+});
+
+describe("parseLatestIntroCandidates", () => {
+  it("picks the latest assistant message that contains candidate JSON", () => {
+    const candidates = parseLatestIntroCandidates([
+      { role: "user", content: "生成候选" },
+      { role: "assistant", content: "先给你候选" },
+      { role: "assistant", content: `[
+        {"title":"A","blurb":"a","storyBackground":"sa"},
+        {"title":"B","blurb":"b","storyBackground":"sb"}
+      ]` },
+    ]);
+
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]?.title).toBe("A");
+  });
+});
+
+describe("buildIntroCandidateBackfill", () => {
+  it("converts a candidate into the manual intro seed text", () => {
+    expect(buildIntroCandidateBackfill({
+      title: "候选 A",
+      blurb: "一句话卖点 A",
+      storyBackground: "故事背景 A",
+      style: "都市悬疑",
+      reason: "适合强悬念开局",
+    })).toBe("简介/卖点：一句话卖点 A\n\n故事背景：故事背景 A");
+  });
 });
 
 describe("rankIntroCandidates", () => {
@@ -365,8 +457,24 @@ describe("buildStepFocusCard", () => {
     }, "zh");
 
     expect(focus.title).toContain("简介");
-    expect(focus.highlights.some((line) => line.includes("一句话卖点"))).toBe(true);
+    expect(focus.highlights.some((line: string) => line.includes("一句话卖点"))).toBe(true);
     expect(focus.missing).toContain("故事背景");
+  });
+
+  it("surfaces world focus without intro summary text", () => {
+    const focus = buildStepFocusCard("world", {
+      concept: "港风商战悬疑",
+      worldPremise: "港口城规和商帮冲突。",
+      settingNotes: "夜港通行税。",
+      missingFields: [],
+      readyToCreate: false,
+    }, "zh");
+
+    expect(focus.title).toContain("世界观焦点");
+    expect(focus.highlights.join(" ")).toContain("世界观");
+    expect(focus.highlights.join(" ")).not.toContain("一句话卖点");
+    expect(focus.highlights.join(" ")).not.toContain("故事背景");
+    expect(focus.missing.join(" ")).not.toContain("简介");
   });
 
   it("surfaces review gaps when creation fields are missing", () => {
@@ -498,29 +606,3 @@ describe("canCreateFromDraft", () => {
   });
 });
 
-describe("buildCreationDraftSummary", () => {
-  it("surfaces the shared foundation draft in a user-facing order", () => {
-    expect(buildCreationDraftSummary({
-      concept: "港风商战悬疑，主角从灰产洗白。",
-      title: "夜港账本",
-      genre: "urban",
-      worldPremise: "近未来港口城，账本牵出多方势力。",
-      protagonist: "林砚，水货账房出身，擅长记账和看人。",
-      conflictCore: "洗白与旧债回潮的对撞。",
-      volumeOutline: "卷一先查账，再暴露港口旧案。",
-      blurb: "一个做灰产生意的人，准备在夜港洗白，却先被旧账拖回去。",
-      nextQuestion: "卷一先查账还是先砸场？",
-      missingFields: ["targetChapters"],
-      readyToCreate: false,
-    }, "zh")).toEqual([
-      { key: "title", label: "书名", value: "夜港账本" },
-      { key: "genre", label: "题材", value: "urban" },
-      { key: "worldPremise", label: "世界观", value: "近未来港口城，账本牵出多方势力。" },
-      { key: "protagonist", label: "主角", value: "林砚，水货账房出身，擅长记账和看人。" },
-      { key: "conflictCore", label: "核心冲突", value: "洗白与旧债回潮的对撞。" },
-      { key: "volumeOutline", label: "卷纲方向", value: "卷一先查账，再暴露港口旧案。" },
-      { key: "blurb", label: "简介", value: "一个做灰产生意的人，准备在夜港洗白，却先被旧账拖回去。" },
-      { key: "nextQuestion", label: "下一步", value: "卷一先查账还是先砸场？" },
-    ]);
-  });
-});

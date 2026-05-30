@@ -36,8 +36,8 @@ chapter: 12
 goal: 把七号门被动过手脚从猜测钉成现场实证
 isGoldenOpening: false
 threadRefs:
-  - H03
-  - S004
+  - hook-03
+  - subplot-04
 ---
 
 ## 当前任务
@@ -76,14 +76,14 @@ open:
 - [new] 新钩子描述（<=30字）|| 理由：为什么是现在开，不在本章点破（上限 ≤ 2 个；推荐：本章每 resolve 1 个钩子，open 段埋 2 个新钩子，硬底线是 open ≥ resolve）
 
 advance:
-- H007 "胖虎借条" → 林秋第一次想撕，被阻止（planted → pressured）
-- H012 "雷架焦痕" → 师兄偷看留下印子（pressured → near_payoff）
+- hook-07 "胖虎借条" → 林秋第一次想撕，被阻止（planted → pressured）
+- hook-12 "雷架焦痕" → 师兄偷看留下印子（pressured → near_payoff）
 
 resolve:
-- H003 "杂役腰牌" → 林秋主动摘下（clear）
+- hook-03 "杂役腰牌" → 林秋主动摘下（clear）
 
 defer:
-- H009 "守拙诀来历" → 本章不动，理由：时机不到，等到第 N 章
+- hook-09 "守拙诀来历" → 本章不动，理由：时机不到，等到第 N 章
 
 **硬规则**：
 - 输入的 pending_hooks 里如果有任何 hook 状态已是 "pressured" 或 "near_payoff" 且距上次推进 ≥ 5 章，**必须**放到 advance 或 resolve，不允许 defer
@@ -140,8 +140,8 @@ chapter: 12
 goal: Pin the Door 7 tampering from suspicion to live evidence
 isGoldenOpening: false
 threadRefs:
-  - H03
-  - S004
+  - hook-03
+  - subplot-04
 ---
 
 ## Current task
@@ -180,14 +180,14 @@ open:
 - [new] new hook description (<=30 chars) || reason: why open it now, do not pay it off this chapter (cap ≤ 2; recommended: for each hook resolved this chapter, open 2 new hooks; hard floor is open ≥ resolve)
 
 advance:
-- H007 "Huzi's IOU" → Lin Qiu tries to tear it, gets stopped (planted → pressured)
-- H012 "thunder rack scar" → a senior brother sneaks a look, leaves a mark (pressured → near_payoff)
+- hook-07 "Huzi's IOU" → Lin Qiu tries to tear it, gets stopped (planted → pressured)
+- hook-12 "thunder rack scar" → a senior brother sneaks a look, leaves a mark (pressured → near_payoff)
 
 resolve:
-- H003 "errand badge" → Lin Qiu unpins it himself (clear)
+- hook-03 "errand badge" → Lin Qiu unpins it himself (clear)
 
 defer:
-- H009 "origin of Shou-Zhuo Jue" → not touched this chapter, reason: timing not right, save until chapter N
+- hook-09 "origin of Shou-Zhuo Jue" → not touched this chapter, reason: timing not right, save until chapter N
 
 **Hard rules**:
 - If any hook in input pending_hooks is already "pressured" or "near_payoff" AND has not advanced in ≥ 5 chapters, it **must** go into advance or resolve — deferring is not allowed.

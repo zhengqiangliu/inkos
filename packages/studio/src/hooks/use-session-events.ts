@@ -3,7 +3,6 @@ import type { SSEMessage } from "./use-sse";
 import type { HashRoute } from "./use-hash-route";
 import { useChatStore } from "../store/chat";
 import { bookKey, mergeSessionIds, updateSession } from "../store/chat/slices/message/runtime";
-import { clearBookCreateSessionId, getBookCreateSessionId } from "../pages/chat-page-state";
 
 /**
  * 监听全局 SSE 事件中与 session 有关的两类消息：
@@ -53,11 +52,8 @@ export function useSessionEvents(
         };
       });
 
-      if (getBookCreateSessionId() === sessionId) {
-        clearBookCreateSessionId();
-        if (route.page === "book-create") {
-          setRoute({ page: "book", bookId });
-        }
+      if (route.page === "book-create") {
+        setRoute({ page: "book", bookId });
       }
     }
   }, [route.page, setRoute, sse.messages]);
