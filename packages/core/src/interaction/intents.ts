@@ -50,7 +50,7 @@ export const InteractionRequestSchema = z.object({
   chapterWordCount: z.number().int().min(1).optional(),
   targetChapters: z.number().int().min(1).optional(),
   nextStepTitle: z.string().min(1).optional(),
-  revisionKind: z.enum(["revise", "polish"]).optional(),
+  revisionKind: z.enum(["generate", "revise", "polish"]).optional(),
   candidateAction: z.enum(["select", "revise", "create"]).optional(),
   candidateIndex: z.number().int().min(1).optional(),
   candidateCount: z.number().int().min(1).optional(),

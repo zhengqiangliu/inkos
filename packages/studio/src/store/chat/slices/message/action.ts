@@ -740,6 +740,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           sessionId,
           runId,
           ...(options?.wizardStep ? { wizardStep: options.wizardStep } : {} ),
+          ...(options?.wizardAdvance ? { wizardAdvance: options.wizardAdvance } : {}),
           model: get().selectedModel ?? undefined,
           service: get().selectedService ?? undefined,
           ...(options?.quickMode !== undefined ? { quickMode: options.quickMode } : {}),

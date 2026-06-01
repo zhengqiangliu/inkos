@@ -1,4 +1,4 @@
-﻿import type { BookCreationDraft, BookCreationWizardStep } from "@actalk/inkos-core";
+import type { BookCreationDraft, BookCreationWizardState, BookCreationWizardStep } from "@actalk/inkos-core";
 import { fetchJson } from "../hooks/use-api";
 
 export type GenreLike = {
@@ -65,6 +65,35 @@ export type ReviewChecklistItem = {
   readonly target: CreationDraftFieldTarget;
 };
 
+export type StepValidationStatus = "checking" | "pass" | "fail" | "fixing";
+
+export type StepValidationIssue = {
+  readonly key: string;
+  readonly label: string;
+  readonly message: string;
+  readonly target: CreationDraftFieldTarget;
+};
+
+export type StepValidationReport = {
+  readonly step: BookCreationWizardStep;
+  readonly status: StepValidationStatus;
+  readonly done: boolean;
+  readonly issues: ReadonlyArray<StepValidationIssue>;
+  readonly summary: string;
+};
+
+export type StepMarkdownSection = {
+  readonly key: string;
+  readonly title: string;
+  readonly placeholder: string;
+};
+
+export type StepMarkdownSpec = {
+  readonly title: string;
+  readonly description: string;
+  readonly sections: ReadonlyArray<StepMarkdownSection>;
+};
+
 export type WizardAdvanceRequest = {
   readonly currentStep: BookCreationWizardStep;
   readonly nextStep: BookCreationWizardStep;
@@ -116,6 +145,30 @@ const GENRE_KEYWORDS: Record<string, ReadonlyArray<string>> = {
 
 function readStepIndex(step?: BookCreationWizardStep): number {
   return WIZARD_STEPS.findIndex((item) => item.id === step);
+}
+
+export function mergeCreationWizardState(params: {
+  readonly current?: BookCreationWizardState;
+  readonly fetched?: BookCreationWizardState;
+  readonly pendingStep?: BookCreationWizardStep | null;
+}): BookCreationWizardState | undefined {
+  const { current, fetched, pendingStep } = params;
+  if (!fetched) return current;
+
+  const currentIndex = current ? readStepIndex(current.currentStep) : -1;
+  const fetchedIndex = readStepIndex(fetched.currentStep);
+  const pendingIndex = pendingStep ? readStepIndex(pendingStep) : -1;
+
+  if (pendingIndex >= 0 && fetchedIndex < pendingIndex) {
+    return current ?? {
+      ...fetched,
+      currentStep: pendingStep as BookCreationWizardStep,
+      updatedAt: Date.now(),
+    };
+  }
+
+  if (!current) return fetched;
+  return fetchedIndex >= currentIndex ? fetched : current;
 }
 
 function normalizeText(value: string): string {
@@ -266,6 +319,133 @@ export function buildCreationReviewChecklist(
     },
   ];
 }
+
+function buildValidationIssue(
+  key: string,
+  language: "zh" | "en",
+  target: CreationDraftFieldTarget,
+): StepValidationIssue {
+  const labels: Record<string, { zh: string; en: string }> = {
+    title: { zh: "书名", en: "Title" },
+    genre: { zh: "题材", en: "Genre" },
+    platform: { zh: "平台", en: "Platform" },
+    targetChapters: { zh: "目标章数", en: "Target Chapters" },
+    chapterWordCount: { zh: "每章字数", en: "Words / Chapter" },
+    blurb: { zh: "简介", en: "Blurb" },
+    storyBackground: { zh: "故事背景", en: "Story Background" },
+    worldPremise: { zh: "世界观", en: "World Premise" },
+    settingNotes: { zh: "补充设定", en: "Setting Notes" },
+    novelOutline: { zh: "小说大纲", en: "Novel Outline" },
+    conflictCore: { zh: "核心冲突", en: "Core Conflict" },
+    volumeOutline: { zh: "卷纲规划", en: "Volume Plan" },
+    protagonist: { zh: "主角", en: "Protagonist" },
+    supportingCast: { zh: "配角", en: "Supporting Cast" },
+    characterMatrix: { zh: "角色矩阵", en: "Character Matrix" },
+    characterArc: { zh: "人物弧光", en: "Character Arc" },
+    relationshipMap: { zh: "人物关系", en: "Relationship Map" },
+  };
+  const label = labels[key]?.[language] ?? key;
+  return {
+    key,
+    label,
+    message: language === "zh" ? `请补齐${label}` : `Please fill in ${label}`,
+    target,
+  };
+}
+
+function summarizeValidationIssues(
+  issues: ReadonlyArray<StepValidationIssue>,
+  language: "zh" | "en",
+): string {
+  if (issues.length === 0) {
+    return language === "zh" ? "当前页已通过校验。" : "This page passed validation.";
+  }
+  const labels = issues.map((issue) => issue.label).join(language === "zh" ? "、" : ", ");
+  return language === "zh" ? `当前页还有 ${issues.length} 项未通过：${labels}` : `${issues.length} issue(s) remain: ${labels}`;
+}
+
+export function buildStepValidationReport(
+  step: BookCreationWizardStep,
+  draft: Partial<BookCreationDraft>,
+  language: "zh" | "en",
+  stepContent?: string,
+): StepValidationReport {
+  const issues: StepValidationIssue[] = [];
+  const push = (key: string, target: CreationDraftFieldTarget) => {
+    issues.push(buildValidationIssue(key, language, target));
+  };
+  const content = stepContent?.trim() ?? "";
+  const introSeed = parseIntroSeedText(content);
+
+  switch (step) {
+    case "intro":
+      if (!(introSeed.blurb || introSeed.storyBackground || draft.blurb?.trim() || draft.storyBackground?.trim())) {
+        push("blurb", { kind: "step", step: "intro" });
+        push("storyBackground", { kind: "step", step: "intro" });
+      }
+      break;
+    case "world":
+      if (!(content || draft.worldPremise?.trim() || draft.settingNotes?.trim())) {
+        push("worldPremise", { kind: "step", step: "world" });
+        push("settingNotes", { kind: "step", step: "world" });
+      }
+      break;
+    case "outline":
+      if (!(content || draft.novelOutline?.trim() || draft.conflictCore?.trim())) {
+        push("novelOutline", { kind: "step", step: "outline" });
+        push("conflictCore", { kind: "step", step: "outline" });
+      }
+      break;
+    case "volume":
+      if (!(content || draft.volumeOutline?.trim())) push("volumeOutline", { kind: "step", step: "volume" });
+      break;
+    case "characters":
+      if (!(content || draft.protagonist?.trim() || draft.supportingCast?.trim() || draft.characterMatrix?.trim())) {
+        push("protagonist", { kind: "step", step: "characters" });
+        push("supportingCast", { kind: "step", step: "characters" });
+        push("characterMatrix", { kind: "step", step: "characters" });
+      }
+      break;
+    case "arc":
+      if (!(content || draft.characterArc?.trim())) push("characterArc", { kind: "step", step: "arc" });
+      break;
+    case "relation":
+      if (!(content || draft.relationshipMap?.trim())) push("relationshipMap", { kind: "step", step: "relation" });
+      break;
+    case "review":
+      if (!draft.title?.trim()) push("title", { kind: "basic" });
+      if (!draft.genre?.trim()) push("genre", { kind: "basic" });
+      if (!draft.platform?.trim()) push("platform", { kind: "basic" });
+      if (typeof draft.targetChapters !== "number") push("targetChapters", { kind: "basic" });
+      if (typeof draft.chapterWordCount !== "number") push("chapterWordCount", { kind: "basic" });
+      break;
+  }
+
+  return {
+    step,
+    status: issues.length === 0 ? "pass" : "fail",
+    done: issues.length === 0,
+    issues,
+    summary: summarizeValidationIssues(issues, language),
+  };
+}
+
+export function buildWizardValidationReports(
+  draft: Partial<BookCreationDraft> | undefined,
+  language: "zh" | "en",
+): Readonly<Record<BookCreationWizardStep, StepValidationReport>> {
+  const source = draft ?? {};
+  return {
+    intro: buildStepValidationReport("intro", source, language),
+    world: buildStepValidationReport("world", source, language),
+    outline: buildStepValidationReport("outline", source, language),
+    volume: buildStepValidationReport("volume", source, language),
+    characters: buildStepValidationReport("characters", source, language),
+    arc: buildStepValidationReport("arc", source, language),
+    relation: buildStepValidationReport("relation", source, language),
+    review: buildStepValidationReport("review", source, language),
+  };
+}
 function genreKeywordsFor(genreId: string): ReadonlyArray<string> {
   return GENRE_KEYWORDS[genreId] ?? [];
 }
@@ -395,6 +575,92 @@ export function buildIntroCandidateBackfill(candidate: IntroCandidateLike): stri
   return composeIntroSeedText(candidate.blurb, candidate.storyBackground);
 }
 
+export function buildIntroExpansionSeedText(candidate: IntroCandidateLike): string {
+  const parts: string[] = [];
+  if (candidate.title.trim()) parts.push(`候选标题：${candidate.title.trim()}`);
+  if (candidate.style?.trim()) parts.push(`风格：${candidate.style.trim()}`);
+  if (candidate.reason?.trim()) parts.push(`候选价值：${candidate.reason.trim()}`);
+  if (candidate.blurb.trim()) parts.push(`候选卖点：${candidate.blurb.trim()}`);
+  if (candidate.storyBackground.trim()) parts.push(`候选背景：${candidate.storyBackground.trim()}`);
+  return parts.join("\n\n");
+}
+
+export function buildIntroMarkdownDraft(draft: Partial<BookCreationDraft>, language: "zh" | "en"): string {
+  const blurb = draft.blurb?.trim() ?? "";
+  const storyBackground = draft.storyBackground?.trim() ?? "";
+  if (language === "en") {
+    return [
+      blurb ? `## One-line Hook\n${blurb}` : "## One-line Hook\n-",
+      storyBackground ? `## Story Background\n${storyBackground}` : "## Story Background\n-",
+    ].join("\n\n");
+  }
+  return [
+    blurb ? `## 一句话卖点\n${blurb}` : "## 一句话卖点\n-",
+    storyBackground ? `## 故事背景\n${storyBackground}` : "## 故事背景\n-",
+  ].join("\n\n");
+}
+
+export const STEP_MARKDOWN_SPECS: Readonly<Record<Exclude<BookCreationWizardStep, "intro" | "review">, StepMarkdownSpec>> = {
+  world: {
+    title: "世界观",
+    description: "只编辑当前页内容，默认以 Markdown 预览显示。",
+    sections: [
+      { key: "worldPremise", title: "世界观", placeholder: "世界观：..." },
+      { key: "settingNotes", title: "补充设定", placeholder: "补充设定：..." },
+    ],
+  },
+  outline: {
+    title: "小说大纲",
+    description: "只编辑当前页内容，默认以 Markdown 预览显示。",
+    sections: [
+      { key: "novelOutline", title: "大纲", placeholder: "大纲：..." },
+      { key: "conflictCore", title: "核心冲突", placeholder: "核心冲突：..." },
+    ],
+  },
+  volume: {
+    title: "卷纲规划",
+    description: "只编辑当前页内容，默认以 Markdown 预览显示。",
+    sections: [
+      { key: "volumeOutline", title: "卷纲方向", placeholder: "卷纲：..." },
+    ],
+  },
+  characters: {
+    title: "主角 / 配角",
+    description: "只编辑当前页内容，默认以 Markdown 预览显示。",
+    sections: [
+      { key: "protagonist", title: "主角", placeholder: "主角：..." },
+      { key: "supportingCast", title: "配角", placeholder: "配角：..." },
+      { key: "characterMatrix", title: "角色矩阵", placeholder: "角色矩阵：..." },
+    ],
+  },
+  arc: {
+    title: "人物弧光",
+    description: "只编辑当前页内容，默认以 Markdown 预览显示。",
+    sections: [
+      { key: "characterArc", title: "人物弧光", placeholder: "人物弧光：..." },
+    ],
+  },
+  relation: {
+    title: "人物关系",
+    description: "只编辑当前页内容，默认以 Markdown 预览显示。",
+    sections: [
+      { key: "relationshipMap", title: "人物关系", placeholder: "人物关系：..." },
+    ],
+  },
+};
+
+export function getStepMarkdownSpec(step: Exclude<BookCreationWizardStep, "intro" | "review">): StepMarkdownSpec {
+  return STEP_MARKDOWN_SPECS[step];
+}
+
+export function buildStepMarkdownDraft(
+  step: Exclude<BookCreationWizardStep, "intro" | "review">,
+  draft: Partial<BookCreationDraft>,
+  language: "zh" | "en",
+): string {
+  return buildWizardStepSeedText(step, draft, language);
+}
+
 export function resolveIntroCandidateTitle(candidate: IntroCandidateLike): string {
   return candidate.title.trim() || candidate.style?.trim() || candidate.blurb.trim() || candidate.storyBackground.trim();
 }
@@ -420,15 +686,29 @@ export function parseIntroSeedText(input: string): { readonly blurb: string; rea
   };
 
   for (const line of lines) {
-    const normalized = line.replace(/[：:]\s*/g, ":");
-    if (/^(简介\/卖点|简介|卖点):/.test(normalized)) {
-      current = "blurb";
-      write(normalized.replace(/^(简介\/卖点|简介|卖点):\s*/, ""));
+    const headingMatch = line.match(/^#{1,6}\s*(.+)$/);
+    if (headingMatch?.[1]) {
+      const heading = headingMatch[1].trim().toLowerCase();
+      if (/(一句话卖点|简介\/卖点|简介|卖点|one-line hook|hook)/i.test(heading)) {
+        current = "blurb";
+        continue;
+      }
+      if (/(故事背景|背景|story background)/i.test(heading)) {
+        current = "storyBackground";
+        continue;
+      }
       continue;
     }
-    if (/^(故事背景|背景):/.test(normalized)) {
+
+    const normalized = line.replace(/[：:]\s*/g, ":");
+    if (/^(简介\/卖点|简介|卖点|一句话卖点|one-line hook|hook):/i.test(normalized)) {
+      current = "blurb";
+      write(normalized.replace(/^(简介\/卖点|简介|卖点|一句话卖点|one-line hook|hook):\s*/i, ""));
+      continue;
+    }
+    if (/^(故事背景|背景|story background):/i.test(normalized)) {
       current = "storyBackground";
-      write(normalized.replace(/^(故事背景|背景):\s*/, ""));
+      write(normalized.replace(/^(故事背景|背景|story background):\s*/i, ""));
       continue;
     }
     write(line);
@@ -723,16 +1003,20 @@ export function rankIntroCandidates(
     .map((item) => item.candidate);
 }
 
-export function buildChatActionLabels(step: BookCreationWizardStep, nextStepTitle: string | undefined, language: "zh" | "en"): ChatActionLabels {
+export function buildChatActionLabels(step: BookCreationWizardStep, _nextStepTitle: string | undefined, language: "zh" | "en"): ChatActionLabels {
   if (language === "en") {
     return {
-      advanceLabel: step === "review" ? "Review and finish creation" : `Save and continue to ${nextStepTitle ?? "next step"}`,
+      advanceLabel: step === "review"
+        ? "Review and finish creation"
+        : "Confirm and enter next step",
       createLabel: "Finish creation",
     };
   }
 
   return {
-    advanceLabel: step === "review" ? "复核并完成创建" : `确认并进入 ${nextStepTitle ?? "下一步"}`,
+    advanceLabel: step === "review"
+      ? "复核并完成创建"
+      : `确认并进入 ${_nextStepTitle ?? "下一步"}`,
     createLabel: "完成创建",
   };
 }
@@ -747,7 +1031,7 @@ export function buildChatGuide(step: BookCreationWizardStep, language: "zh" | "e
       examples: step === "intro"
         ? ["Generate several candidate blurbs by genre.", "Use the chat to polish the intro seed."]
         : ["Refine the current page only.", "Confirm and move forward when the draft is ready."],
-      advanceLabel: buildChatActionLabels(step, currentMeta.title, language).advanceLabel,
+      advanceLabel: step === "review" ? "Review and finish creation" : "Confirm current page and move to next step",
     };
   }
 
@@ -762,14 +1046,12 @@ export function buildChatGuide(step: BookCreationWizardStep, language: "zh" | "e
       : step === "review"
         ? ["先核对分项是否齐全，再完成创建。", "只做缺失项核对，不要扩写。"]
         : ["只优化当前页面内容。", "若已完成，可直接进入下一步。"],
-    advanceLabel: step === "review"
-      ? "复核并完成创建"
-      : "确认当前页并进入下一步",
+    advanceLabel: step === "review" ? "复核并完成创建" : "确认当前页并进入下一步",
   };
 }
 
 export function buildBookCreateCommand(params: {
-  readonly kind: "intro-revise" | "intro-polish" | "intro-generate" | "params" | "advance" | "create" | "discard" | "back" | "goto" | "save";
+  readonly kind: "intro-generate" | "intro-revise" | "intro-polish" | "params" | "advance" | "create" | "discard" | "back" | "goto" | "save";
   readonly language: "zh" | "en";
   readonly stepTitle: string;
   readonly currentStep?: BookCreationWizardStep;
@@ -837,9 +1119,18 @@ export function buildBookCreateCommand(params: {
     case "intro-generate":
       return {
         kind: "intro-generate",
-        label: language === "en" ? "Generate candidates" : "生成候选池",
+        label: language === "en" ? "Generate intro" : "生成正式简介",
         disabled: !theme && !genre,
-        instruction: `请按题材和主题生成${candidateCount && candidateCount > 0 ? candidateCount : 3} 套简介候选，只输出候选池，不要直接进入建书。\n\n书名：${title || "未填"}\n题材：${genre || "未选"}\n主题：${theme || genre || "未填"}\n平台：${platform || "未选"}\n当前简介：${introBlurb || "（空）"}\n当前故事背景：${introStoryBackground || "（空）"}\n\n要求：\n1. 每套都要包含 title、blurb、storyBackground、style、reason。\n2. 候选之间风格要有差异。\n3. 请尽量用 JSON 数组输出；如果无法严格 JSON，也要按清晰分隔的多方案格式输出。\n4. 输出后只提示我可以在左侧候选池选择第几套，不要触发建书流程。`,
+        instruction: buildIntroCandidateGenerationInstruction({
+          language,
+          title,
+          genre,
+          platform,
+          theme,
+          introBlurb,
+          introStoryBackground,
+          candidateCount,
+        }),
       };
     case "back":
       return {
@@ -872,6 +1163,25 @@ export function buildBookCreateCommand(params: {
         instruction: params.kind,
       };
   }
+}
+
+export function buildIntroCandidateGenerationInstruction(params: {
+  readonly language: "zh" | "en";
+  readonly title?: string;
+  readonly genre?: string;
+  readonly platform?: string;
+  readonly theme?: string;
+  readonly introBlurb?: string;
+  readonly introStoryBackground?: string;
+  readonly candidateCount?: number;
+}): string {
+  const { language, title, genre, platform, theme, introBlurb, introStoryBackground, candidateCount } = params;
+  const count = candidateCount && candidateCount > 0 ? candidateCount : 3;
+  if (language === "en") {
+    return `Generate ${count} intro candidates for the current book. Output only the candidate pool and do not start book creation.\n\n[Title] ${title || "unset"}\n[Genre] ${genre || "unset"}\n[Theme] ${theme || genre || "unset"}\n[Platform] ${platform || "unset"}\n[Current Blurb] ${introBlurb || "(empty)"}\n[Current Story Background] ${introStoryBackground || "(empty)"}\n\nRequired output format:\n[\n  {\n    "title": "Candidate title",\n    "blurb": "One-line hook / blurb",\n    "storyBackground": "Story background seed",\n    "style": "Distinct style note",\n    "reason": "Why this candidate is useful"\n  }\n]\n\nRules:\n1. Return valid JSON array only. No prose, no markdown, no code fences.\n2. Every candidate must contain title, blurb, storyBackground, style, and reason.\n3. blurb and storyBackground are both required for every candidate.\n4. Candidates must be meaningfully different in tone or angle.\n5. After the JSON, do not add any extra explanation.`;
+  }
+
+  return `请按题材和主题生成${count} 套简介候选，只输出候选池，不要直接进入建书。\n\n【书名】${title || "未填"}\n【题材】${genre || "未选"}\n【主题】${theme || genre || "未填"}\n【平台】${platform || "未选"}\n【当前简介】${introBlurb || "（空）"}\n【当前故事背景】${introStoryBackground || "（空）"}\n\n【输出格式】只输出一个 JSON 数组，禁止输出说明文字、Markdown、代码块。\n[\n  {\n    "title": "候选标题",\n    "blurb": "一句话简介 / 卖点",\n    "storyBackground": "故事背景种子",\n    "style": "风格说明",\n    "reason": "为什么这个候选有价值"\n  }\n]\n\n【要求】\n1. 每个候选必须同时包含 title、blurb、storyBackground、style、reason。\n2. blurb 和 storyBackground 都是必填项，不能缺失。\n3. 候选之间风格或切入角度必须明显不同。\n4. 数量必须是 ${count} 套。\n5. 输出后不要附加任何额外解释。`;
 }
 
 export function shouldSubmitChatOnKeyDown(event: { key: string; shiftKey: boolean; isComposing?: boolean }): boolean {
@@ -1289,3 +1599,4 @@ export async function waitForBookReady(bookId: string, options: WaitForBookReady
 
   throw lastError instanceof Error ? lastError : new Error(`Book "${bookId}" was not ready`);
 }
+

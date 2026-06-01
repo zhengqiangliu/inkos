@@ -129,8 +129,106 @@ function buildCreationExternalContext(input: {
   return sections.join("\n\n");
 }
 
+function parseIntroMarkdownDraft(input: string): { readonly blurb: string; readonly storyBackground: string } {
+  const lines = input
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return { blurb: "", storyBackground: "" };
+
+  let blurb = "";
+  let storyBackground = "";
+  let current: "blurb" | "storyBackground" = "blurb";
+
+  const write = (text: string) => {
+    if (!text) return;
+    if (current === "blurb") {
+      blurb = blurb ? `${blurb} ${text}` : text;
+    } else {
+      storyBackground = storyBackground ? `${storyBackground} ${text}` : text;
+    }
+  };
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^#{1,6}\s*(.+)$/);
+    if (headingMatch?.[1]) {
+      const heading = headingMatch[1].trim().toLowerCase();
+      if (/(一句话卖点|简介\/卖点|简介|卖点|one-line hook|hook)/i.test(heading)) {
+        current = "blurb";
+        continue;
+      }
+      if (/(故事背景|背景|story background)/i.test(heading)) {
+        current = "storyBackground";
+        continue;
+      }
+      continue;
+    }
+
+    const normalized = line.replace(/[：:]\s*/g, ":");
+    if (/^(简介\/卖点|简介|卖点|一句话卖点|one-line hook|hook):/i.test(normalized)) {
+      current = "blurb";
+      write(normalized.replace(/^(简介\/卖点|简介|卖点|一句话卖点|one-line hook|hook):\s*/i, ""));
+      continue;
+    }
+    if (/^(故事背景|背景|story background):/i.test(normalized)) {
+      current = "storyBackground";
+      write(normalized.replace(/^(故事背景|背景|story background):\s*/i, ""));
+      continue;
+    }
+    write(line);
+  }
+
+  return { blurb: blurb.trim(), storyBackground: storyBackground.trim() };
+}
+
+function buildVolumeOutlineContext(input: {
+  readonly novelOutline?: string;
+  readonly conflictCore?: string;
+  readonly worldPremise?: string;
+  readonly settingNotes?: string;
+}): string | undefined {
+  const sections = [
+    input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
+    input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
+    input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
+    input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
+  ].filter((section): section is string => Boolean(section?.trim()));
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join("\n\n");
+}
+
+function buildCharacterArcContext(input: {
+  readonly characterArc?: string;
+  readonly protagonist?: string;
+  readonly supportingCast?: string;
+  readonly conflictCore?: string;
+  readonly novelOutline?: string;
+  readonly worldPremise?: string;
+  readonly settingNotes?: string;
+}): string | undefined {
+  const sections = [
+    input.characterArc ? `## 人物弧光草案\n${input.characterArc}` : undefined,
+    input.protagonist ? `## 主角设定\n${input.protagonist}` : undefined,
+    input.supportingCast ? `## 关键配角 / 势力\n${input.supportingCast}` : undefined,
+    input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
+    input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
+    input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
+    input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
+  ].filter((section): section is string => Boolean(section?.trim()));
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join("\n\n");
+}
+
 type WizardMode = "generate" | "modify";
-type IntroRevisionMode = "revise" | "polish";
+type IntroRevisionMode = "generate" | "revise" | "polish";
 
 const WIZARD_STEP_FIELDS: Record<BookCreationWizardStep, ReadonlyArray<string>> = {
   intro: ["blurb", "storyBackground"],
@@ -195,11 +293,19 @@ const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
   },
   arc: {
     title: "人物弧光",
-    framework: ["核心弧光", "起点状态", "成长转折", "终点状态"],
+    framework: [
+      "核心弧光",
+      "起点状态：性格缺陷 / 内心恐惧 / 错误信念",
+      "成长转折：触发事件 / 内心挣扎 / 觉醒时刻 / 持续考验",
+      "终点状态：性格蜕变 / 克服恐惧 / 新信念 / 残留痕迹",
+    ],
     constraints: [
       "只补人物弧光页，不要扩写角色矩阵或世界观。",
-      "弧光必须和主线冲突绑定，不能游离。",
-      "起点、转折、终点要形成清晰变化链。",
+      "必须按“核心弧光 -> 起点状态 -> 成长转折 -> 终点状态”的顺序输出。",
+      "起点状态必须明确写出性格缺陷、内心恐惧、错误信念。",
+      "成长转折必须明确写出触发事件、内心挣扎、觉醒时刻、持续考验。",
+      "终点状态必须明确写出性格蜕变、克服恐惧、新信念、残留痕迹。",
+      "每一项都要具体、可落地、可写进章节，不要空泛总结。",
     ],
   },
   relation: {
@@ -222,6 +328,17 @@ const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
   },
 };
 
+const INTRO_GENERATION_PROMPT = {
+  title: "简介 / 故事背景",
+  framework: ["一句话卖点", "故事背景", "主角处境", "引爆点", "核心悬念"],
+  constraints: [
+    "只生成当前页，不要扩写世界观、卷纲、角色矩阵、关系等其他页。",
+    "一句话卖点必须能直接用于书籍简介或封面文案开头。",
+    "故事背景要具体，不能只写抽象设定。",
+    "不要输出生成说明、分析过程、结尾总结或建议下一步。",
+  ],
+} as const;
+
 const INTRO_REVISION_SYSTEM_PROMPT = [
   "你是 InkOS 的简介 / 故事背景专用修订助手。",
   "你只处理简介页，不要把内容扩写到世界观、角色矩阵、卷纲或章节大纲。",
@@ -241,11 +358,36 @@ export function buildWizardPrompt(
   existingDraft?: BookCreationDraft,
   genreContext?: WizardGenreContext,
 ): string {
-  const template = getWizardStepTemplate(step);
+  const template = step === "intro" && mode === "generate"
+    ? INTRO_GENERATION_PROMPT
+    : getWizardStepTemplate(step);
   const allowedFields = WIZARD_STEP_FIELDS[step].join("、");
   const draftBlock = existingDraft
     ? ["## 当前草案", JSON.stringify(existingDraft, null, 2)].join("\n")
     : "## 当前草案\n（空）";
+  const stepContext = step === "volume"
+    ? buildVolumeOutlineContext({
+        novelOutline: existingDraft?.novelOutline,
+        conflictCore: existingDraft?.conflictCore,
+        worldPremise: existingDraft?.worldPremise,
+        settingNotes: existingDraft?.settingNotes,
+      })
+    : step === "arc"
+      ? buildCharacterArcContext({
+          characterArc: existingDraft?.characterArc,
+          protagonist: existingDraft?.protagonist,
+          supportingCast: existingDraft?.supportingCast,
+          conflictCore: existingDraft?.conflictCore,
+          novelOutline: existingDraft?.novelOutline,
+          worldPremise: existingDraft?.worldPremise,
+          settingNotes: existingDraft?.settingNotes,
+        })
+    : undefined;
+  const modeLabel = step === "intro" && mode === "generate"
+    ? "生成正式简介"
+    : mode === "generate"
+      ? "生成当前页"
+      : "只修改当前页";
   const genreBlock = genreContext
     ? [
         "## 题材库约束",
@@ -265,16 +407,19 @@ export function buildWizardPrompt(
 
   return [
     `当前步骤：${template.title}`,
-    `模式：${mode === "generate" ? "生成当前页" : "只修改当前页"}`,
+    `模式：${modeLabel}`,
     "",
     ...(genreBlock ? [genreBlock, ""] : []),
+    ...(stepContext ? [stepContext, ""] : []),
     "内容框架必须包含：",
     ...template.framework.map((item, index) => `${index + 1}. ${item}`),
     "",
     "约束：",
     ...template.constraints.map((item, index) => `${index + 1}. ${item}`),
-    `4. 只允许更新以下字段：${allowedFields}。其他字段必须保持草案原值。`,
-    "5. 多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。",
+    "4. blurb：用于书籍简介或卖点开头，必须抓人，不能是说明书语气。",
+    "5. storyBackground：交代故事起点、冲突环境和引爆条件，必须具体。",
+    `6. 只允许更新以下字段：${allowedFields}。其他字段必须保持草案原值。`,
+    "7. 多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。",
     "",
     draftBlock,
     "",
@@ -429,11 +574,16 @@ async function runWizardDraftTool(params: {
   );
 
   const toolArgs = parseToolCallArguments(result.toolCalls[0]);
-  const draft = applyWizardStepDraft(step, existingDraft, concept, toolArgs);
+  const parsedIntro = step === "intro" ? parseIntroMarkdownDraft(input) : null;
+  const normalizedArgs = step === "intro" ? {
+    blurb: typeof toolArgs.blurb === "string" ? toolArgs.blurb : parsedIntro?.blurb ?? "",
+    storyBackground: typeof toolArgs.storyBackground === "string" ? toolArgs.storyBackground : parsedIntro?.storyBackground ?? "",
+  } : toolArgs;
+  const draft = applyWizardStepDraft(step, existingDraft, concept, normalizedArgs);
   return {
     draft,
     responseText: result.content?.trim() || "已更新当前页内容。",
-    fieldsUpdated: Object.keys(toolArgs).filter((key) => WIZARD_STEP_FIELDS[step].includes(key)),
+    fieldsUpdated: Object.keys(normalizedArgs).filter((key) => WIZARD_STEP_FIELDS[step].includes(key)),
     draftRaw: result.content?.trim() || "",
   };
 }
@@ -865,6 +1015,11 @@ function buildIntroRevisionPrompt(params: {
   const draftBlock = existingDraft
     ? ["## 当前草案", JSON.stringify(existingDraft, null, 2)].join("\n")
     : "## 当前草案\n（空）";
+  const contentMode = mode === "polish"
+    ? "润色正式简介"
+    : mode === "generate"
+      ? "生成正式简介"
+      : "修改正式简介";
   const genreBlock = genreContext
     ? [
         "## 题材库约束",
@@ -883,10 +1038,24 @@ function buildIntroRevisionPrompt(params: {
     : "";
 
   return [
-    `模式：${mode === "polish" ? "润色" : "修改"}`,
+    `模式：${contentMode}`,
     "目标页：简介 / 故事背景",
     "",
     ...(genreBlock ? [genreBlock, ""] : []),
+    "内容框架必须包含：",
+    "1. 一句话卖点",
+    "2. 故事背景",
+    "3. 主角处境",
+    "4. 引爆点",
+    "5. 核心悬念",
+    "",
+    "输出结构：",
+    "1. blurb：用于书籍简介或卖点开头，必须抓人，不能是说明书语气。",
+    "2. storyBackground：交代故事起点、冲突环境和引爆条件，必须具体。",
+    "3. 不要输出“以上是草案”“如果你确认”等前后缀说明。",
+    "4. 不要扩写到世界观、人物关系、卷纲或章节目录。",
+    "5. 至少返回 blurb 或 storyBackground 之一，且内容要可直接落库。",
+    "",
     draftBlock,
     "",
     "## 用户输入",
@@ -897,6 +1066,7 @@ function buildIntroRevisionPrompt(params: {
     "2. 至少返回 blurb 或 storyBackground 之一。",
     "3. 如果已有题材，必须保留并强化题材一致性。",
     "4. 润色模式优先保留原信息结构，修改模式允许重写表达。",
+    "5. 输出正文必须是可直接落库的正式文案，不要夹带生成过程说明。",
   ].join("\n");
 }
 

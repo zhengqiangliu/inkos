@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildBookCreateCommand } from "./book-create-state";
+import { mergeCreationWizardState, buildBookCreateCommand } from "./book-create-state";
 
 describe("BookCreate wizard control", () => {
   it("advances with stable wizard step ids rather than localized titles", () => {
@@ -57,5 +57,25 @@ describe("BookCreate wizard control", () => {
       intent: "discard_book_draft",
       wizardStep: "intro",
     });
+  });
+
+  it("keeps the current step when a stale refresh reports an earlier wizard step", () => {
+    const merged = mergeCreationWizardState({
+      current: {
+        currentStep: "world",
+        completedSteps: ["intro"],
+        stepNotes: {},
+        updatedAt: 100,
+      },
+      fetched: {
+        currentStep: "intro",
+        completedSteps: [],
+        stepNotes: {},
+        updatedAt: 200,
+      },
+      pendingStep: "world",
+    });
+
+    expect(merged?.currentStep).toBe("world");
   });
 });

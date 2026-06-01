@@ -43,12 +43,12 @@ export interface InteractionRuntimeTools {
     wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review",
     themeGenre?: string,
   ) => Promise<unknown>;
-  readonly reviseBookIntro?: (
-    input: string,
-    existingDraft?: InteractionSession["creationDraft"],
-    revisionKind?: "revise" | "polish",
-    themeGenre?: string,
-  ) => Promise<unknown>;
+    readonly reviseBookIntro?: (
+      input: string,
+      existingDraft?: InteractionSession["creationDraft"],
+      revisionKind?: "generate" | "revise" | "polish",
+      themeGenre?: string,
+    ) => Promise<unknown>;
   readonly saveBookWizardStep?: (
     input: string,
     existingDraft?: InteractionSession["creationDraft"],
@@ -1087,12 +1087,7 @@ async function handleDraftLifecycleRequest(params: {
         confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
       }));
       const nextSession = appendToolEvents({
-        ...updateCreationWizard(withDraft, {
-          currentStep: nextStep,
-          completedSteps: session.creationWizard?.completedSteps ?? [],
-          stepNotes: session.creationWizard?.stepNotes ?? {},
-          updatedAt: Date.now(),
-        }),
+        ...updateCreationWizard(withDraft, advanceCreationWizardState(withDraft, targetStep)),
         draftRounds: [...(withDraft.draftRounds ?? []), newRound],
       }, metadata.events);
       const completed = {

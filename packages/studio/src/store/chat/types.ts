@@ -287,6 +287,17 @@ export interface MessageActions {
       readonly skipAutoNewPrefix?: boolean;
       readonly wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep;
       readonly forceStream?: boolean;
+      readonly wizardAdvance?: {
+        readonly wizardStep: string;
+        readonly language: string;
+        readonly stepTitle: string;
+        readonly title?: string;
+        readonly genre?: string;
+        readonly platform?: string;
+        readonly targetChapters?: number;
+        readonly chapterWordCount?: number;
+        readonly instruction?: string;
+      };
     },
   ) => Promise<AgentResponse | null>;
   stopMessage: (sessionId: string) => Promise<void>;

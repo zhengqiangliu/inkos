@@ -1099,4 +1099,23 @@ export function attachSessionStreamListeners({
       // ignore
     }
   });
+
+  streamEs.addEventListener("wizard:advanced", (event: MessageEvent) => {
+    try {
+      const data = event.data ? JSON.parse(event.data) : null;
+      if (!sessionMatchesEvent(sessionId, data, runId)) return;
+      const { creationDraft, creationWizard } = data as {
+        creationDraft?: unknown;
+        creationWizard?: unknown;
+      };
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, (session) => ({
+          ...(creationDraft ? { creationDraft: creationDraft as never } : {}),
+          ...(creationWizard ? { creationWizard: creationWizard as never } : {}),
+        })),
+      }));
+    } catch {
+      // ignore
+    }
+  });
 }

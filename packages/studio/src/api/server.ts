@@ -6927,6 +6927,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       quickMode?: boolean;
       preferFastWriterModel?: boolean;
       forceStream?: boolean;
+      wizardAdvance?: {
+        wizardStep: string;
+        language: string;
+        stepTitle: string;
+        title?: string;
+        genre?: string;
+        platform?: string;
+        targetChapters?: number;
+        chapterWordCount?: number;
+        instruction?: string;
+      };
     }>();
     const {
       instruction,
@@ -6938,6 +6949,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       quickMode: reqQuickMode,
       preferFastWriterModel: reqPreferFastWriterModel,
       forceStream: reqForceStream,
+      wizardAdvance: reqWizardAdvance,
     } = payload;
     const sessionId = reqSessionId;
     const runId = reqRunId?.trim() || createAgentRunId();
@@ -7003,6 +7015,49 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       }
       let bookSession = loadedBookSession;
       persistedBookSession = bookSession;
+
+      // 向导推进预处理：在 Agent 运行前先完成保存，确保 Agent 读到最新 draft
+      if (reqWizardAdvance) {
+        const wizardPipeline = new PipelineRunner(await buildPipelineConfig());
+        const wizardTools = createInteractionToolsFromDeps(wizardPipeline, state);
+        try {
+          const wizardResult = await processProjectInteractionRequest({
+            projectRoot: root,
+            request: InteractionRequestSchema.parse({
+              intent: "advance_book_wizard",
+              language: reqWizardAdvance.language,
+              stepTitle: reqWizardAdvance.stepTitle,
+              wizardStep: reqWizardAdvance.wizardStep,
+              ...(reqWizardAdvance.title ? { title: reqWizardAdvance.title } : {}),
+              ...(reqWizardAdvance.genre ? { genre: reqWizardAdvance.genre } : {}),
+              ...(reqWizardAdvance.platform ? { platform: reqWizardAdvance.platform } : {}),
+              ...(typeof reqWizardAdvance.targetChapters === "number" ? { targetChapters: reqWizardAdvance.targetChapters } : {}),
+              ...(typeof reqWizardAdvance.chapterWordCount === "number" ? { chapterWordCount: reqWizardAdvance.chapterWordCount } : {}),
+              ...(reqWizardAdvance.instruction ? { instruction: reqWizardAdvance.instruction } : {}),
+            }),
+            tools: wizardTools,
+          });
+          // 用保存后的 session 替换，确保 Agent 读到最新 creationDraft
+          if (wizardResult.session) {
+            const savedSession = await loadBookSession(root, sessionId);
+            if (savedSession) {
+              bookSession = savedSession;
+              persistedBookSession = bookSession;
+            }
+          }
+          // 广播向导推进事件，前端可据此更新 wizard 状态
+          broadcast("wizard:advanced", {
+            sessionId,
+            runId,
+            creationDraft: wizardResult.session?.creationDraft,
+            creationWizard: wizardResult.session?.creationWizard,
+          });
+        } catch (wizardError) {
+          // 向导保存失败时广播错误，但不中断 Agent（降级为只生成内容）
+          const wizardErrMsg = wizardError instanceof Error ? wizardError.message : String(wizardError);
+          broadcast("wizard:advance_failed", { sessionId, runId, error: wizardErrMsg });
+        }
+      }
       const streamSessionId = loadedBookSession.sessionId;
       const emitAgentLog = (
         message: string,

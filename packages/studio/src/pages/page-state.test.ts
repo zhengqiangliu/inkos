@@ -21,6 +21,7 @@ import {
   buildStepActionSections,
   buildStepRecommendedAction,
   buildStepShortcuts,
+  buildWizardValidationReports,
   resolveInitialGenreSelection,
   selectBookCreateDockMessages,
   shouldSubmitChatOnKeyDown,
@@ -172,6 +173,33 @@ describe("buildCreationReviewChecklist", () => {
     expect(checklist[2]?.done).toBe(false);
     expect(checklist[2]?.target.kind).toBe("step");
     expect(checklist[2]?.target.kind === "step" ? checklist[2]?.target.step : undefined).toBe("world");
+  });
+});
+
+describe("buildWizardValidationReports", () => {
+  it("reports per-step missing fields and review gate issues", () => {
+    const reports = buildWizardValidationReports({
+      title: "夜港账本",
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 3000,
+      blurb: "港口账本牵出灰产链。",
+    }, "zh");
+
+    expect(reports.intro.done).toBe(true);
+    expect(reports.world.done).toBe(false);
+    expect(reports.world.issues.map((item: { key: string }) => item.key)).toContain("worldPremise");
+    expect(reports.review.done).toBe(true);
+
+    const incomplete = buildWizardValidationReports({
+      title: "夜港账本",
+      genre: "urban",
+      platform: "tomato",
+    }, "zh");
+
+    expect(incomplete.review.done).toBe(false);
+    expect(incomplete.review.issues.map((item: { key: string }) => item.key)).toEqual(expect.arrayContaining(["targetChapters", "chapterWordCount"]));
   });
 });
 
