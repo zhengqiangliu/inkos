@@ -460,6 +460,49 @@ describe("ComposerAgent", () => {
     expect(fanficCanonEntry?.excerpt).toContain("oath debt logic");
   });
 
+  it("includes promoted character-arc and relationship-map context for governed writing", async () => {
+    await Promise.all([
+      writeFile(
+        join(storyDir, "character_arc.md"),
+        "# 人物弧光\n\n- 林越从被动追查转向主动设局。\n",
+        "utf-8",
+      ),
+      writeFile(
+        join(storyDir, "relationship_map.md"),
+        "# 人物关系\n\n- 林越与任会首维持表面合作、实则互相设防。\n",
+        "utf-8",
+      ),
+    ]);
+
+    const composer = new ComposerAgent({
+      client: {} as ConstructorParameters<typeof ComposerAgent>[0]["client"],
+      model: "test-model",
+      projectRoot: root,
+      bookId: book.id,
+    });
+
+    const result = await composer.composeChapter({
+      book,
+      bookDir,
+      chapterNumber: 4,
+      plan,
+    });
+
+    const selectedSources = result.contextPackage.selectedContext.map((entry) => entry.source);
+    expect(selectedSources).toContain("story/character_arc.md");
+    expect(selectedSources).toContain("story/relationship_map.md");
+
+    const arcEntry = result.contextPackage.selectedContext.find((entry) =>
+      entry.source === "story/character_arc.md",
+    );
+    const relationEntry = result.contextPackage.selectedContext.find((entry) =>
+      entry.source === "story/relationship_map.md",
+    );
+
+    expect(arcEntry?.excerpt).toContain("林越从被动追查转向主动设局");
+    expect(relationEntry?.excerpt).toContain("表面合作");
+  });
+
   it("includes dedicated audit drift guidance instead of relying on current_state pollution", async () => {
     await writeFile(
       join(storyDir, "audit_drift.md"),

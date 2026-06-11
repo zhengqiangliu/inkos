@@ -29,6 +29,7 @@ describe("buildStudioBookConfig", () => {
       title: "测试书",
       genre: "xuanhuan",
       platform: "qidian",
+      creationState: "wizard",
       language: "zh",
       chapterWordCount: 2500,
       targetChapters: 120,

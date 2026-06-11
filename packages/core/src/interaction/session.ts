@@ -25,7 +25,6 @@ export const BookCreationWizardStepSchema = z.enum([
   "characters",
   "arc",
   "relation",
-  "review",
 ]);
 
 export type BookCreationWizardStep = z.infer<typeof BookCreationWizardStepSchema>;
@@ -156,6 +155,7 @@ export const BookCreationDraftSchema = z.object({
   chapterWordCount: z.number().int().min(1).optional(),
   blurb: z.string().min(1).optional(),
   storyBackground: z.string().min(1).optional(),
+  introMarkdown: z.string().min(1).optional(),
   worldPremise: z.string().min(1).optional(),
   settingNotes: z.string().min(1).optional(),
   novelOutline: z.string().min(1).optional(),
@@ -271,15 +271,6 @@ export const BookCreationRelationPageDraftSchema = z.object({
   }
 });
 
-export const BookCreationReviewDraftSchema = z.object({
-  title: z.string().min(1),
-  genre: z.string().min(1),
-  platform: z.string().min(1),
-  language: z.enum(["zh", "en"]).optional(),
-  targetChapters: z.number().int().min(1),
-  chapterWordCount: z.number().int().min(1),
-});
-
 export const BookCreationPageDraftSchemaMap = {
   intro: BookCreationIntroPageDraftSchema,
   world: BookCreationWorldPageDraftSchema,
@@ -288,7 +279,6 @@ export const BookCreationPageDraftSchemaMap = {
   characters: BookCreationCharactersPageDraftSchema,
   arc: BookCreationArcPageDraftSchema,
   relation: BookCreationRelationPageDraftSchema,
-  review: BookCreationReviewDraftSchema,
 } as const;
 
 export interface BookCreationConsistencyResult {
@@ -335,15 +325,6 @@ function extractStepDraftPayload(
       return {
         relationshipMap: draft.relationshipMap,
       };
-    case "review":
-      return {
-        title: draft.title,
-        genre: draft.genre,
-        platform: draft.platform,
-        language: draft.language,
-        targetChapters: draft.targetChapters,
-        chapterWordCount: draft.chapterWordCount,
-      };
   }
 }
 
@@ -364,7 +345,6 @@ const BOOK_CREATION_WIZARD_ORDER: ReadonlyArray<BookCreationWizardStep> = [
   "characters",
   "arc",
   "relation",
-  "review",
 ];
 
 function uniqueWizardSteps(steps: ReadonlyArray<BookCreationWizardStep>): BookCreationWizardStep[] {
@@ -531,23 +511,16 @@ export function inferCreationWizardState(
   if (draft.protagonist || draft.supportingCast) completedSteps.push("characters");
   if (draft.characterArc || draft.characterMatrix) completedSteps.push("arc");
   if (draft.relationshipMap) completedSteps.push("relation");
-  if (draft.readyToCreate || completedSteps.length === BOOK_CREATION_WIZARD_ORDER.length - 1) {
-    completedSteps.push("review");
-  }
 
   const completed = uniqueWizardSteps([...(existing?.completedSteps ?? []), ...completedSteps]);
   const currentStep = existing?.currentStep && BOOK_CREATION_WIZARD_ORDER.includes(existing.currentStep)
     ? existing.currentStep
-    : BOOK_CREATION_WIZARD_ORDER.find((step) => !completed.includes(step)) ?? "review";
-  const stepNotes: Record<string, string> = {
-    ...(existing?.stepNotes ?? {}),
-    intro: draft.nextQuestion ?? existing?.stepNotes?.intro ?? "",
-  };
+    : BOOK_CREATION_WIZARD_ORDER.find((step) => !completed.includes(step)) ?? "relation";
 
   return {
     currentStep,
     completedSteps: completed,
-    stepNotes,
+    stepNotes: existing?.stepNotes ?? {},
     updatedAt: Date.now(),
   };
 }
@@ -563,7 +536,7 @@ export function advanceCreationWizardState(
   };
   const step = resolveWizardStepOrDefault(currentStep ?? wizard.currentStep);
   const stepIndex = BOOK_CREATION_WIZARD_ORDER.indexOf(step);
-  const nextStep = BOOK_CREATION_WIZARD_ORDER[stepIndex + 1] ?? "review";
+  const nextStep = BOOK_CREATION_WIZARD_ORDER[stepIndex + 1] ?? "relation";
   return {
     currentStep: nextStep,
     completedSteps: uniqueWizardSteps([...(wizard.completedSteps ?? []), step]),
@@ -632,14 +605,6 @@ export function validateCreationDraftConsistency(
     })],
     ["relation", BookCreationRelationPageDraftSchema.safeParse({
       relationshipMap: draft.relationshipMap,
-    })],
-    ["review", BookCreationReviewDraftSchema.safeParse({
-      title: draft.title ?? "",
-      genre: draft.genre ?? "",
-      platform: draft.platform ?? "",
-      language: draft.language,
-      targetChapters: draft.targetChapters ?? 0,
-      chapterWordCount: draft.chapterWordCount ?? 0,
     })],
   ] as const;
 

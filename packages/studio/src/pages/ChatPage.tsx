@@ -3,6 +3,7 @@ import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import type { SSEMessage } from "../hooks/use-sse";
 import { useApi } from "../hooks/use-api";
+import { usePersistedModelSelection } from "../hooks/use-persisted-model-selection";
 import { dispatchWriteNextInstruction } from "../utils/write-next";
 import { chatSelectors, useChatStore } from "../store/chat";
 import { useServiceStore } from "../store/service";
@@ -30,6 +31,8 @@ import {
   filterModelGroups,
   resolveAssistantPreview,
   resolveModelSelection,
+  resolvePersistedModelSelection,
+  type PersistedModelSelection,
 } from "./chat-page-state";
 
 // -- Types --
@@ -99,6 +102,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
   const modelsByService = useServiceStore((s) => s.modelsByService);
   const fetchServices = useServiceStore((s) => s.fetchServices);
   const fetchModels = useServiceStore((s) => s.fetchModels);
+  const { persistedSelection, ready: persistedSelectionReady } = usePersistedModelSelection();
 
   useEffect(() => { void fetchServices(); }, [fetchServices]);
   useEffect(() => {
@@ -106,7 +110,6 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
       if (svc.connected) void fetchModels(svc.service);
     }
   }, [services, fetchModels]);
-
   const modelPickerStatus = useMemo(() => {
     if (servicesLoading || services.length === 0) return "loading" as const;
     const connected = services.filter((s) => s.connected);
@@ -124,12 +127,18 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
 
   // Ensure selected model is always valid for current grouped models.
   useEffect(() => {
+    if (!persistedSelectionReady) return;
+    const resolvedFromConfig = resolvePersistedModelSelection(groupedModels, persistedSelection);
+    if (resolvedFromConfig && (resolvedFromConfig.model !== selectedModel || resolvedFromConfig.service !== selectedService)) {
+      setSelectedModel(resolvedFromConfig.model, resolvedFromConfig.service, { persist: false });
+      return;
+    }
     const resolved = resolveModelSelection(groupedModels, selectedModel, selectedService);
     if (!resolved) return;
     if (resolved.model !== selectedModel || resolved.service !== selectedService) {
-      setSelectedModel(resolved.model, resolved.service);
+      setSelectedModel(resolved.model, resolved.service, { persist: false });
     }
-  }, [groupedModels, selectedModel, selectedService, setSelectedModel]);
+  }, [groupedModels, persistedSelection, persistedSelectionReady, selectedModel, selectedService, setSelectedModel]);
 
   // Auto-resize textarea
   useEffect(() => {

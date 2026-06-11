@@ -64,9 +64,24 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
     return ["/api/v1/books", `/api/v1/books/${chapterAction[1]}`];
   }
 
+  const wizardCompleteAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/wizard\/complete$/);
+  if (wizardCompleteAction) {
+    return ["/api/v1/books", `/api/v1/books/${wizardCompleteAction[1]}`];
+  }
+
   const taskAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/tasks(?:\/[^/]+(?:\/stop)?)?$/);
   if (taskAction) {
     return ["/api/v1/books", `/api/v1/books/${taskAction[1]}`, `/api/v1/books/${taskAction[1]}/tasks`, "/api/v1/tasks"];
+  }
+
+  const checklistAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/task-checklist$/);
+  if (checklistAction) {
+    return ["/api/v1/books", `/api/v1/books/${checklistAction[1]}`, `/api/v1/books/${checklistAction[1]}/task-checklist`];
+  }
+
+  const scriptWorkspaceAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/script-workspace(?:\/generate)?$/);
+  if (scriptWorkspaceAction) {
+    return ["/api/v1/books", `/api/v1/books/${scriptWorkspaceAction[1]}`, `/api/v1/books/${scriptWorkspaceAction[1]}/script-workspace`];
   }
 
   const globalTaskAction = normalized.match(/^\/api\/v1\/tasks(?:\/[^/]+\/[^/]+(?:\/(stop|resume|retry))?)?$/);

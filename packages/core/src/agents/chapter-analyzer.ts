@@ -13,6 +13,7 @@ import { filterEmotionalArcs, filterSubplots } from "../utils/context-filter.js"
 import { countChapterLength, resolveLengthCountingMode } from "../utils/length-metrics.js";
 import { retrieveMemorySelection } from "../utils/memory-retrieval.js";
 import { readBrief } from "./planner-context.js";
+import { readStoryFrame, readVolumeMap } from "../utils/outline-paths.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -56,8 +57,8 @@ export class ChapterAnalyzerAgent extends BaseAgent {
       this.readFileOrDefault(join(bookDir, "story/subplot_board.md"), resolvedLanguage),
       this.readFileOrDefault(join(bookDir, "story/emotional_arcs.md"), resolvedLanguage),
       this.readFileOrDefault(join(bookDir, "story/character_matrix.md"), resolvedLanguage),
-      this.readFileOrDefault(join(bookDir, "story/story_bible.md"), resolvedLanguage),
-      this.readFileOrDefault(join(bookDir, "story/volume_outline.md"), resolvedLanguage),
+      readStoryFrame(bookDir, ""),
+      readVolumeMap(bookDir, ""),
     ]);
     const foundationBrief = await readBrief(join(bookDir, "story"));
     const parsedBookRules = await readBookRules(bookDir);

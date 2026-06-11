@@ -36,11 +36,7 @@ export async function readPendingHooks(storyDir: string): Promise<string> {
 }
 
 export async function readBrief(storyDir: string): Promise<string> {
-  const foundationBrief = await readOrEmpty(join(storyDir, "foundation_brief.md"));
-  if (foundationBrief.trim()) {
-    return foundationBrief;
-  }
-  return readOrEmpty(join(storyDir, "brief.md"));
+  return readOrEmpty(join(storyDir, "foundation_brief.md"));
 }
 
 /**

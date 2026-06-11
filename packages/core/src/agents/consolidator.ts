@@ -1,6 +1,7 @@
 import { BaseAgent } from "./base.js";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { readVolumeMap } from "../utils/outline-paths.js";
 
 export interface ConsolidationResult {
   readonly volumeSummaries: string;
@@ -26,12 +27,11 @@ export class ConsolidatorAgent extends BaseAgent {
   async consolidate(bookDir: string): Promise<ConsolidationResult> {
     const storyDir = join(bookDir, "story");
     const summariesPath = join(storyDir, "chapter_summaries.md");
-    const outlinePath = join(storyDir, "volume_outline.md");
     const volumeSummariesPath = join(storyDir, "volume_summaries.md");
 
     const [summariesRaw, outlineRaw] = await Promise.all([
       readFile(summariesPath, "utf-8").catch(() => ""),
-      readFile(outlinePath, "utf-8").catch(() => ""),
+      readVolumeMap(bookDir, ""),
     ]);
 
     if (!summariesRaw || !outlineRaw) {

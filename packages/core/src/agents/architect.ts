@@ -19,6 +19,18 @@ export class ArchitectAgent extends BaseAgent {
     return "architect";
   }
 
+  private buildInitialCharacterArcMarkdown(language: "zh" | "en"): string {
+    return language === "en"
+      ? "# Character Arc\n\n## Core Arc\n\n## Start State\n\n## Turning Point\n\n## End State\n"
+      : "# 人物弧光\n\n## 核心弧线\n\n## 起点状态\n\n## 转折点\n\n## 终点状态\n";
+  }
+
+  private buildInitialRelationshipMapMarkdown(language: "zh" | "en"): string {
+    return language === "en"
+      ? "# Relationship Map\n\n## Core Relations\n\n## Conflict Drivers\n\n## Change Directions\n"
+      : "# 人物关系\n\n## 核心关系\n\n## 冲突驱动\n\n## 变化方向\n";
+  }
+
   async generateFoundation(
     book: BookConfig,
     externalContext?: string,
@@ -255,14 +267,14 @@ ${genreBody}
 === SECTION: story_bible ===
 ${storyBiblePrompt}
 
+=== SECTION: current_state ===
+${currentStatePrompt}
+
 === SECTION: volume_outline ===
 ${volumeOutlinePrompt}
 
 === SECTION: book_rules ===
 ${bookRulesPrompt}
-
-=== SECTION: current_state ===
-${currentStatePrompt}
 
 === SECTION: pending_hooks ===
 ${pendingHooksPrompt}
@@ -281,7 +293,7 @@ ${finalRequirementsPrompt}`;
       { role: "user", content: userMessage },
     ], { temperature: 0.8, maxTokens: 16384 });
 
-    return this.parseSections(response.content);
+    return this.parseSections(response.content, book.language ?? "zh");
   }
 
   async writeFoundationFiles(
@@ -291,10 +303,15 @@ ${finalRequirementsPrompt}`;
     language: "zh" | "en" = "zh",
   ): Promise<void> {
     const storyDir = join(bookDir, "story");
+    const outlineDir = join(storyDir, "outline");
+    const wizardDir = join(bookDir, "wizard");
     await mkdir(storyDir, { recursive: true });
+    await mkdir(outlineDir, { recursive: true });
+    await mkdir(wizardDir, { recursive: true });
 
     const writes: Array<Promise<void>> = [
       writeFile(join(storyDir, "story_bible.md"), output.storyBible, "utf-8"),
+      writeFile(join(outlineDir, "volume_map.md"), output.volumeOutline, "utf-8"),
       writeFile(join(storyDir, "volume_outline.md"), output.volumeOutline, "utf-8"),
       writeFile(join(storyDir, "book_rules.md"), output.bookRules, "utf-8"),
       writeFile(join(storyDir, "current_state.md"), output.currentState, "utf-8"),
@@ -313,7 +330,7 @@ ${finalRequirementsPrompt}`;
       );
     }
 
-    // Initialize new truth files and keep legacy-compatible aliases.
+    // Initialize truth files. Wizard-specific artifacts live only under wizard/.
     writes.push(
       writeFile(
         join(storyDir, "novel_outline.md"),
@@ -323,17 +340,13 @@ ${finalRequirementsPrompt}`;
         "utf-8",
       ),
       writeFile(
-        join(storyDir, "character_arc.md"),
-        language === "en"
-          ? "# Character Arc\n\n## Core Arc\n\n## Start State\n\n## Turning Point\n\n## End State\n"
-          : "# 人物弧光\n\n## 核心弧线\n\n## 起点状态\n\n## 转折点\n\n## 终点状态\n",
+        join(wizardDir, "character_arc.md"),
+        this.buildInitialCharacterArcMarkdown(language),
         "utf-8",
       ),
       writeFile(
-        join(storyDir, "relationship_map.md"),
-        language === "en"
-          ? "# Relationship Map\n\n## Core Relations\n\n## Conflict Drivers\n\n## Change Directions\n"
-          : "# 人物关系\n\n## 核心关系\n\n## 冲突驱动\n\n## 变化方向\n",
+        join(wizardDir, "relationship_map.md"),
+        this.buildInitialRelationshipMapMarkdown(language),
         "utf-8",
       ),
       writeFile(
@@ -636,14 +649,14 @@ Generate the following sections. Separate every section with === SECTION: <name>
 === SECTION: story_bible ===
 ${storyBiblePrompt}
 
+=== SECTION: current_state ===
+${currentStatePrompt}
+
 === SECTION: volume_outline ===
 ${volumeOutlinePrompt}
 
 === SECTION: book_rules ===
 ${bookRulesPrompt}
-
-=== SECTION: current_state ===
-${currentStatePrompt}
 
 === SECTION: pending_hooks ===
 ${pendingHooksPrompt}
@@ -699,7 +712,7 @@ ${keyPrinciplesPrompt}`;
       },
     ], { temperature: 0.5, maxTokens: 16384 });
 
-    return this.parseSections(response.content);
+    return this.parseSections(response.content, book.language ?? gp.language);
   }
 
   async generateFanficFoundation(
@@ -752,6 +765,9 @@ ${genreBody}
 === SECTION: story_bible ===
 世界观（基于原作正典）+ 角色列表（原作角色标注来源，原创角色标注"原创"）
 
+=== SECTION: current_state ===
+初始状态卡（基于正典起始点）
+
 === SECTION: volume_outline ===
 卷纲规划。每卷标注：卷名、章节范围、核心事件（标注原作/原创）、关系发展节点
 
@@ -774,9 +790,6 @@ prohibitions:
 (叙事视角和风格指导)
 \`\`\`
 
-=== SECTION: current_state ===
-初始状态卡（基于正典起始点）
-
 === SECTION: pending_hooks ===
 初始伏笔池（从正典关键事件和关系中提取）`;
 
@@ -788,7 +801,7 @@ prohibitions:
       },
     ], { temperature: 0.7, maxTokens: 16384 });
 
-    return this.parseSections(response.content);
+    return this.parseSections(response.content, book.language ?? "zh");
   }
 
   private buildReviewFeedbackBlock(
@@ -811,7 +824,7 @@ ${trimmed}\n`;
 ${trimmed}\n`;
   }
 
-  private parseSections(content: string): ArchitectOutput {
+  private parseSections(content: string, language: "zh" | "en"): ArchitectOutput {
     const parsedSections = new Map<string, string>();
     const sectionPattern = /^\s*===\s*SECTION\s*[：:]\s*([^\n=]+?)\s*===\s*$/gim;
     const matches = [...content.matchAll(sectionPattern)];
@@ -828,6 +841,9 @@ ${trimmed}\n`;
     const extract = (name: string): string => {
       const section = parsedSections.get(this.normalizeSectionName(name));
       if (!section) {
+        if (name === "current_state") {
+          return this.buildFallbackCurrentState(language);
+        }
         throw new Error(`Architect output missing required section: ${name}`);
       }
       if (name !== "pending_hooks") {
@@ -843,6 +859,12 @@ ${trimmed}\n`;
       currentState: extract("current_state"),
       pendingHooks: extract("pending_hooks"),
     };
+  }
+
+  private buildFallbackCurrentState(language: "zh" | "en"): string {
+    return language === "en"
+      ? `# Current State\n\n| Field | Value |\n| --- | --- |\n| Current Chapter | 0 |\n| Current Location | (starting location) |\n| Protagonist State | (initial condition) |\n| Current Goal | (first goal) |\n| Current Constraint | (initial constraint) |\n| Current Alliances | (initial relationships) |\n| Current Conflict | (first conflict) |`
+      : `# 当前状态\n\n| 字段 | 值 |\n|------|-----|\n| 当前章节 | 0 |\n| 当前位置 | (起始地点) |\n| 主角状态 | (初始状态) |\n| 当前目标 | (第一个目标) |\n| 当前限制 | (初始限制) |\n| 当前敌我 | (初始关系) |\n| 当前冲突 | (第一个冲突) |`;
   }
 
   private normalizeSectionName(name: string): string {

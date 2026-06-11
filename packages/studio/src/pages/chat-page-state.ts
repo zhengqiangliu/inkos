@@ -9,6 +9,11 @@ export interface ChatPageModelGroup {
   readonly models: ReadonlyArray<ChatPageModelInfo>;
 }
 
+export interface PersistedModelSelection {
+  readonly service: string | null;
+  readonly defaultModel: string | null;
+}
+
 export interface AssistantPreviewState {
   readonly shouldShowPreview: boolean;
   readonly previewLabel: string;
@@ -65,6 +70,21 @@ export function resolveModelSelection(
   const first = groupedModels[0];
   if (!first || first.models.length === 0) return null;
   return { model: first.models[0]!.id, service: first.service };
+}
+
+export function resolvePersistedModelSelection(
+  groupedModels: ReadonlyArray<ChatPageModelGroup>,
+  persisted: PersistedModelSelection | null | undefined,
+): { model: string; service: string } | null {
+  if (!persisted) return null;
+  const persistedModel = persisted.defaultModel?.trim() ?? "";
+  const persistedService = persisted.service?.trim() ?? "";
+  if (!persistedModel || !persistedService) return null;
+  const group = groupedModels.find((item) => item.service === persistedService);
+  if (!group) return null;
+  const matched = group.models.find((model) => model.id === persistedModel);
+  if (!matched) return null;
+  return { model: matched.id, service: group.service };
 }
 
 export function resolveAssistantPreview(args: {

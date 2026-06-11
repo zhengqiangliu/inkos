@@ -42,6 +42,58 @@ describe("StateManager", () => {
       expect(loaded).toEqual(bookConfig);
     });
 
+    it("marks a book as ready without changing its core metadata", async () => {
+      await manager.saveBookConfig("test-book", bookConfig);
+      const ready = await manager.markBookReady("test-book");
+      expect(ready).toMatchObject({
+        id: "test-book",
+        title: "Test Novel",
+        creationState: "ready",
+      });
+      const loaded = await manager.loadBookConfig("test-book");
+      expect(loaded.creationState).toBe("ready");
+      expect(loaded.title).toBe("Test Novel");
+    });
+
+    it("promotes wizard draft files into story files when a book becomes ready", async () => {
+      const bookId = "test-book";
+      const bookDir = manager.bookDir(bookId);
+      await mkdir(join(bookDir, "wizard"), { recursive: true });
+      await manager.saveBookConfig(bookId, {
+        ...bookConfig,
+        id: bookId,
+        creationState: "wizard",
+      });
+      await writeFile(join(bookDir, "wizard", "volume.md"), "# 卷纲规划\n\n总章数 20 章", "utf-8");
+      await writeFile(join(bookDir, "wizard", "world.md"), "# 世界观\n\n## 世界观\n设定", "utf-8");
+
+      const ready = await manager.markBookReady(bookId);
+      expect(ready.creationState).toBe("ready");
+      await expect(readFile(join(bookDir, "story", "outline", "volume_map.md"), "utf-8")).resolves.toContain("总章数 20 章");
+      await expect(readFile(join(bookDir, "story", "story_bible.md"), "utf-8")).resolves.toContain("设定");
+      await expect(readFile(join(bookDir, "story", "outline", "story_frame.md"), "utf-8")).resolves.toContain("设定");
+      await expect(readFile(join(bookDir, "story", "book_rules.md"), "utf-8")).resolves.toContain("# 叙事规则");
+      await expect(readFile(join(bookDir, "story", "book_rules.md"), "utf-8")).resolves.toContain("openingThreeChapters:");
+    });
+
+    it("repairs ready books that missed wizard promotion by backfilling canonical outline files", async () => {
+      const bookId = "test-book";
+      const bookDir = manager.bookDir(bookId);
+      await mkdir(join(bookDir, "wizard"), { recursive: true });
+      await manager.saveBookConfig(bookId, {
+        ...bookConfig,
+        id: bookId,
+        creationState: "ready",
+      });
+      await writeFile(join(bookDir, "wizard", "volume.md"), "# 卷纲规划\n\n总章数 20 章", "utf-8");
+      await writeFile(join(bookDir, "wizard", "world.md"), "# 世界观\n\n## 世界观\n设定", "utf-8");
+
+      const repaired = await manager.ensurePromotedWizardArtifacts(bookId);
+      expect(repaired).toBe(true);
+      await expect(readFile(join(bookDir, "story", "outline", "volume_map.md"), "utf-8")).resolves.toContain("总章数 20 章");
+      await expect(readFile(join(bookDir, "story", "outline", "story_frame.md"), "utf-8")).resolves.toContain("设定");
+    });
+
     it("creates the book directory on save", async () => {
       await manager.saveBookConfig("new-book", {
         ...bookConfig,
@@ -771,7 +823,7 @@ describe("StateManager", () => {
       expect(runtimeStat.isDirectory()).toBe(true);
     });
 
-    it("writes the foundation brief alongside the legacy brief alias", async () => {
+    it("writes the foundation brief as the single canonical brief file", async () => {
       await manager.ensureControlDocumentsAt(
         manager.bookDir("foundation-book"),
         "zh",
@@ -784,13 +836,8 @@ describe("StateManager", () => {
         join(storyDir, "foundation_brief.md"),
         "utf-8",
       );
-      const legacyBrief = await readFile(
-        join(storyDir, "brief.md"),
-        "utf-8",
-      );
 
       expect(foundationBrief).toContain("基础摘要");
-      expect(legacyBrief).toContain("基础摘要");
     });
 
     it("bootstraps and returns safe defaults for legacy books", async () => {

@@ -16,6 +16,7 @@ import {
   parsePositiveIntegerInput,
   parseIntroCandidateResponse,
   parseLatestIntroCandidates,
+  normalizeIntroCandidateMessageForDisplay,
   rankIntroCandidates,
   buildStepFocusCard,
   buildStepActionSections,
@@ -27,6 +28,7 @@ import {
   shouldSubmitChatOnKeyDown,
   waitForBookReady,
 } from "./BookCreate";
+import { buildIntroMarkdownDraft } from "./book-create-state";
 
 describe("pickValidValue", () => {
   it("keeps the current value when it is still available", () => {
@@ -130,9 +132,19 @@ describe("resolveInitialGenreSelection", () => {
       { id: "fantasy", name: "Fantasy", language: "en" },
     ];
 
-    expect(resolveInitialGenreSelection("", genres, "fantasy", "zh")).toBe("fantasy");
-    expect(resolveInitialGenreSelection("", genres, undefined, "en")).toBe("fantasy");
-    expect(resolveInitialGenreSelection("", genres, undefined, "zh")).toBe("urban");
+    expect(resolveInitialGenreSelection("", genres, "fantasy", undefined, undefined, "zh")).toBe("fantasy");
+    expect(resolveInitialGenreSelection("", genres, undefined, undefined, undefined, "en")).toBe("fantasy");
+    expect(resolveInitialGenreSelection("", genres, undefined, undefined, undefined, "zh")).toBe("urban");
+  });
+
+  it("matches genre alias and mapped genre id before falling back", () => {
+    const genres = [
+      { id: "urban", name: "都市", language: "zh" },
+      { id: "fantasy", name: "Fantasy", language: "en" },
+    ];
+
+    expect(resolveInitialGenreSelection("", genres, "not-matched", "都市", undefined, "zh")).toBe("urban");
+    expect(resolveInitialGenreSelection("", genres, "not-matched", undefined, "fantasy", "zh")).toBe("fantasy");
   });
 });
 
@@ -166,7 +178,6 @@ describe("buildCreationReviewChecklist", () => {
       "characters",
       "arc",
       "relation",
-      "review",
     ]);
     expect(checklist[0]?.done).toBe(true);
     expect(checklist[1]?.done).toBe(true);
@@ -190,16 +201,28 @@ describe("buildWizardValidationReports", () => {
     expect(reports.intro.done).toBe(true);
     expect(reports.world.done).toBe(false);
     expect(reports.world.issues.map((item: { key: string }) => item.key)).toContain("worldPremise");
-    expect(reports.review.done).toBe(true);
-
     const incomplete = buildWizardValidationReports({
       title: "夜港账本",
       genre: "urban",
       platform: "tomato",
     }, "zh");
 
-    expect(incomplete.review.done).toBe(false);
-    expect(incomplete.review.issues.map((item: { key: string }) => item.key)).toEqual(expect.arrayContaining(["targetChapters", "chapterWordCount"]));
+    expect(incomplete.relation.done).toBe(false);
+    expect(incomplete.relation.issues.map((item: { key: string }) => item.key)).toEqual(expect.arrayContaining(["relationshipMap"]));
+  });
+
+  it("blocks intro step when title is still missing", () => {
+    const reports = buildWizardValidationReports({
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 3000,
+      blurb: "港口账本牵出灰产链。",
+      storyBackground: "港城、账本、灰产。",
+    }, "zh");
+
+    expect(reports.intro.done).toBe(false);
+    expect(reports.intro.issues.map((item: { key: string }) => item.key)).toContain("title");
   });
 });
 
@@ -259,15 +282,9 @@ describe("buildConceptSplitSummary", () => {
 describe("buildChatGuide", () => {
   it("changes the right-side chat guidance by step", () => {
     const intro = buildChatGuide("intro", "zh");
-    const review = buildChatGuide("review", "zh");
-
     expect(intro.placeholder).toContain("卖点");
     expect(intro.examples).toContain("把一句话卖点改得更抓人。");
     expect(intro.advanceLabel).toBe("确认当前页并进入下一步");
-
-    expect(review.placeholder).toContain("书名");
-    expect(review.examples).toContain("先核对分项是否齐全，再完成创建。");
-    expect(review.advanceLabel).toBe("复核并完成创建");
   });
 });
 
@@ -291,14 +308,14 @@ describe("buildChatQuickTemplates", () => {
 });
 
 describe("buildChatActionLabels", () => {
-  it("keeps confirm actions explicit for intro and review", () => {
+  it("keeps confirm actions explicit for intro and relation", () => {
     const intro = buildChatActionLabels("intro", "世界观", "zh");
-    const review = buildChatActionLabels("review", undefined, "zh");
+    const relation = buildChatActionLabels("relation", undefined, "zh");
 
     expect(intro.advanceLabel).toBe("确认并进入 世界观");
     expect(intro.createLabel).toBe("完成创建");
-    expect(review.advanceLabel).toBe("复核并完成创建");
-    expect(review.createLabel).toBe("完成创建");
+    expect(relation.advanceLabel).toBe("完成创建");
+    expect(relation.createLabel).toBe("完成创建");
   });
 });
 
@@ -425,6 +442,29 @@ reason: 适合强悬念开局
 如果要我继续，我可以按 1/2/3 展开。
     `)).toHaveLength(3);
   });
+
+  it("merges multiple JSON segments into one candidate list", () => {
+    expect(parseIntroCandidateResponse(`
+\`\`\`json
+[{"title":"候选 A","blurb":"卖点 A","storyBackground":"背景 A"}]
+\`\`\`
+
+\`\`\`json
+[{"title":"候选 B","blurb":"卖点 B","storyBackground":"背景 B"}]
+\`\`\`
+    `)).toEqual([
+      {
+        title: "候选 A",
+        blurb: "卖点 A",
+        storyBackground: "背景 A",
+      },
+      {
+        title: "候选 B",
+        blurb: "卖点 B",
+        storyBackground: "背景 B",
+      },
+    ]);
+  });
 });
 
 describe("parseLatestIntroCandidates", () => {
@@ -441,6 +481,14 @@ describe("parseLatestIntroCandidates", () => {
     expect(candidates).toHaveLength(2);
     expect(candidates[0]?.title).toBe("A");
   });
+
+  it("ignores normal intro body text that is not candidate JSON", () => {
+    const candidates = parseLatestIntroCandidates([
+      { role: "assistant", content: "# 简介\n\n## 一句话卖点\n这是正文，不是候选池。" },
+    ]);
+
+    expect(candidates).toEqual([]);
+  });
 });
 
 describe("buildIntroCandidateBackfill", () => {
@@ -452,6 +500,32 @@ describe("buildIntroCandidateBackfill", () => {
       style: "都市悬疑",
       reason: "适合强悬念开局",
     })).toBe("简介/卖点：一句话卖点 A\n\n故事背景：故事背景 A");
+  });
+});
+
+describe("normalizeIntroCandidateMessageForDisplay", () => {
+  it("renders intro candidate payload as a json fenced block for dock display", () => {
+    const normalized = normalizeIntroCandidateMessageForDisplay(`[
+      {"title":"A","blurb":"a","storyBackground":"sa","style":"都市","reason":"强开局"}
+    ]`);
+    expect(normalized.startsWith("```json")).toBe(true);
+    expect(normalized).toContain("\"title\": \"A\"");
+    expect(normalized).toContain("\"storyBackground\": \"sa\"");
+  });
+
+  it("keeps raw content when message is not candidate json", () => {
+    const raw = "这是一段普通说明";
+    expect(normalizeIntroCandidateMessageForDisplay(raw)).toBe(raw);
+  });
+});
+
+describe("buildIntroMarkdownDraft", () => {
+  it("prefers stored intro markdown when present", () => {
+    expect(buildIntroMarkdownDraft({
+      draftFields: { introMarkdown: "# Intro\n\n## 一句话卖点\nA" },
+      blurb: "A",
+      storyBackground: "B",
+    }, "zh")).toBe("# Intro\n\n## 一句话卖点\nA");
   });
 });
 
@@ -505,16 +579,16 @@ describe("buildStepFocusCard", () => {
     expect(focus.missing.join(" ")).not.toContain("简介");
   });
 
-  it("surfaces review gaps when creation fields are missing", () => {
-    const focus = buildStepFocusCard("review", {
+  it("surfaces relation gaps when creation fields are missing", () => {
+    const focus = buildStepFocusCard("relation", {
       concept: "港风商战悬疑",
       title: "夜港账本",
       genre: "urban",
       readyToCreate: false,
-      missingFields: ["targetChapters"],
+      missingFields: ["relationshipMap"],
     }, "zh");
 
-    expect(focus.missing).toContain("目标章数");
+    expect(focus.missing).toContain("人物关系");
   });
 });
 
@@ -533,37 +607,37 @@ describe("buildStepShortcuts", () => {
     expect(shortcuts[0]?.value).toContain("候选池");
   });
 
-  it("adds stronger structural hints for world and review pages", () => {
+  it("adds stronger structural hints for world and relation pages", () => {
     const worldShortcuts = buildStepShortcuts("world", {
       title: "当前焦点：世界观",
       description: "定义规则、势力和边界。",
       highlights: [],
       missing: ["世界观"],
     }, "小说大纲", "zh");
-    const reviewShortcuts = buildStepShortcuts("review", {
-      title: "当前焦点：最终确认",
-      description: "这里只做核对和补缺口，确认无误后才创建书籍。",
-      highlights: ["书名：夜港账本"],
-      missing: ["目标章数"],
+    const relationShortcuts = buildStepShortcuts("relation", {
+      title: "当前焦点：人物关系",
+      description: "只做关系动力和变化方向收束。",
+      highlights: ["人物关系：主角 ↔ 配角"],
+      missing: ["人物关系"],
     }, undefined, "zh");
 
     expect(worldShortcuts[0]?.value).toContain("规则、势力、资源、边界");
-    expect(reviewShortcuts[0]?.value).toContain("书名、题材、章数、字数");
+    expect(relationShortcuts[0]?.value).toContain("当前页");
   });
 });
 
 describe("buildStepActionSections", () => {
   it("groups actions into explicit workbench sections", () => {
-    const sections = buildStepActionSections("review", {
-      title: "当前焦点：最终确认",
-      description: "这里只做核对和补缺口，确认无误后才创建书籍。",
-      highlights: ["书名：夜港账本"],
-      missing: ["目标章数"],
+    const sections = buildStepActionSections("relation", {
+      title: "当前焦点：人物关系",
+      description: "只做关系动力和变化方向收束。",
+      highlights: ["人物关系：主角 ↔ 配角"],
+      missing: ["人物关系"],
     }, undefined, "zh");
 
-    expect(sections.map((section) => section.title)).toEqual(["修订", "定稿"]);
+    expect(sections.map((section) => section.title)).toEqual(["操作"]);
     expect(sections[0]?.items.some((item) => item.kind === "revise")).toBe(true);
-    expect(sections[1]?.items.some((item) => item.kind === "create")).toBe(true);
+    expect(sections[0]?.items.some((item) => item.kind === "create")).toBe(true);
   });
 });
 
@@ -585,12 +659,12 @@ describe("buildStepRecommendedAction", () => {
     expect(action.shortcut.label).toContain("候选");
   });
 
-  it("prefers create on review when the draft is ready", () => {
+  it("prefers create on relation when the draft is ready", () => {
     const action = buildStepRecommendedAction({
-      step: "review",
+      step: "relation",
       focusCard: {
-        title: "当前焦点：最终确认",
-        description: "这里只做核对和补缺口，确认无误后才创建书籍。",
+        title: "当前焦点：人物关系",
+        description: "只做关系动力和变化方向收束。",
         highlights: ["书名：夜港账本"],
         missing: [],
       },
@@ -599,7 +673,7 @@ describe("buildStepRecommendedAction", () => {
     });
 
     expect(action.shortcut.kind).toBe("create");
-    expect(action.reason).toContain("创建");
+    expect(action.reason).toContain("主动作");
   });
 });
 

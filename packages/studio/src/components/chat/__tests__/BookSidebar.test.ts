@@ -2,6 +2,7 @@
 import {
   countChapterStatusBuckets,
   isSettingsConflictLog,
+  resolveArtifactEndpoint,
   resolveEventBookId,
 } from "../BookSidebar";
 
@@ -30,5 +31,14 @@ describe("BookSidebar tab helpers", () => {
     ]);
     expect(buckets.unpublished).toBe(1);
     expect(buckets.failed).toBe(3);
+  });
+
+  it("encodes nested truth artifact paths when building endpoints", () => {
+    expect(resolveArtifactEndpoint("demo-book", "story/outline/volume_map.md", "truth")).toBe(
+      "/books/demo-book/truth/story%2Foutline%2Fvolume_map.md",
+    );
+    expect(resolveArtifactEndpoint("demo-book", "volume.md", "wizard")).toBe(
+      "/books/demo-book/wizard-file/volume.md",
+    );
   });
 });

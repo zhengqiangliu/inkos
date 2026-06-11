@@ -119,6 +119,15 @@ export function routeNaturalLanguageIntent(
 ): InteractionRequest {
   const trimmed = input.trim();
   const bookId = context.activeBookId;
+  const readParam = (payload: string, key: string): string | undefined => {
+    const match = payload.match(new RegExp(`(?:^|\\s)${key}=([^\\s]+)`, "i"));
+    if (!match?.[1]) return undefined;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return match[1];
+    }
+  };
 
   if (/^(hi|hello|hey|你好|嗨|哈喽)$/i.test(trimmed)) {
     return {
@@ -174,7 +183,7 @@ export function routeNaturalLanguageIntent(
     }
   }
 
-  const saveCommand = trimmed.match(/^\/save(?:\s+(.+))?$/i);
+  const saveCommand = trimmed.match(/^\/save(?:\s+([\s\S]+))?$/i);
   if (saveCommand) {
     const payload = saveCommand[1]?.trim() ?? "";
     const stepMatch = payload.match(/(?:^|\s)step=([^\s]+)/i);
@@ -196,7 +205,37 @@ export function routeNaturalLanguageIntent(
     };
   }
 
-  const gotoCommand = trimmed.match(/^\/goto\s+(intro|world|outline|volume|characters|arc|relation|review)$/i);
+  const introCommand = trimmed.match(/^\/intro(?:\s+([\s\S]+))?$/i);
+  if (introCommand) {
+    const payload = introCommand[1]?.trim() ?? "";
+    return {
+      intent: "revise_book_intro",
+      ...(bookId ? { bookId } : {}),
+      instruction: trimmed,
+      revisionKind: (readParam(payload, "mode") as "generate" | "revise" | "polish" | undefined) ?? "generate",
+      ...(readParam(payload, "theme") ? { themeGenre: readParam(payload, "theme") } : {}),
+      ...(readParam(payload, "genre") ? { genre: readParam(payload, "genre") } : {}),
+      ...(readParam(payload, "genreName") ? { genreName: readParam(payload, "genreName") } : {}),
+      ...(readParam(payload, "genreAlias") ? { genreAlias: readParam(payload, "genreAlias") } : {}),
+      ...(readParam(payload, "genreSource") ? { genreSource: readParam(payload, "genreSource") as "builtin" | "project" | "custom" } : {}),
+      ...(readParam(payload, "title") ? { title: readParam(payload, "title") } : {}),
+      ...(readParam(payload, "platform") ? { platform: readParam(payload, "platform") } : {}),
+      ...(readParam(payload, "blurb") ? { blurb: readParam(payload, "blurb") } : {}),
+      ...(readParam(payload, "storyBackground") ? { storyBackground: readParam(payload, "storyBackground") } : {}),
+    };
+  }
+
+  const introCandidatesCommand = trimmed.match(/^\/intro-candidates(?:\s+([\s\S]+))?$/i);
+  if (introCandidatesCommand) {
+    const payload = introCandidatesCommand[1]?.trim() ?? "";
+    return {
+      intent: "chat",
+      ...(bookId ? { bookId } : {}),
+      instruction: payload || trimmed,
+    };
+  }
+
+  const gotoCommand = trimmed.match(/^\/goto\s+(intro|world|outline|volume|characters|arc|relation)$/i);
   if (gotoCommand) {
     return {
       intent: "goto_book_wizard",

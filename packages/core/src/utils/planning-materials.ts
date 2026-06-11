@@ -94,7 +94,6 @@ export async function loadPlanningSeedMaterials(params: {
     bookRules: join(storyDir, "book_rules.md"),
     currentState: join(storyDir, "current_state.md"),
     foundationBrief: join(storyDir, "foundation_brief.md"),
-    brief: join(storyDir, "brief.md"),
   } as const;
 
   // Phase 5: prefer the new prose outline files (outline/story_frame.md +
@@ -111,7 +110,6 @@ export async function loadPlanningSeedMaterials(params: {
     currentState,
     previousEndingExcerpt,
     foundationBrief,
-    brief,
   ] = await Promise.all([
     readFileOrDefault(sourcePaths.authorIntent),
     readFileOrDefault(sourcePaths.currentFocus),
@@ -124,7 +122,6 @@ export async function loadPlanningSeedMaterials(params: {
     readCurrentStateWithFallback(params.bookDir, placeholder),
     readPreviousEndingExcerpt(params.bookDir, params.chapterNumber),
     readBriefFile(sourcePaths.foundationBrief),
-    readBriefFile(sourcePaths.brief),
   ]);
 
   const chapterSummaries = parseChapterSummariesMarkdown(chapterSummariesRaw)
@@ -140,7 +137,7 @@ export async function loadPlanningSeedMaterials(params: {
     bookRulesRaw,
     currentState,
     chapterSummariesRaw,
-    brief: foundationBrief.trim() ? foundationBrief : brief,
+    brief: foundationBrief,
     recentSummaries: chapterSummaries.slice(0, 4).sort((left, right) => left.chapter - right.chapter),
     previousEndingHook: chapterSummaries[0]?.hookActivity || undefined,
     previousEndingExcerpt,

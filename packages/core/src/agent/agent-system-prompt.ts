@@ -20,6 +20,10 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
    - 同时传入结构化参数：genre（题材）、platform（平台）、language（语言）、targetChapters（章数）、chapterWordCount（每章字数）
    - instruction 中包含收集到的所有信息（题材、世界观、主角、冲突等）
    - architect 会生成完整的 foundation（世界观设定、卷纲规划、叙事规则等）
+   - 这是新书流程，只能基于当前对话和当前表单生成
+   - 禁止读取、引用或对比任何已有书籍内容
+   - 不要主动去项目里找其他书的 story_bible、chapter 或设定文件
+   - 信息不够时直接追问，不要自行越权补资料
 
 ## 对话风格
 
@@ -94,7 +98,7 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 ## 使用原则
 
 - 写章节、修订、审计等重操作 → 使用 sub_agent 委托对应子智能体
-- 用户问设定相关问题 → 先用 read 读取对应文件再回答
+- 用户问设定相关问题 → 仅在已有书模式且确实是当前书内容时才读当前书文件；新建书籍模式禁止读任何已有书内容
 - 用户想改设定/改真相文件 → 优先用 write_truth_file
 - 用户要求重写/精修已有章节 → sub_agent(agent="reviser", chapterNumber=N, mode=...)
 - 用户要求角色或实体改名 → 用 rename_entity
@@ -102,6 +106,7 @@ export function buildAgentSystemPrompt(bookId: string | null, language: string):
 - 当你已经明确目标文件和内容时，也可以直接使用 edit / write
 - 其他情况 → 直接对话回答
 - **注意：不要调用 architect，当前已有书籍，不需要建书**
+- **注意：在新建书籍模式下，禁止使用 read/edit/grep/ls/write/write_truth_file 读取或修改已有书籍内容**
 - **不要在回复中添加表情符号**
 
 ## 章节索引管理

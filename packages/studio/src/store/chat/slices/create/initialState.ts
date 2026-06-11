@@ -5,6 +5,7 @@ export const initialCreateState: CreateState = {
   createProgress: "",
   bookDataVersion: 0,
   sidebarView: "panel",
+  artifactSource: "truth",
   artifactFile: null,
   artifactChapter: null,
   artifactChapterMeta: null,

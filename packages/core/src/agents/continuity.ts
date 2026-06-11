@@ -11,6 +11,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
 import { readBrief } from "./planner-context.js";
+import { readStoryFrame, readVolumeMap } from "../utils/outline-paths.js";
 import { join } from "node:path";
 
 export interface AuditResult {
@@ -245,8 +246,8 @@ function buildDimensionNote(
         : "检查：章尾是否重新点燃好奇心，已经承诺的回收是否按伏笔自身节奏落地，压力是否得到释放，读者期待缺口是在持续累积还是在被满足。";
     case 33:
       return language === "en"
-        ? "Cross-check volume_outline: does this chapter match the planned beat for the current chapter range? Did it skip planned nodes or consume later nodes too early? Does actual pacing match the planned chapter span? If a beat planned for N chapters is consumed in 1-2 chapters -> critical."
-        : "对照 volume_outline：本章内容是否对应卷纲中当前章节范围的剧情节点？是否跳过了节点或提前消耗了后续节点？剧情推进速度是否与卷纲规划的章节跨度匹配？如果卷纲规划某段剧情跨N章但实际1-2章就讲完→critical";
+        ? "Cross-check volume_outline: does this chapter match the planned beat for the current chapter range? Did it skip planned nodes or consume later nodes too early? Does actual pacing match the planned chapter span? If a beat planned for N chapters is consumed in 1-2 chapters -> warning."
+        : "对照 volume_outline：本章内容是否对应卷纲中当前章节范围的剧情节点？是否跳过了节点或提前消耗了后续节点？剧情推进速度是否与卷纲规划的章节跨度匹配？如果卷纲规划某段剧情跨N章但实际1-2章就讲完→warning";
     case 34:
     case 35:
     case 36:
@@ -384,8 +385,15 @@ export class ContinuityAuditor extends BaseAgent {
       onThinkingEnd?: () => void;
     },
   ): Promise<AuditResult> {
-    const [diskCurrentState, diskLedger, diskHooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon, fanficCanon, volumeOutline] =
-      await Promise.all([
+    const genreId = genre ?? "other";
+    const [
+      [diskCurrentState, diskLedger, diskHooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon, fanficCanon, volumeOutline],
+      foundationBrief,
+      previousChapterRaw,
+      [{ profile: gp }, bookLanguage],
+      parsedRules,
+    ] = await Promise.all([
+      Promise.all([
         this.readFileSafe(join(bookDir, "story/current_state.md")),
         this.readFileSafe(join(bookDir, "story/particle_ledger.md")),
         this.readFileSafe(join(bookDir, "story/pending_hooks.md")),
@@ -396,26 +404,22 @@ export class ContinuityAuditor extends BaseAgent {
         this.readFileSafe(join(bookDir, "story/chapter_summaries.md")),
         this.readFileSafe(join(bookDir, "story/parent_canon.md")),
         this.readFileSafe(join(bookDir, "story/fanfic_canon.md")),
-        this.readFileSafe(join(bookDir, "story/volume_outline.md")),
-      ]);
-    const foundationBrief = await readBrief(join(bookDir, "story"));
+        readVolumeMap(bookDir, ""),
+      ]),
+      readBrief(join(bookDir, "story")),
+      this.loadPreviousChapter(bookDir, chapterNumber),
+      Promise.all([
+        readGenreProfile(this.ctx.projectRoot, genreId),
+        readBookLanguage(bookDir),
+      ]),
+      readBookRules(bookDir),
+    ]);
     const currentState = options?.truthFileOverrides?.currentState ?? diskCurrentState;
     const ledger = options?.truthFileOverrides?.ledger ?? diskLedger;
     const hooks = options?.truthFileOverrides?.hooks ?? diskHooks;
-
     const hasParentCanon = parentCanon !== "(文件不存在)";
     const hasFanficCanon = fanficCanon !== "(文件不存在)";
-
-    // Load last chapter full text for fine-grained continuity checking
-    const previousChapter = await this.loadPreviousChapter(bookDir, chapterNumber);
-
-    // Load genre profile and book rules
-    const genreId = genre ?? "other";
-    const [{ profile: gp }, bookLanguage] = await Promise.all([
-      readGenreProfile(this.ctx.projectRoot, genreId),
-      readBookLanguage(bookDir),
-    ]);
-    const parsedRules = await readBookRules(bookDir);
+    const previousChapter = previousChapterRaw ? extractChapterTail(previousChapterRaw, 600) : "";
     const bookRules = parsedRules?.rules ?? null;
 
     // Fallback: use book_rules body when style_guide.md doesn't exist
@@ -474,8 +478,18 @@ Output format MUST be JSON:
   "summary": "one-sentence audit conclusion"
 }
 
-passed is false ONLY when critical-severity issues exist.`
+passed is false ONLY when critical-severity issues exist.
+
+Severity guide:
+- critical: direct contradiction (location/time/character state conflict with established facts), information boundary violation, a character acts with knowledge they cannot have, hook_id declared recovered but still pending, outline node skipped entirely.
+- warning: pattern problem fixable by revision (subplot dormant ≥3 chapters, arc flat ≥3 chapters, chapter transition awkward but not contradictory, pacing consumed faster than outline span, chapter ends with no hook renewal).
+- info: style suggestion, minor word-choice issue, or note that does not block passing.`
       : `你是一位严格的${gp.name}网络小说审稿编辑。你的任务是对章节进行连续性、一致性和质量审查。${protagonistBlock}${searchNote}
+
+严重程度判定标准：
+- critical：直接矛盾（地点/时间/角色状态与已有事实冲突）、信息越界（角色知道其不该知道的信息）、伏笔账本标记已回收但实际未回收、大纲节点被整体跳过。
+- warning：可通过修订修复的模式性问题（支线连续≥3章无推进、角色弧线连续≥3章无变化、章节衔接跳跃但无矛盾、推进速度明显快于卷纲规划跨度、章尾无钩子续接）。
+- info：文风建议、轻微用词问题、不影响通过的提示。
 
 审查维度：
 ${dimList}
@@ -586,8 +600,8 @@ ${dimList}
 
     const prevChapterBlock = previousChapter
       ? isEnglish
-        ? `\n## Previous Chapter Full Text (for transition checks)\n${previousChapter}\n`
-        : `\n## 上一章全文（用于衔接检查）\n${previousChapter}\n`
+        ? `\n## Previous Chapter Tail (for transition checks)\n${previousChapter}\n`
+        : `\n## 上一章结尾（用于衔接检查）\n${previousChapter}\n`
       : "";
 
     const deltaAuditBlock = options?.previousAuditIssues && options.previousAuditIssues.length > 0

@@ -36,7 +36,18 @@
       "Bash(node_modules/.bin/tsc --noEmit --pretty)",
       "Bash(npm ls *)",
       "Bash(npm run *)",
-      "Bash(Select-Object -First 50)"
+      "Bash(Select-Object -First 50)",
+      "Bash(cd /d F:\\\\InkOSv2\\\\MyInkos)",
+      "Bash(npx jest *)",
+      "PowerShell(\\(Get-Content \"F:\\\\InkOSv2\\\\MyInkos\\\\packages\\\\core\\\\src\\\\agents\\\\continuity.ts\" | Measure-Object -Line\\).Lines; \\(Get-Content \"F:\\\\InkOSv2\\\\MyInkos\\\\packages\\\\core\\\\src\\\\agents\\\\writer.ts\" | Measure-Object -Line\\).Lines; \\(Get-Content \"F:\\\\InkOSv2\\\\MyInkos\\\\packages\\\\core\\\\src\\\\pipeline\\\\chapter-review-cycle.ts\" | Measure-Object -Line\\).Lines)",
+      "Bash(xargs grep -l \"auditDimensions\")",
+      "Bash(xargs grep -l \"auditDimensions.*\\\\[\")",
+      "Bash(xargs grep -l \"readGenreProfile\")",
+      "Bash(npm test *)",
+      "Bash(node_modules\\\\.bin\\\\tsc --noEmit -p packages/core/tsconfig.json)",
+      "Read(//mnt/f/InkOSv2/**)",
+      "Bash(./node_modules/.bin/tsc --noEmit -p packages/core/tsconfig.json)",
+      "Bash(python3 -c \"import sys,json; p=json.load\\(sys.stdin\\); print\\('\\\\n'.join\\(f'{k}: {v}' for k,v in p.get\\('scripts',{}\\).items\\(\\)\\)\\)\")"
     ]
   }
 }

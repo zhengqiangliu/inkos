@@ -2,7 +2,191 @@ import { readFile, writeFile, mkdir, readdir, rm, stat, unlink, open } from "nod
 import { join } from "node:path";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
+import type { BookCreationWizardStep } from "../interaction/session.js";
 import { bootstrapStructuredStateFromMarkdown, resolveDurableStoryProgress } from "./state-bootstrap.js";
+
+const BOOK_CREATION_WIZARD_STEPS: ReadonlyArray<BookCreationWizardStep> = [
+  "intro",
+  "world",
+  "outline",
+  "volume",
+  "characters",
+  "arc",
+  "relation",
+];
+
+const WIZARD_STEP_FILE_NAMES: Readonly<Record<BookCreationWizardStep, string>> = {
+  intro: "intro.md",
+  world: "world.md",
+  outline: "outline.md",
+  volume: "volume.md",
+  characters: "characters.md",
+  arc: "character_arc.md",
+  relation: "relationship_map.md",
+};
+
+const LEGACY_WIZARD_STEP_FILE_NAMES: Readonly<Partial<Record<BookCreationWizardStep, string>>> = {
+  arc: "arc.md",
+};
+
+type WizardStepStatus = "empty" | "saved" | "dirty";
+
+interface WizardStepFileRecord {
+  readonly status: WizardStepStatus;
+  readonly version: number;
+  readonly updatedAt?: string;
+}
+
+interface WizardIndexFile {
+  readonly version: 1;
+  readonly bookShellCreated: boolean;
+  readonly currentStep: BookCreationWizardStep;
+  readonly updatedAt: string;
+  readonly steps: Record<BookCreationWizardStep, WizardStepFileRecord>;
+}
+
+interface PromotableWizardFile {
+  readonly step: BookCreationWizardStep;
+  readonly source: string;
+  readonly targets: ReadonlyArray<string>;
+}
+
+const PROMOTABLE_WIZARD_FILES: ReadonlyArray<PromotableWizardFile> = [
+  {
+    step: "intro",
+    source: "intro.md",
+    targets: ["story/foundation_brief.md"],
+  },
+  {
+    step: "world",
+    source: "world.md",
+    targets: ["story/outline/story_frame.md", "story/story_bible.md"],
+  },
+  {
+    step: "outline",
+    source: "outline.md",
+    targets: ["story/novel_outline.md"],
+  },
+  {
+    step: "volume",
+    source: "volume.md",
+    targets: ["story/outline/volume_map.md", "story/volume_outline.md"],
+  },
+  {
+    step: "characters",
+    source: "characters.md",
+    targets: ["story/character_matrix.md"],
+  },
+  {
+    step: "arc",
+    source: "character_arc.md",
+    targets: ["story/character_arc.md"],
+  },
+  {
+    step: "relation",
+    source: "relationship_map.md",
+    targets: ["story/relationship_map.md"],
+  },
+];
+
+function collapseWhitespace(raw: string): string {
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+function extractMarkdownSummary(raw: string, maxChars: number = 220): string {
+  const text = collapseWhitespace(
+    raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => !/^#{1,6}\s+/.test(line) && line !== "---")
+      .join(" "),
+  );
+  if (!text) return "";
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function buildDefaultBookRulesMarkdown(
+  book: BookConfig,
+  inputs: {
+    readonly outline: string;
+    readonly volume: string;
+    readonly characters: string;
+    readonly arc: string;
+    readonly relation: string;
+    readonly world: string;
+  },
+): string {
+  const isEn = book.language === "en";
+  const heading = isEn ? "# Book Rules" : "# 叙事规则";
+  const lead = isEn
+    ? "This file is auto-seeded from the wizard. Refine it after creation if needed."
+    : "本文件由建书向导自动生成，完成创建后可继续细化。";
+  const rules = isEn
+    ? [
+      "Stay aligned with the generated outline and volume map.",
+      "Do not introduce new setting conflicts during the creation phase.",
+      "Keep protagonist behavior and pacing consistent with the wizard draft.",
+    ]
+    : [
+      "严格遵守已生成的大纲与卷纲，不要在创建阶段随意偏航。",
+      "不要引入与既有设定冲突的新规则或新设定。",
+      "主角行为、章节节奏与向导草案保持一致。",
+    ];
+  const sources = [
+    { heading: isEn ? "## Novel Outline" : "## 小说大纲", value: extractMarkdownSummary(inputs.outline) },
+    { heading: isEn ? "## Volume Map" : "## 卷纲规划", value: extractMarkdownSummary(inputs.volume) },
+    { heading: isEn ? "## World Notes" : "## 世界观摘要", value: extractMarkdownSummary(inputs.world) },
+    { heading: isEn ? "## Characters" : "## 角色摘要", value: extractMarkdownSummary(inputs.characters) },
+    { heading: isEn ? "## Character Arc" : "## 人物弧光", value: extractMarkdownSummary(inputs.arc) },
+    { heading: isEn ? "## Relationship Map" : "## 人物关系", value: extractMarkdownSummary(inputs.relation) },
+  ].filter((entry) => entry.value.length > 0);
+
+  const lines = [
+    "---",
+    'version: "1.0"',
+    "genreLock:",
+    `  primary: ${JSON.stringify(book.genre)}`,
+    "  forbidden: []",
+    "dialogueQuotePolicy:",
+    "  mode: auto",
+    "  strict: false",
+    "  autoNormalize: false",
+    "openingThreeChapters:",
+    "  enabled: true",
+    "  applyInGovernedMode: true",
+    "  strict: true",
+    "  maxCharacters: 5",
+    "prohibitions:",
+    `  - ${JSON.stringify(rules[0] ?? "")}`,
+    `  - ${JSON.stringify(rules[1] ?? "")}`,
+    `  - ${JSON.stringify(rules[2] ?? "")}`,
+    "chapterTypesOverride: []",
+    "fatigueWordsOverride: []",
+    "additionalAuditDimensions: []",
+    "enableFullCastTracking: false",
+    "---",
+    "",
+    heading,
+    "",
+    lead,
+    "",
+    "## 项目摘要",
+    `- ${isEn ? "Title" : "书名"}：${book.title}`,
+    `- ${isEn ? "Genre" : "题材"}：${book.genre}`,
+    ...(typeof book.targetChapters === "number" ? [`- ${isEn ? "Target chapters" : "目标章数"}：${book.targetChapters}`] : []),
+    ...(typeof book.chapterWordCount === "number" ? [`- ${isEn ? "Words per chapter" : "每章字数"}：${book.chapterWordCount}`] : []),
+    "",
+    "## 规则说明",
+    ...rules.map((rule) => `- ${rule}`),
+    "",
+    "## 向导资料快照",
+    ...sources.flatMap((source) => [source.heading, "", source.value, ""]),
+  ];
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
 
 export class StateManager {
   /** Books actively being written by this process — used for same-process stale lock detection. */
@@ -58,7 +242,6 @@ export class StateManager {
     if (foundationBrief?.trim()) {
       const briefText = foundationBrief.trimEnd() + "\n";
       await this.writeIfMissing(join(storyDir, "foundation_brief.md"), briefText);
-      await this.writeIfMissing(join(storyDir, "brief.md"), briefText);
     }
   }
 
@@ -192,6 +375,51 @@ export class StateManager {
     await this.saveBookConfigAt(this.bookDir(bookId), config);
   }
 
+  async markBookReady(bookId: string): Promise<BookConfig> {
+    const book = await this.loadBookConfig(bookId);
+    await this.promoteWizardArtifacts(bookId);
+    const nextBook: BookConfig = {
+      ...book,
+      creationState: "ready",
+      updatedAt: new Date().toISOString(),
+    };
+    await this.saveBookConfig(bookId, nextBook);
+    return nextBook;
+  }
+
+  async ensurePromotedWizardArtifacts(bookId: string): Promise<boolean> {
+    const book = await this.loadBookConfig(bookId).catch(() => null);
+    if (!book || book.creationState !== "ready") {
+      return false;
+    }
+
+    const storyDir = join(this.bookDir(bookId), "story");
+    const outlineDir = join(storyDir, "outline");
+    const checks = [
+      join(outlineDir, "volume_map.md"),
+      join(outlineDir, "story_frame.md"),
+      join(storyDir, "story_bible.md"),
+      join(storyDir, "book_rules.md"),
+      join(storyDir, "character_matrix.md"),
+      join(storyDir, "character_arc.md"),
+      join(storyDir, "relationship_map.md"),
+    ];
+    const missing = await Promise.all(checks.map(async (path) => {
+      try {
+        const content = await readFile(path, "utf-8");
+        return !content.trim();
+      } catch {
+        return true;
+      }
+    }));
+    if (missing.every((item) => !item)) {
+      return false;
+    }
+
+    await this.promoteWizardArtifacts(bookId);
+    return true;
+  }
+
   async saveBookConfigAt(bookDir: string, config: BookConfig): Promise<void> {
     await mkdir(bookDir, { recursive: true });
     await writeFile(
@@ -199,6 +427,203 @@ export class StateManager {
       JSON.stringify(config, null, 2),
       "utf-8",
     );
+  }
+
+  async promoteWizardArtifacts(bookId: string): Promise<void> {
+    const bookDir = this.bookDir(bookId);
+    const storyDir = join(bookDir, "story");
+    const outlineDir = join(storyDir, "outline");
+    const wizardDir = this.wizardDir(bookId);
+    await mkdir(storyDir, { recursive: true });
+    await mkdir(outlineDir, { recursive: true });
+
+    for (const file of PROMOTABLE_WIZARD_FILES) {
+      const sourcePath = join(wizardDir, file.source);
+      const content = await readFile(sourcePath, "utf-8").catch(() => "");
+      if (!content.trim()) continue;
+      const normalized = content.trimEnd() + "\n";
+      await Promise.all(file.targets.map(async (target) => {
+        const targetPath = join(bookDir, target);
+        await mkdir(join(targetPath, ".."), { recursive: true }).catch(() => undefined);
+        await writeFile(targetPath, normalized, "utf-8");
+      }));
+    }
+
+    const existingRules = await readFile(join(storyDir, "book_rules.md"), "utf-8").catch(() => "");
+    if (!existingRules.trim()) {
+      const [book, world, outline, volume, characters, arc, relation] = await Promise.all([
+        this.loadBookConfig(bookId).catch(() => null),
+        readFile(join(wizardDir, "world.md"), "utf-8").catch(() => ""),
+        readFile(join(wizardDir, "outline.md"), "utf-8").catch(() => ""),
+        readFile(join(wizardDir, "volume.md"), "utf-8").catch(() => ""),
+        readFile(join(wizardDir, "characters.md"), "utf-8").catch(() => ""),
+        readFile(join(wizardDir, "character_arc.md"), "utf-8").catch(() => ""),
+        readFile(join(wizardDir, "relationship_map.md"), "utf-8").catch(() => ""),
+      ]);
+      if (book) {
+        await writeFile(
+          join(storyDir, "book_rules.md"),
+          buildDefaultBookRulesMarkdown(book, {
+            world,
+            outline,
+            volume,
+            characters,
+            arc,
+            relation,
+          }),
+          "utf-8",
+        );
+      }
+    }
+  }
+
+  private wizardDir(bookId: string): string {
+    return join(this.bookDir(bookId), "wizard");
+  }
+
+  private wizardIndexPath(bookId: string): string {
+    return join(this.wizardDir(bookId), "index.json");
+  }
+
+  private wizardStepPath(bookId: string, step: BookCreationWizardStep): string {
+    return join(this.wizardDir(bookId), WIZARD_STEP_FILE_NAMES[step]);
+  }
+
+  private legacyWizardStepPath(bookId: string, step: BookCreationWizardStep): string | null {
+    const legacyFileName = LEGACY_WIZARD_STEP_FILE_NAMES[step];
+    if (!legacyFileName) return null;
+    return join(this.wizardDir(bookId), legacyFileName);
+  }
+
+  private defaultWizardIndex(now = new Date().toISOString()): WizardIndexFile {
+    const steps = Object.fromEntries(
+      BOOK_CREATION_WIZARD_STEPS.map((step) => [step, { status: "empty" as const, version: 0, updatedAt: undefined }]),
+    ) as WizardIndexFile["steps"];
+    return {
+      version: 1,
+      bookShellCreated: false,
+      currentStep: "intro",
+      updatedAt: now,
+      steps,
+    };
+  }
+
+  async ensureBookWizardIndex(bookId: string): Promise<WizardIndexFile> {
+    const wizardDir = this.wizardDir(bookId);
+    await mkdir(wizardDir, { recursive: true });
+    const indexPath = this.wizardIndexPath(bookId);
+    try {
+      const raw = await readFile(indexPath, "utf-8");
+      const parsed = JSON.parse(raw) as Partial<WizardIndexFile>;
+      const defaults = this.defaultWizardIndex(parsed.updatedAt ?? new Date().toISOString());
+      const steps = { ...defaults.steps };
+      for (const step of BOOK_CREATION_WIZARD_STEPS) {
+        const record = parsed.steps?.[step];
+        if (!record) continue;
+        steps[step] = {
+          status: record.status === "empty" || record.status === "saved" || record.status === "dirty" ? record.status : "empty",
+          version: Number.isFinite(record.version) ? Math.max(0, Math.trunc(Number(record.version))) : 0,
+          ...(typeof record.updatedAt === "string" && record.updatedAt.trim() ? { updatedAt: record.updatedAt.trim() } : {}),
+        };
+      }
+      return {
+        ...defaults,
+        ...(parsed.version === 1 ? { version: 1 as const } : {}),
+        ...(typeof parsed.bookShellCreated === "boolean" ? { bookShellCreated: parsed.bookShellCreated } : {}),
+        ...(BOOK_CREATION_WIZARD_STEPS.includes(parsed.currentStep as BookCreationWizardStep)
+          ? { currentStep: parsed.currentStep as BookCreationWizardStep }
+          : {}),
+        updatedAt: typeof parsed.updatedAt === "string" && parsed.updatedAt.trim() ? parsed.updatedAt.trim() : defaults.updatedAt,
+        steps,
+      };
+    } catch {
+      const index = this.defaultWizardIndex();
+      await writeFile(indexPath, JSON.stringify(index, null, 2), "utf-8");
+      return index;
+    }
+  }
+
+  async loadBookWizardState(bookId: string): Promise<WizardIndexFile> {
+    return this.ensureBookWizardIndex(bookId);
+  }
+
+  async saveBookWizardState(bookId: string, state: WizardIndexFile): Promise<void> {
+    const wizardDir = this.wizardDir(bookId);
+    await mkdir(wizardDir, { recursive: true });
+    await writeFile(this.wizardIndexPath(bookId), JSON.stringify(state, null, 2), "utf-8");
+  }
+
+  async loadBookWizardStep(bookId: string, step: BookCreationWizardStep): Promise<{
+    readonly content: string;
+    readonly status: WizardStepStatus;
+    readonly version: number;
+    readonly updatedAt?: string;
+  }> {
+    const index = await this.ensureBookWizardIndex(bookId);
+    const record = index.steps[step];
+    const primaryPath = this.wizardStepPath(bookId, step);
+    const legacyPath = this.legacyWizardStepPath(bookId, step);
+    const content = await readFile(primaryPath, "utf-8").catch(async () => {
+      if (!legacyPath) return "";
+      return readFile(legacyPath, "utf-8").catch(() => "");
+    });
+    return {
+      content,
+      status: record?.status ?? "empty",
+      version: record?.version ?? 0,
+      ...(record?.updatedAt ? { updatedAt: record.updatedAt } : {}),
+    };
+  }
+
+  async saveBookWizardStep(bookId: string, step: BookCreationWizardStep, content: string, expectedVersion?: number): Promise<{
+    readonly version: number;
+    readonly updatedAt: string;
+  }> {
+    const now = new Date().toISOString();
+    const index = await this.ensureBookWizardIndex(bookId);
+    const record = index.steps[step] ?? { status: "empty" as const, version: 0 };
+    if (expectedVersion !== undefined && Number.isFinite(expectedVersion) && Math.trunc(expectedVersion) !== record.version) {
+      throw new Error(`Wizard step "${step}" version conflict for book "${bookId}"`);
+    }
+    await mkdir(this.wizardDir(bookId), { recursive: true });
+    const primaryPath = this.wizardStepPath(bookId, step);
+    const legacyPath = this.legacyWizardStepPath(bookId, step);
+    await writeFile(primaryPath, content.trimEnd() + "\n", "utf-8");
+    if (legacyPath) {
+      await unlink(legacyPath).catch(() => undefined);
+    }
+    const nextVersion = record.version + 1;
+    const nextIndex: WizardIndexFile = {
+      ...index,
+      currentStep: step,
+      bookShellCreated: true,
+      updatedAt: now,
+      steps: {
+        ...index.steps,
+        [step]: {
+          status: content.trim().length > 0 ? "saved" : "empty",
+          version: nextVersion,
+          updatedAt: now,
+        },
+      },
+    };
+    await this.saveBookWizardState(bookId, nextIndex);
+    return {
+      version: nextVersion,
+      updatedAt: now,
+    };
+  }
+
+  async markBookShellCreated(bookId: string): Promise<WizardIndexFile> {
+    const now = new Date().toISOString();
+    const index = await this.ensureBookWizardIndex(bookId);
+    const nextIndex: WizardIndexFile = {
+      ...index,
+      bookShellCreated: true,
+      updatedAt: now,
+    };
+    await this.saveBookWizardState(bookId, nextIndex);
+    return nextIndex;
   }
 
   async ensureRuntimeState(bookId: string, fallbackChapter = 0): Promise<void> {

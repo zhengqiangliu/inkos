@@ -27,12 +27,12 @@ interface TestState {
   bumpBookDataVersion: () => void;
 }
 
-function createState(): {
+function createState(initialSessions?: Record<string, SessionRuntime>): {
   get: () => TestState;
   set: (updater: ((state: TestState) => Partial<TestState>) | Partial<TestState>) => void;
 } {
   let state: TestState = {
-    sessions: {
+    sessions: initialSessions ?? {
       s1: createSessionRuntime({ sessionId: "s1", bookId: "book-1", title: "demo" }),
     },
     bumpBookDataVersion: () => undefined,
@@ -448,6 +448,32 @@ describe("attachSessionStreamListeners", () => {
       expect(tool.execution.previewText).toBeUndefined();
       expect(tool.execution.previewKind).toBeUndefined();
     }
+  });
+
+  it("keeps chapter:delta messages bound to the current wizard step", () => {
+    const eventSource = new MockEventSource();
+    const state = createState({
+      s1: createSessionRuntime({ sessionId: "s1", bookId: "book-1", title: "demo", currentWizardStep: "world" }),
+    });
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 40,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    eventSource.emit("chapter:delta", {
+      sessionId: "s1",
+      runId: "r1",
+      text: "世界观正文。",
+    });
+
+    const session = state.get().sessions.s1;
+    const last = session.messages[session.messages.length - 1];
+    expect(last?.wizardStep).toBe("world");
   });
 
   it("does not create fallback execution for chapter:delta when tool:start was missed", () => {

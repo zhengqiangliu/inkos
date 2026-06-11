@@ -68,6 +68,7 @@ export function resolveStoryPhase(
 
 export interface HookDebtBudget {
   readonly hardClearMode: boolean;
+  readonly highPressureMode: boolean;
   readonly reason: string;
   readonly maxRecoveryPerChapter: number;
   readonly maxNewHooks: number;
@@ -264,6 +265,7 @@ export function deriveHookDebtBudget(params: {
 
   return {
     hardClearMode,
+    highPressureMode,
     reason,
     maxRecoveryPerChapter,
     maxNewHooks,

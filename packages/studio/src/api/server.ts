@@ -42,6 +42,7 @@ import {
   GLOBAL_ENV_PATH,
   extractChapterLimitFromOutline,
   InteractionRequestSchema,
+  type BookCreationWizardStep,
   type AgentContext,
   type ResolvedModel,
   type PipelineConfig,
@@ -50,14 +51,62 @@ import {
   type LogEntry,
 } from "@actalk/inkos-core";
 import { access, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { spawn } from "node:child_process";
 import { isSafeBookId } from "./safety.js";
 import { ApiError } from "./errors.js";
 import { buildStudioBookConfig } from "./book-create.js";
 import { BookTaskController } from "./lib/book-task-controller.js";
 import { persistChapterAuditSummary } from "./lib/chapter-audit-index.js";
-import type { BookTask } from "../shared/contracts.js";
+import type {
+  AssetLibrary,
+  AssetLibraryDiffResult,
+  AssetGenerationStatus,
+  AssetLibraryGeneratePayload,
+  AssetLibraryHistoryEntry,
+  AssetLibraryHistoryResponse,
+  AssetLibraryItem,
+  AssetLibraryItemStatus,
+  AssetLibraryItemType,
+  AssetLibraryResponse,
+  AssetLibrarySavePayload,
+  AssetLibraryUploadPayload,
+  AssetLibraryUploadResponse,
+  BookTask,
+  DirectorPlan,
+  DirectorPlanDiffResult,
+  DirectorPlanEpisode,
+  DirectorPlanGeneratePayload,
+  DirectorPlanHistoryEntry,
+  DirectorPlanHistoryResponse,
+  DirectorPlanResponse,
+  DirectorPlanSavePayload,
+  ProductionDialogueType,
+  ProductionEpisode,
+  ProductionShot,
+  ProductionWorkspace,
+  ProductionWorkspaceGeneratePayload,
+  ProductionWorkspaceResponse,
+  ProductionWorkspaceSavePayload,
+  ScriptWorkspace,
+  ScriptWorkspaceConfig,
+  ScriptWorkspaceDiffResult,
+  ScriptWorkspaceEntity,
+  ScriptWorkspaceEpisode,
+  ScriptWorkspaceExtraction,
+  ScriptWorkspaceHistoryEntry,
+  ScriptWorkspaceHistoryResponse,
+  ScriptWorkspaceGeneratePayload,
+  ScriptWorkspaceGenerationStrategy,
+  ScriptWorkspaceResponse,
+  ScriptWorkspaceScene,
+  ScriptWorkspaceSegment,
+  ScriptWorkspaceSavePayload,
+  TaskChecklistItem,
+} from "../shared/contracts.js";
 import { countChapterLengthByLanguage } from "../utils/chapter-length.js";
+import { normalizeArtifactFile, resolveArtifactStoragePath } from "../utils/book-artifacts.js";
+import { listScriptWorkspaceChecklistTemplates, resolveScriptWorkspaceChecklistTemplateId } from "../utils/script-workspace-checklist.js";
 import {
   AUDIT_PASS_SCORE_THRESHOLD,
   clampAuditScore,
@@ -99,8 +148,30 @@ const TOOL_LABELS: Record<string, string> = {
   read: "读取文件", edit: "编辑文件", grep: "搜索", ls: "列目录",
 };
 const CHAPTER_PLAN_HISTORY_FILE = "chapter-plans.history.json";
+const SCRIPT_WORKSPACE_HISTORY_FILE = "script-workspace.history.json";
+const PRODUCTION_WORKSPACE_FILE = "production-workspace.json";
+const DIRECTOR_PLAN_FILE = "director-plan.json";
+const DIRECTOR_PLAN_HISTORY_FILE = "director-plan.history.json";
+const ASSET_LIBRARY_FILE = "asset-library.json";
+const ASSET_LIBRARY_HISTORY_FILE = "asset-library.history.json";
 const WRITE_STAGE_HEARTBEAT_MS = 3_000;
 const MAX_STAGE_SILENCE_MS = 15_000;
+const WIZARD_STEP_FILE_NAMES: Readonly<Record<BookCreationWizardStep, string>> = {
+  intro: "intro.md",
+  world: "world.md",
+  outline: "outline.md",
+  volume: "volume.md",
+  characters: "characters.md",
+  arc: "character_arc.md",
+  relation: "relationship_map.md",
+};
+const LEGACY_WIZARD_STEP_FILE_NAMES: Readonly<Partial<Record<BookCreationWizardStep, string>>> = {
+  arc: "arc.md",
+  relation: "relation.md",
+};
+  const TRUTH_FILE_ALIASES: Readonly<Record<string, string>> = {
+    "story/outline/story_frame.md": "story_bible.md",
+  };
 
 function resolveWriteStageHeartbeatMs(): number {
   return Math.min(WRITE_STAGE_HEARTBEAT_MS, MAX_STAGE_SILENCE_MS);
@@ -160,6 +231,2300 @@ function shouldSuppressStageHeartbeatLog(message: string): boolean {
   return /（进行中\s*\d+s）|\(\d+s elapsed\)/i.test(message);
 }
 
+export async function openPathWithSystemDefault(path: string): Promise<void> {
+  const platform = process.platform;
+  const command = platform === "darwin"
+    ? "open"
+    : platform === "win32"
+      ? "cmd"
+      : "xdg-open";
+  const args = platform === "darwin"
+    ? [path]
+    : platform === "win32"
+      ? ["/c", "start", "", path]
+      : [path];
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "ignore", detached: true });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`open command exited with code ${code}`));
+      }
+    });
+    child.unref();
+  });
+}
+
+export interface StudioServerOptions {
+  readonly openPath?: (path: string) => Promise<void>;
+}
+
+function resolveExportPathForProject(root: string, exportPath: string): string | null {
+  const normalized = exportPath.trim().replace(/\\/g, "/");
+  const rootPrefix = join(root, "").replace(/\\/g, "/");
+  if (!normalized.startsWith(rootPrefix)) {
+    return null;
+  }
+  return normalized;
+}
+
+function normalizeTaskChecklistItem(item: Partial<TaskChecklistItem> & { readonly text?: unknown }): TaskChecklistItem {
+  const text = typeof item.text === "string" ? item.text.trim() : "";
+  if (!text) {
+    throw new Error("Checklist item text is required.");
+  }
+  const order = Number.isFinite(Number(item.order)) ? Math.max(0, Math.trunc(Number(item.order))) : 0;
+  return {
+    id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : `task-${order + 1}`,
+    text,
+    done: Boolean(item.done),
+    order,
+    ...(typeof item.note === "string" ? { note: item.note.trim() || null } : {}),
+  };
+}
+
+function sortTaskChecklistItems(items: ReadonlyArray<TaskChecklistItem>): TaskChecklistItem[] {
+  return [...items].sort((left, right) => {
+    if (left.order !== right.order) return left.order - right.order;
+    return left.id.localeCompare(right.id);
+  }).map((item, index) => ({
+    ...item,
+    order: index,
+  }));
+}
+
+const DEFAULT_SCRIPT_WORKSPACE_CONFIG: ScriptWorkspaceConfig = {
+  visualStyle: "电影感写实风，冷暖对比明确，景深层次分明",
+  directorMethod: "静态镜头为主，必要时用缓推、硬切和空镜过渡",
+  aiTool: "即梦Ai",
+  aiModel: "默认",
+  generationStrategy: "chapter",
+  chaptersPerEpisode: 2,
+  episodeDurationSec: 60,
+  segmentDurationSec: 12,
+  segmentDurationMinSec: 10,
+  segmentDurationMaxSec: 15,
+  scriptPrompts: {
+    script: "请根据章节内容提取场景、角色、道具与素材，输出可执行剧本，要求按集拆分，并保留每段可视化信息。",
+    image: "请基于剧本生成文生图提示词，突出视觉风格、人物状态、场景布局、光影与道具。",
+    video: "请基于文生图提示词生成图生视频提示词，按每段10-15秒拆分，保持镜头连续与动作明确。",
+  },
+};
+
+const SCRIPT_CHARACTER_STOPWORDS = new Set([
+  "但是", "如果", "因为", "所以", "一个", "没有", "我们", "你们", "他们", "她们", "自己", "时候", "这个", "那个",
+  "这里", "那里", "不会", "可以", "然后", "已经", "还是", "不是", "只是", "而且", "终于", "突然", "继续",
+]);
+
+const SCRIPT_OBJECT_KEYWORDS = [
+  "手机", "钥匙", "车钥匙", "门", "窗", "照片", "信", "文件", "刀", "枪", "书", "包", "箱子", "药", "杯子",
+  "手表", "项链", "戒指", "地图", "灯", "伞", "电脑", "平板", "耳机", "火", "花", "衣服", "制服", "徽章",
+];
+
+const SCRIPT_LOCATION_KEYWORDS = [
+  "房间", "卧室", "客厅", "走廊", "街道", "巷子", "巷口", "学校", "教室", "医院", "办公室", "餐厅", "酒吧",
+  "车站", "地铁", "广场", "工厂", "仓库", "森林", "山路", "海边", "码头", "庭院", "楼顶", "雨夜", "夜色",
+];
+
+function normalizeNumberList(values: ReadonlyArray<unknown> | undefined): number[] {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => Math.trunc(value))
+  )].sort((left, right) => left - right);
+}
+
+function clampInt(value: unknown, fallback: number, min: number, max: number): number {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(num)));
+}
+
+function normalizeWorkspaceEntity(entity: Partial<ScriptWorkspaceEntity> & { readonly name?: unknown }): ScriptWorkspaceEntity {
+  const name = typeof entity.name === "string" ? entity.name.trim() : "";
+  const description = typeof entity.description === "string" ? entity.description.trim() : "";
+  return {
+    name: name || "未命名",
+    description: description || "根据章节内容自动提取",
+    sourceChapterNumbers: normalizeNumberList(entity.sourceChapterNumbers as ReadonlyArray<unknown> | undefined),
+  };
+}
+
+function normalizeWorkspaceConfig(config?: Partial<ScriptWorkspaceConfig> | null): ScriptWorkspaceConfig {
+  const scriptPrompts: Partial<ScriptWorkspaceConfig["scriptPrompts"]> = config?.scriptPrompts ?? {};
+  const generationStrategy = config?.generationStrategy === "episode" ? "episode" : "chapter";
+  return {
+    visualStyle: typeof config?.visualStyle === "string" && config.visualStyle.trim()
+      ? config.visualStyle.trim()
+      : DEFAULT_SCRIPT_WORKSPACE_CONFIG.visualStyle,
+    directorMethod: typeof config?.directorMethod === "string" && config.directorMethod.trim()
+      ? config.directorMethod.trim()
+      : DEFAULT_SCRIPT_WORKSPACE_CONFIG.directorMethod,
+    aiTool: typeof config?.aiTool === "string" && config.aiTool.trim()
+      ? config.aiTool.trim()
+      : DEFAULT_SCRIPT_WORKSPACE_CONFIG.aiTool,
+    aiModel: typeof config?.aiModel === "string" && config.aiModel.trim()
+      ? config.aiModel.trim()
+      : DEFAULT_SCRIPT_WORKSPACE_CONFIG.aiModel,
+    generationStrategy,
+    chaptersPerEpisode: clampInt(config?.chaptersPerEpisode, DEFAULT_SCRIPT_WORKSPACE_CONFIG.chaptersPerEpisode ?? 2, 1, 20),
+    episodeDurationSec: clampInt(config?.episodeDurationSec, DEFAULT_SCRIPT_WORKSPACE_CONFIG.episodeDurationSec, 30, 1800),
+    segmentDurationSec: clampInt(config?.segmentDurationSec, DEFAULT_SCRIPT_WORKSPACE_CONFIG.segmentDurationSec, 5, 60),
+    segmentDurationMinSec: clampInt(config?.segmentDurationMinSec, DEFAULT_SCRIPT_WORKSPACE_CONFIG.segmentDurationMinSec, 1, 60),
+    segmentDurationMaxSec: clampInt(config?.segmentDurationMaxSec, DEFAULT_SCRIPT_WORKSPACE_CONFIG.segmentDurationMaxSec, 1, 120),
+    scriptPrompts: {
+      script: typeof scriptPrompts.script === "string" && scriptPrompts.script.trim()
+        ? scriptPrompts.script.trim()
+        : DEFAULT_SCRIPT_WORKSPACE_CONFIG.scriptPrompts.script,
+      image: typeof scriptPrompts.image === "string" && scriptPrompts.image.trim()
+        ? scriptPrompts.image.trim()
+        : DEFAULT_SCRIPT_WORKSPACE_CONFIG.scriptPrompts.image,
+      video: typeof scriptPrompts.video === "string" && scriptPrompts.video.trim()
+        ? scriptPrompts.video.trim()
+        : DEFAULT_SCRIPT_WORKSPACE_CONFIG.scriptPrompts.video,
+    },
+  };
+}
+
+function normalizeWorkspaceScene(scene: Partial<ScriptWorkspaceScene> & { readonly id?: unknown }): ScriptWorkspaceScene {
+  return {
+    id: typeof scene.id === "string" && scene.id.trim() ? scene.id.trim() : `scene-${Date.now()}`,
+    episodeNumber: clampInt(scene.episodeNumber, 1, 1, 1_000_000),
+    chapterNumber: clampInt(scene.chapterNumber, 1, 1, 1_000_000),
+    sourceChapterNumbers: normalizeNumberList(scene.sourceChapterNumbers as ReadonlyArray<unknown> | undefined),
+    title: typeof scene.title === "string" && scene.title.trim() ? scene.title.trim() : "场景",
+    description: typeof scene.description === "string" ? scene.description.trim() : "",
+    location: typeof scene.location === "string" ? scene.location.trim() : "",
+    timeOfDay: typeof scene.timeOfDay === "string" ? scene.timeOfDay.trim() : "",
+    characters: Array.isArray(scene.characters) ? scene.characters.map((item) => String(item).trim()).filter(Boolean) : [],
+    props: Array.isArray(scene.props) ? scene.props.map((item) => String(item).trim()).filter(Boolean) : [],
+    assets: Array.isArray(scene.assets) ? scene.assets.map((item) => String(item).trim()).filter(Boolean) : [],
+  };
+}
+
+function normalizeWorkspaceSegment(segment: Partial<ScriptWorkspaceSegment> & { readonly id?: unknown }): ScriptWorkspaceSegment {
+  return {
+    id: typeof segment.id === "string" && segment.id.trim() ? segment.id.trim() : `segment-${Date.now()}`,
+    order: clampInt(segment.order, 0, 0, 1_000_000),
+    episodeNumber: clampInt(segment.episodeNumber, 1, 1, 1_000_000),
+    chapterNumber: clampInt(segment.chapterNumber, 1, 1, 1_000_000),
+    sourceChapterNumbers: normalizeNumberList(segment.sourceChapterNumbers as ReadonlyArray<unknown> | undefined),
+    title: typeof segment.title === "string" && segment.title.trim() ? segment.title.trim() : "分段",
+    scene: typeof segment.scene === "string" ? segment.scene.trim() : "",
+    durationSec: clampInt(segment.durationSec, 12, 1, 120),
+    characters: Array.isArray(segment.characters) ? segment.characters.map((item) => String(item).trim()).filter(Boolean) : [],
+    props: Array.isArray(segment.props) ? segment.props.map((item) => String(item).trim()).filter(Boolean) : [],
+    assets: Array.isArray(segment.assets) ? segment.assets.map((item) => String(item).trim()).filter(Boolean) : [],
+    scriptText: typeof segment.scriptText === "string" ? segment.scriptText.trim() : "",
+    textToImagePrompt: typeof segment.textToImagePrompt === "string" ? segment.textToImagePrompt.trim() : "",
+    imageToVideoPrompt: typeof segment.imageToVideoPrompt === "string" ? segment.imageToVideoPrompt.trim() : "",
+  };
+}
+
+function normalizeWorkspaceEpisode(episode: Partial<ScriptWorkspaceEpisode> & { readonly episodeNumber?: unknown }): ScriptWorkspaceEpisode {
+  return {
+    episodeNumber: clampInt(episode.episodeNumber, 1, 1, 1_000_000),
+    chapterNumber: clampInt(episode.chapterNumber, 1, 1, 1_000_000),
+    sourceChapterNumbers: normalizeNumberList(episode.sourceChapterNumbers as ReadonlyArray<unknown> | undefined),
+    chapterTitle: typeof episode.chapterTitle === "string" && episode.chapterTitle.trim() ? episode.chapterTitle.trim() : "章节",
+    title: typeof episode.title === "string" && episode.title.trim() ? episode.title.trim() : "第1集",
+    summary: typeof episode.summary === "string" ? episode.summary.trim() : "",
+    durationSec: clampInt(episode.durationSec, DEFAULT_SCRIPT_WORKSPACE_CONFIG.episodeDurationSec, 30, 1800),
+    segments: Array.isArray(episode.segments) ? episode.segments.map((item, index) => normalizeWorkspaceSegment({ ...item, order: index })) : [],
+  };
+}
+
+function normalizeScriptWorkspace(workspace: Partial<ScriptWorkspace> & { readonly bookId?: unknown }): ScriptWorkspace {
+  return {
+    bookId: typeof workspace.bookId === "string" && workspace.bookId.trim() ? workspace.bookId.trim() : "unknown",
+    selectedChapterNumbers: normalizeNumberList(workspace.selectedChapterNumbers as ReadonlyArray<unknown> | undefined),
+    updatedAt: typeof workspace.updatedAt === "string" && workspace.updatedAt.trim() ? workspace.updatedAt.trim() : new Date().toISOString(),
+    config: normalizeWorkspaceConfig(workspace.config ?? null),
+    scriptPrompt: typeof workspace.scriptPrompt === "string" ? workspace.scriptPrompt.trim() : "",
+    extraction: {
+      scenes: Array.isArray(workspace.extraction?.scenes) ? workspace.extraction.scenes.map((item) => normalizeWorkspaceScene(item)) : [],
+      characters: Array.isArray(workspace.extraction?.characters) ? workspace.extraction.characters.map((item) => normalizeWorkspaceEntity(item)) : [],
+      props: Array.isArray(workspace.extraction?.props) ? workspace.extraction.props.map((item) => normalizeWorkspaceEntity(item)) : [],
+      assets: Array.isArray(workspace.extraction?.assets) ? workspace.extraction.assets.map((item) => normalizeWorkspaceEntity(item)) : [],
+    },
+    episodes: Array.isArray(workspace.episodes) ? workspace.episodes.map((item) => normalizeWorkspaceEpisode(item)) : [],
+  };
+}
+
+function normalizeProductionDialogueType(value: unknown): ProductionDialogueType {
+  return value === "dialogue" || value === "inner_monologue" || value === "voiceover" ? value : "none";
+}
+
+function normalizeProductionShot(shot: Partial<ProductionShot> & { readonly id?: unknown }): ProductionShot {
+  return {
+    id: typeof shot.id === "string" && shot.id.trim() ? shot.id.trim() : `shot-${Date.now()}`,
+    episodeNumber: clampInt(shot.episodeNumber, 1, 1, 1_000_000),
+    chapterNumber: clampInt(shot.chapterNumber, 1, 1, 1_000_000),
+    sourceChapterNumbers: normalizeNumberList(shot.sourceChapterNumbers as ReadonlyArray<unknown> | undefined),
+    segmentId: typeof shot.segmentId === "string" && shot.segmentId.trim() ? shot.segmentId.trim() : "segment",
+    segmentOrder: clampInt(shot.segmentOrder, 0, 0, 1_000_000),
+    shotNumber: clampInt(shot.shotNumber, 1, 1, 1_000_000),
+    track: typeof shot.track === "string" && shot.track.trim() ? shot.track.trim() : "main",
+    title: typeof shot.title === "string" && shot.title.trim() ? shot.title.trim() : "镜头",
+    scene: typeof shot.scene === "string" ? shot.scene.trim() : "",
+    durationSec: clampInt(shot.durationSec, 5, 1, 120),
+    shotType: typeof shot.shotType === "string" && shot.shotType.trim() ? shot.shotType.trim() : "中景",
+    cameraMovement: typeof shot.cameraMovement === "string" && shot.cameraMovement.trim() ? shot.cameraMovement.trim() : "缓推",
+    dialogue: typeof shot.dialogue === "string" ? shot.dialogue.trim() : "",
+    dialogueType: normalizeProductionDialogueType(shot.dialogueType),
+    mood: typeof shot.mood === "string" && shot.mood.trim() ? shot.mood.trim() : "克制紧张",
+    lighting: typeof shot.lighting === "string" && shot.lighting.trim() ? shot.lighting.trim() : "环境主光明确，保留层次阴影",
+    shouldGenerateImage: shot.shouldGenerateImage !== false,
+    characters: Array.isArray(shot.characters) ? shot.characters.map((item) => String(item).trim()).filter(Boolean) : [],
+    props: Array.isArray(shot.props) ? shot.props.map((item) => String(item).trim()).filter(Boolean) : [],
+    assets: Array.isArray(shot.assets) ? shot.assets.map((item) => String(item).trim()).filter(Boolean) : [],
+    scriptText: typeof shot.scriptText === "string" ? shot.scriptText.trim() : "",
+    textToImagePrompt: typeof shot.textToImagePrompt === "string" ? shot.textToImagePrompt.trim() : "",
+    imageToVideoPrompt: typeof shot.imageToVideoPrompt === "string" ? shot.imageToVideoPrompt.trim() : "",
+  };
+}
+
+function normalizeProductionEpisode(episode: Partial<ProductionEpisode> & { readonly episodeNumber?: unknown }): ProductionEpisode {
+  return {
+    episodeNumber: clampInt(episode.episodeNumber, 1, 1, 1_000_000),
+    chapterNumber: clampInt(episode.chapterNumber, 1, 1, 1_000_000),
+    sourceChapterNumbers: normalizeNumberList(episode.sourceChapterNumbers as ReadonlyArray<unknown> | undefined),
+    title: typeof episode.title === "string" && episode.title.trim() ? episode.title.trim() : "第1集",
+    chapterTitle: typeof episode.chapterTitle === "string" && episode.chapterTitle.trim() ? episode.chapterTitle.trim() : "章节",
+    summary: typeof episode.summary === "string" ? episode.summary.trim() : "",
+    durationSec: clampInt(episode.durationSec, DEFAULT_SCRIPT_WORKSPACE_CONFIG.episodeDurationSec, 30, 1800),
+    trackCount: clampInt(episode.trackCount, 1, 1, 128),
+    shots: Array.isArray(episode.shots) ? episode.shots.map((item) => normalizeProductionShot(item)) : [],
+  };
+}
+
+function normalizeProductionWorkspace(workspace: Partial<ProductionWorkspace> & { readonly bookId?: unknown }): ProductionWorkspace {
+  return {
+    bookId: typeof workspace.bookId === "string" && workspace.bookId.trim() ? workspace.bookId.trim() : "unknown",
+    selectedChapterNumbers: normalizeNumberList(workspace.selectedChapterNumbers as ReadonlyArray<unknown> | undefined),
+    updatedAt: typeof workspace.updatedAt === "string" && workspace.updatedAt.trim() ? workspace.updatedAt.trim() : new Date().toISOString(),
+    sourceScriptUpdatedAt: typeof workspace.sourceScriptUpdatedAt === "string" && workspace.sourceScriptUpdatedAt.trim()
+      ? workspace.sourceScriptUpdatedAt.trim()
+      : new Date().toISOString(),
+    sourceConfig: normalizeWorkspaceConfig(workspace.sourceConfig ?? null),
+    episodes: Array.isArray(workspace.episodes) ? workspace.episodes.map((item) => normalizeProductionEpisode(item)) : [],
+  };
+}
+
+function normalizeDirectorPlanEpisode(episode: Partial<DirectorPlanEpisode> & { readonly episodeNumber?: unknown }): DirectorPlanEpisode {
+  return {
+    episodeNumber: clampInt(episode.episodeNumber, 1, 1, 1_000_000),
+    title: typeof episode.title === "string" && episode.title.trim() ? episode.title.trim() : "第1集",
+    storyGoal: typeof episode.storyGoal === "string" ? episode.storyGoal.trim() : "",
+    emotionalBeat: typeof episode.emotionalBeat === "string" ? episode.emotionalBeat.trim() : "",
+    pacing: typeof episode.pacing === "string" ? episode.pacing.trim() : "",
+    lensLanguage: typeof episode.lensLanguage === "string" ? episode.lensLanguage.trim() : "",
+    blockingNotes: typeof episode.blockingNotes === "string" ? episode.blockingNotes.trim() : "",
+    lightingNotes: typeof episode.lightingNotes === "string" ? episode.lightingNotes.trim() : "",
+    soundNotes: typeof episode.soundNotes === "string" ? episode.soundNotes.trim() : "",
+    continuityNotes: typeof episode.continuityNotes === "string" ? episode.continuityNotes.trim() : "",
+  };
+}
+
+function normalizeDirectorPlan(plan: Partial<DirectorPlan> & { readonly bookId?: unknown }): DirectorPlan {
+  return {
+    bookId: typeof plan.bookId === "string" && plan.bookId.trim() ? plan.bookId.trim() : "unknown",
+    updatedAt: typeof plan.updatedAt === "string" && plan.updatedAt.trim() ? plan.updatedAt.trim() : new Date().toISOString(),
+    sourceProductionUpdatedAt: typeof plan.sourceProductionUpdatedAt === "string" && plan.sourceProductionUpdatedAt.trim()
+      ? plan.sourceProductionUpdatedAt.trim()
+      : new Date().toISOString(),
+    sourceConfig: normalizeWorkspaceConfig(plan.sourceConfig ?? null),
+    visualStatement: typeof plan.visualStatement === "string" ? plan.visualStatement.trim() : "",
+    directorIntent: typeof plan.directorIntent === "string" ? plan.directorIntent.trim() : "",
+    visualRules: Array.isArray(plan.visualRules) ? plan.visualRules.map((item) => String(item).trim()).filter(Boolean) : [],
+    cameraRules: Array.isArray(plan.cameraRules) ? plan.cameraRules.map((item) => String(item).trim()).filter(Boolean) : [],
+    colorScript: Array.isArray(plan.colorScript) ? plan.colorScript.map((item) => String(item).trim()).filter(Boolean) : [],
+    episodePlans: Array.isArray(plan.episodePlans) ? plan.episodePlans.map((item) => normalizeDirectorPlanEpisode(item)) : [],
+  };
+}
+
+function normalizeAssetLibraryItemType(value: unknown): AssetLibraryItemType {
+  return value === "character" || value === "prop" || value === "scene" ? value : "reference";
+}
+
+function normalizeAssetGenerationStatus(value: unknown): AssetGenerationStatus {
+  return value === "queued"
+    || value === "generating"
+    || value === "ready"
+    || value === "failed"
+    || value === "rejected"
+    ? value
+    : "pending";
+}
+
+function normalizeAssetLibraryItemStatus(value: unknown): AssetLibraryItemStatus {
+  return value === "prompt_ready"
+    || value === "image_generating"
+    || value === "image_ready"
+    || value === "video_generating"
+    || value === "video_ready"
+    || value === "rejected"
+    ? value
+    : "draft";
+}
+
+function normalizeAssetLibraryItem(item: Partial<AssetLibraryItem> & { readonly id?: unknown }): AssetLibraryItem {
+  const shotIds = uniqStrings(Array.isArray(item.shotIds) ? item.shotIds.map((value) => String(value).trim()).filter(Boolean) : []);
+  return {
+    id: typeof item.id === "string" && item.id.trim() ? item.id.trim() : `asset-${Date.now()}`,
+    type: normalizeAssetLibraryItemType(item.type),
+    name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : "素材",
+    description: typeof item.description === "string" ? item.description.trim() : "",
+    episodeNumbers: normalizeNumberList(item.episodeNumbers as ReadonlyArray<unknown> | undefined),
+    shotIds,
+    referenceCount: clampInt(item.referenceCount, shotIds.length, shotIds.length, 1_000_000),
+    prompt: typeof item.prompt === "string" ? item.prompt.trim() : "",
+    status: normalizeAssetLibraryItemStatus(item.status),
+    thumbnailPath: typeof item.thumbnailPath === "string" ? item.thumbnailPath.trim() : "",
+    filePath: typeof item.filePath === "string" ? item.filePath.trim() : "",
+    generation: {
+      imageStatus: normalizeAssetGenerationStatus(item.generation?.imageStatus),
+      videoStatus: normalizeAssetGenerationStatus(item.generation?.videoStatus),
+      needsRegeneration: Boolean(item.generation?.needsRegeneration),
+      lastError: typeof item.generation?.lastError === "string" ? item.generation.lastError.trim() : "",
+      notes: typeof item.generation?.notes === "string" ? item.generation.notes.trim() : "",
+    },
+    tags: Array.isArray(item.tags) ? item.tags.map((value) => String(value).trim()).filter(Boolean) : [],
+  };
+}
+
+function normalizeAssetLibrary(library: Partial<AssetLibrary> & { readonly bookId?: unknown }): AssetLibrary {
+  return {
+    bookId: typeof library.bookId === "string" && library.bookId.trim() ? library.bookId.trim() : "unknown",
+    updatedAt: typeof library.updatedAt === "string" && library.updatedAt.trim() ? library.updatedAt.trim() : new Date().toISOString(),
+    sourceProductionUpdatedAt: typeof library.sourceProductionUpdatedAt === "string" && library.sourceProductionUpdatedAt.trim()
+      ? library.sourceProductionUpdatedAt.trim()
+      : new Date().toISOString(),
+    items: Array.isArray(library.items) ? library.items.map((item) => normalizeAssetLibraryItem(item)) : [],
+  };
+}
+
+function splitTextSegments(content: string, count: number): string[] {
+  return rebalanceTextBeats(buildSemanticTextBeats(content), count);
+}
+
+function resolveSegmentDurations(totalSec: number, targetSec: number, minSec: number, maxSec: number): number[] {
+  const segmentCount = Math.max(1, Math.ceil(totalSec / Math.max(1, targetSec)));
+  const durations = new Array(segmentCount).fill(Math.max(minSec, Math.min(maxSec, targetSec)));
+  let sum = durations.reduce((acc, value) => acc + value, 0);
+  while (sum < totalSec) {
+    for (let index = 0; index < durations.length && sum < totalSec; index += 1) {
+      if (durations[index] >= maxSec) continue;
+      durations[index] += 1;
+      sum += 1;
+    }
+    if (durations.every((value) => value >= maxSec)) break;
+  }
+  while (sum > totalSec) {
+    for (let index = durations.length - 1; index >= 0 && sum > totalSec; index -= 1) {
+      if (durations[index] <= minSec) continue;
+      durations[index] -= 1;
+      sum -= 1;
+    }
+    if (durations.every((value) => value <= minSec)) break;
+  }
+  return durations;
+}
+
+function extractKeywordCandidates(content: string, limit: number): string[] {
+  const matches = content.match(/[\u4e00-\u9fa5]{2,6}|[A-Za-z][A-Za-z0-9_-]{1,18}/g) ?? [];
+  const frequency = new Map<string, number>();
+  for (const match of matches) {
+    const token = match.trim();
+    if (!token || SCRIPT_CHARACTER_STOPWORDS.has(token)) continue;
+    frequency.set(token, (frequency.get(token) ?? 0) + 1);
+  }
+  return [...frequency.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, limit)
+    .map(([token]) => token);
+}
+
+function inferLocationLabel(content: string): string {
+  for (const keyword of SCRIPT_LOCATION_KEYWORDS) {
+    if (content.includes(keyword)) return keyword;
+  }
+  return "故事现场";
+}
+
+function inferProps(content: string): string[] {
+  return SCRIPT_OBJECT_KEYWORDS.filter((keyword) => content.includes(keyword)).slice(0, 4);
+}
+
+function buildWorkspacePrompt(workspace: ScriptWorkspace): string {
+  return [
+    `生成策略：${workspace.config.generationStrategy === "episode" ? `按集（每集 ${workspace.config.chaptersPerEpisode ?? 2} 章）` : "按章"}`,
+    `视觉风格：${workspace.config.visualStyle}`,
+    `导演手法：${workspace.config.directorMethod}`,
+    `AI：${workspace.config.aiTool} / ${workspace.config.aiModel}`,
+    `剧本提示词：${workspace.config.scriptPrompts.script}`,
+    `文生图提示词：${workspace.config.scriptPrompts.image}`,
+    `图生视频提示词：${workspace.config.scriptPrompts.video}`,
+    `选中章节：${workspace.selectedChapterNumbers.join("、") || "无"}`,
+  ].join("\n");
+}
+
+function inferTimeOfDay(content: string): string {
+  if (/(凌晨|清晨|早晨|天亮|晨)/.test(content)) return "清晨";
+  if (/(中午|午后|正午|白天)/.test(content)) return "白天";
+  if (/(傍晚|黄昏|日落)/.test(content)) return "傍晚";
+  if (/(夜里|夜晚|深夜|晚上|夜)/.test(content)) return "夜晚";
+  return "不定时段";
+}
+
+function summarizeText(content: string, maxLength = 80): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength)}…`;
+}
+
+function buildCharacterCandidates(content: string, limit: number): string[] {
+  const candidates = extractKeywordCandidates(content, limit * 2)
+    .filter((token) => !SCRIPT_OBJECT_KEYWORDS.includes(token))
+    .filter((token) => !SCRIPT_LOCATION_KEYWORDS.includes(token));
+  return [...new Set(candidates)].slice(0, limit);
+}
+
+type WorkspaceEntityDraft = {
+  name: string;
+  description: string;
+  sourceChapterNumbers: number[];
+};
+
+type ScriptWorkspaceChapterInput = {
+  chapterNumber: number;
+  chapterTitle: string;
+  rawContent: string;
+  sceneLocation: string;
+  timeOfDay: string;
+  characters: string[];
+  props: string[];
+  assetNames: string[];
+};
+
+type ScriptWorkspaceSegmentBlueprint = {
+  title: string;
+  scene: string;
+  durationSec: number;
+  location: string;
+  timeOfDay: string;
+  intent: string;
+  characters: string[];
+  props: string[];
+  assets: string[];
+};
+
+type ScriptWorkspaceEpisodePlan = {
+  episodeNumber: number;
+  chapterNumber: number;
+  sourceChapterNumbers: number[];
+  chapterTitle: string;
+  title: string;
+  summary: string;
+  durationSec: number;
+  segmentBlueprints: ScriptWorkspaceSegmentBlueprint[];
+};
+
+type ScriptWorkspacePlan = {
+  scriptPrompt: string;
+  extraction: ScriptWorkspaceExtraction;
+  episodes: ScriptWorkspaceEpisodePlan[];
+};
+
+function createEntity(name: string, description: string, chapterNumber: number): WorkspaceEntityDraft {
+  return {
+    name,
+    description,
+    sourceChapterNumbers: [chapterNumber],
+  };
+}
+
+function uniqStrings(values: ReadonlyArray<string>): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function splitParagraphIntoSentences(paragraph: string): string[] {
+  const normalized = paragraph.replace(/\r/g, "\n").trim();
+  if (!normalized) return [];
+  return normalized
+    .split(/\n+/)
+    .flatMap((line) => line.match(/[^。！？!?；;]+[。！？!?；;]?|“[^”]+”|「[^」]+」|"[^"]+"/g) ?? [line])
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+}
+
+function buildSemanticTextBeats(content: string): string[] {
+  const paragraphs = content
+    .split(/\n\s*\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (paragraphs.length === 0) return [""];
+
+  const beats: string[] = [];
+  let current: string[] = [];
+  let currentLocation = "";
+  let currentTimeOfDay = "";
+  let currentHasDialogue = false;
+
+  const flushCurrent = () => {
+    const text = current.join(" ").replace(/\s+/g, " ").trim();
+    if (text) beats.push(text);
+    current = [];
+    currentLocation = "";
+    currentTimeOfDay = "";
+    currentHasDialogue = false;
+  };
+
+  for (const paragraph of paragraphs) {
+    const sentences = splitParagraphIntoSentences(paragraph);
+    if (sentences.length === 0) continue;
+    for (const sentence of sentences) {
+      const location = inferLocationLabel(sentence);
+      const timeOfDay = inferTimeOfDay(sentence);
+      const hasDialogue = /[“”"「」]/.test(sentence);
+      const isTransition = /(忽然|突然|这时|随后|片刻|转眼|紧接着|与此同时|另一边|另一头|很快|下一秒)/.test(sentence);
+      const shouldBreak = current.length > 0 && (
+        isTransition
+        || (location !== "故事现场" && currentLocation && location !== currentLocation)
+        || (timeOfDay !== "不定时段" && currentTimeOfDay && timeOfDay !== currentTimeOfDay)
+        || hasDialogue !== currentHasDialogue
+        || current.join(" ").length >= 90
+      );
+      if (shouldBreak) flushCurrent();
+      current.push(sentence);
+      currentLocation = location !== "故事现场" ? location : currentLocation;
+      currentTimeOfDay = timeOfDay !== "不定时段" ? timeOfDay : currentTimeOfDay;
+      currentHasDialogue = currentHasDialogue || hasDialogue;
+    }
+    if (current.join(" ").length >= 120) flushCurrent();
+  }
+
+  flushCurrent();
+  return beats.length > 0 ? beats : [content.trim() || ""];
+}
+
+function splitBeatByCenter(text: string): [string, string] | null {
+  const sentences = splitParagraphIntoSentences(text);
+  if (sentences.length >= 2) {
+    const middle = Math.ceil(sentences.length / 2);
+    return [
+      sentences.slice(0, middle).join(" ").trim(),
+      sentences.slice(middle).join(" ").trim(),
+    ];
+  }
+  const parts = text.trim().split(/\s+/);
+  if (parts.length < 2) return null;
+  const middle = Math.ceil(parts.length / 2);
+  return [
+    parts.slice(0, middle).join(" ").trim(),
+    parts.slice(middle).join(" ").trim(),
+  ];
+}
+
+function rebalanceTextBeats(beats: ReadonlyArray<string>, count: number): string[] {
+  const targetCount = Math.max(1, count);
+  const result = beats.map((beat) => beat.trim()).filter(Boolean);
+  if (result.length === 0) return Array.from({ length: targetCount }, () => "");
+
+  while (result.length > targetCount) {
+    let mergeIndex = 0;
+    let minLength = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < result.length - 1; index += 1) {
+      const combinedLength = result[index]!.length + result[index + 1]!.length;
+      if (combinedLength < minLength) {
+        minLength = combinedLength;
+        mergeIndex = index;
+      }
+    }
+    result.splice(mergeIndex, 2, `${result[mergeIndex]} ${result[mergeIndex + 1]}`.replace(/\s+/g, " ").trim());
+  }
+
+  while (result.length < targetCount) {
+    let splitIndex = 0;
+    let maxLength = -1;
+    for (let index = 0; index < result.length; index += 1) {
+      if (result[index]!.length > maxLength) {
+        splitIndex = index;
+        maxLength = result[index]!.length;
+      }
+    }
+    const split = splitBeatByCenter(result[splitIndex]!);
+    if (!split) break;
+    result.splice(splitIndex, 1, split[0], split[1]);
+  }
+
+  while (result.length < targetCount) {
+    result.push(result[result.length - 1] ?? "");
+  }
+  return result.slice(0, targetCount);
+}
+
+function buildSceneSlices(content: string, limit = 4): string[] {
+  const beats = buildSemanticTextBeats(content).slice(0, Math.max(1, limit * 2));
+  return rebalanceTextBeats(beats, Math.min(Math.max(1, beats.length), limit));
+}
+
+function buildSegmentSceneLabel(location: string, timeOfDay: string): string {
+  return `${location || "故事现场"} / ${timeOfDay || "不定时段"}`;
+}
+
+function buildSegmentPromptPack(args: {
+  readonly config: ScriptWorkspaceConfig;
+  readonly durationSec: number;
+  readonly sourceChapterNumbers: ReadonlyArray<number>;
+  readonly location: string;
+  readonly timeOfDay: string;
+  readonly characters: ReadonlyArray<string>;
+  readonly props: ReadonlyArray<string>;
+  readonly assets: ReadonlyArray<string>;
+  readonly focus: string;
+}): { textToImagePrompt: string; imageToVideoPrompt: string } {
+  const strategyLabel = args.config.generationStrategy === "episode"
+    ? `按集，覆盖${describeChapterNumbers(args.sourceChapterNumbers)}`
+    : "按章";
+  return {
+    textToImagePrompt: [
+      args.config.scriptPrompts.image,
+      `生成策略：${strategyLabel}`,
+      `视觉风格：${args.config.visualStyle}`,
+      `场景：${args.location || "故事现场"}`,
+      `时间：${args.timeOfDay || "不定时段"}`,
+      `角色：${args.characters.join("、") || "无"}`,
+      `道具：${args.props.join("、") || "无"}`,
+      `素材：${args.assets.join("、") || "无"}`,
+      `画面重点：${args.focus}`,
+    ].join("\n"),
+    imageToVideoPrompt: [
+      args.config.scriptPrompts.video,
+      `每段时长：${args.durationSec}秒`,
+      `生成策略：${strategyLabel}`,
+      `导演手法：${args.config.directorMethod}`,
+      `AI：${args.config.aiTool} / ${args.config.aiModel}`,
+      `镜头重点：${args.focus}`,
+      `出镜角色：${args.characters.join("、") || "无"}`,
+      `核心动作/情绪：围绕“${args.focus}”设计明确动作、视线和转场`,
+    ].join("\n"),
+  };
+}
+
+function chunkNumberList(values: ReadonlyArray<number>, size: number): number[][] {
+  const chunkSize = Math.max(1, size);
+  const result: number[][] = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    result.push(values.slice(index, index + chunkSize));
+  }
+  return result;
+}
+
+function describeChapterNumbers(chapterNumbers: ReadonlyArray<number>): string {
+  const normalized = normalizeNumberList(chapterNumbers as ReadonlyArray<unknown>);
+  if (normalized.length === 0) return "无";
+  if (normalized.length === 1) return `第${normalized[0]}章`;
+  return `第${normalized[0]}-${normalized[normalized.length - 1]}章`;
+}
+
+async function readChapterContent(bookDir: string, chapterNumber: number): Promise<{
+  readonly chapterNumber: number;
+  readonly fileName: string | null;
+  readonly title: string;
+  readonly content: string;
+  readonly wordCount: number;
+}> {
+  const chaptersDir = join(bookDir, "chapters");
+  const files = await readdir(chaptersDir).catch(() => [] as string[]);
+  const paddedNum = String(chapterNumber).padStart(4, "0");
+  const fileName = files.find((file) => file.startsWith(paddedNum) && file.endsWith(".md")) ?? null;
+  if (!fileName) {
+    return {
+      chapterNumber,
+      fileName: null,
+      title: `第${chapterNumber}章`,
+      content: "",
+      wordCount: 0,
+    };
+  }
+  const content = await readFile(join(bookDir, "chapters", fileName), "utf-8").catch(() => "");
+  return {
+    chapterNumber,
+    fileName,
+    title: deriveChapterTitle({ chapterNumber, fileName, markdown: content }),
+    content,
+    wordCount: estimateChapterWordCount(content),
+  };
+}
+
+async function loadScriptWorkspaceChapterInputs(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly selectedChapterNumbers: ReadonlyArray<number>;
+  readonly config: ScriptWorkspaceConfig;
+}): Promise<{
+  readonly selectedChapterNumbers: number[];
+  readonly chapterInputs: ScriptWorkspaceChapterInput[];
+  readonly chapterGroups: number[][];
+}> {
+  const bookDir = args.state.bookDir(args.bookId);
+  const chapterIndex = await args.state.loadChapterIndex(args.bookId).catch(() => [] as ChapterIndexEntryLike[]);
+  const selectedChapterNumbers = normalizeNumberList(args.selectedChapterNumbers.length > 0
+    ? args.selectedChapterNumbers
+    : chapterIndex.map((chapter) => Number(chapter.number)));
+  const chapterInputs = await Promise.all(selectedChapterNumbers.map(async (chapterNumber) => {
+    const chapterMeta = chapterIndex.find((chapter) => Number(chapter.number) === chapterNumber);
+    const chapter = await readChapterContent(bookDir, chapterNumber);
+    const chapterTitle = chapter.title || (typeof chapterMeta?.title === "string" && chapterMeta.title.trim() ? chapterMeta.title.trim() : `第${chapterNumber}章`);
+    const rawContent = chapter.content.trim();
+    const sceneLocation = inferLocationLabel(rawContent || chapterTitle);
+    const timeOfDay = inferTimeOfDay(rawContent || chapterTitle);
+    const characters = buildCharacterCandidates(rawContent, 5);
+    const props = inferProps(rawContent);
+    const assetNames = uniqStrings([
+      `场景素材:${sceneLocation}`,
+      `视觉风格:${args.config.visualStyle}`,
+      `导演方法:${args.config.directorMethod}`,
+      ...characters.map((item) => `角色参考:${item}`),
+      ...props.map((item) => `道具参考:${item}`),
+    ]);
+    return {
+      chapterNumber,
+      chapterTitle,
+      rawContent,
+      sceneLocation,
+      timeOfDay,
+      characters,
+      props,
+      assetNames,
+    } satisfies ScriptWorkspaceChapterInput;
+  }));
+  const chapterGroups = args.config.generationStrategy === "episode"
+    ? chunkNumberList(selectedChapterNumbers, args.config.chaptersPerEpisode ?? 2)
+    : selectedChapterNumbers.map((chapterNumber) => [chapterNumber]);
+  return {
+    selectedChapterNumbers,
+    chapterInputs,
+    chapterGroups,
+  };
+}
+
+async function buildScriptWorkspaceFromChapters(args: {
+  readonly state: StateManager;
+  readonly bookId: string;
+  readonly selectedChapterNumbers: ReadonlyArray<number>;
+  readonly config?: Partial<ScriptWorkspaceConfig> | null;
+  readonly existing?: Partial<ScriptWorkspace> | null;
+}): Promise<ScriptWorkspace> {
+  const config = normalizeWorkspaceConfig(args.config ?? args.existing?.config ?? null);
+  const { selectedChapterNumbers, chapterInputs, chapterGroups } = await loadScriptWorkspaceChapterInputs({
+    state: args.state,
+    bookId: args.bookId,
+    selectedChapterNumbers: args.selectedChapterNumbers,
+    config,
+  });
+  const extractedScenes: ScriptWorkspaceScene[] = [];
+  const extractedCharacters = new Map<string, WorkspaceEntityDraft>();
+  const extractedProps = new Map<string, WorkspaceEntityDraft>();
+  const extractedAssets = new Map<string, WorkspaceEntityDraft>();
+  const episodes: ScriptWorkspaceEpisode[] = [];
+
+  for (let episodeIndex = 0; episodeIndex < chapterGroups.length; episodeIndex += 1) {
+    const sourceChapterNumbers = chapterGroups[episodeIndex]!;
+    const groupInputs = sourceChapterNumbers
+      .map((chapterNumber) => chapterInputs.find((item) => item.chapterNumber === chapterNumber) ?? null)
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    if (groupInputs.length === 0) continue;
+
+    const leadChapterNumber = groupInputs[0]!.chapterNumber;
+    const leadChapterTitle = groupInputs[0]!.chapterTitle;
+    const mergedTitle = groupInputs.map((item) => item.chapterTitle).join(" / ");
+    const mergedContent = groupInputs.map((item) => item.rawContent).filter(Boolean).join("\n\n");
+    const mergedLocation = groupInputs.map((item) => item.sceneLocation).filter(Boolean).join(" / ");
+    const mergedTimeOfDay = groupInputs.map((item) => item.timeOfDay).filter(Boolean).join(" / ");
+    const mergedCharacters = uniqStrings(groupInputs.flatMap((item) => item.characters));
+    const mergedProps = uniqStrings(groupInputs.flatMap((item) => item.props));
+    const mergedAssets = uniqStrings(groupInputs.flatMap((item) => item.assetNames));
+
+    for (const input of groupInputs) {
+      for (const character of input.characters) {
+        if (!extractedCharacters.has(character)) {
+          extractedCharacters.set(character, createEntity(character, `第${input.chapterNumber}章出现的角色`, input.chapterNumber));
+        } else {
+          extractedCharacters.get(character)?.sourceChapterNumbers.push(input.chapterNumber);
+        }
+      }
+      for (const prop of input.props) {
+        if (!extractedProps.has(prop)) {
+          extractedProps.set(prop, createEntity(prop, `第${input.chapterNumber}章出现的道具`, input.chapterNumber));
+        } else {
+          extractedProps.get(prop)?.sourceChapterNumbers.push(input.chapterNumber);
+        }
+      }
+      for (const assetName of input.assetNames) {
+        if (!extractedAssets.has(assetName)) {
+          extractedAssets.set(assetName, createEntity(assetName, `用于${describeChapterNumbers([input.chapterNumber])}剧本生成`, input.chapterNumber));
+        } else {
+          extractedAssets.get(assetName)?.sourceChapterNumbers.push(input.chapterNumber);
+        }
+      }
+
+      const sceneSlices = buildSceneSlices(input.rawContent || input.chapterTitle, 3);
+      sceneSlices.forEach((slice, sliceIndex) => {
+        const sliceLocation = inferLocationLabel(slice || input.chapterTitle);
+        const sliceTimeOfDay = inferTimeOfDay(slice || input.chapterTitle);
+        const sliceCharacters = buildCharacterCandidates(slice || input.rawContent, 4);
+        const sliceProps = inferProps(slice || input.rawContent);
+        extractedScenes.push({
+          id: `scene-${episodeIndex + 1}-${input.chapterNumber}-${sliceIndex + 1}`,
+          episodeNumber: episodeIndex + 1,
+          chapterNumber: input.chapterNumber,
+          sourceChapterNumbers: [input.chapterNumber],
+          title: sceneSlices.length > 1 ? `${input.chapterTitle}-场景${sliceIndex + 1}` : input.chapterTitle,
+          description: summarizeText(slice || input.rawContent || input.chapterTitle, 180),
+          location: sliceLocation,
+          timeOfDay: sliceTimeOfDay,
+          characters: sliceCharacters.length > 0 ? sliceCharacters : input.characters,
+          props: sliceProps.length > 0 ? sliceProps : input.props,
+          assets: input.assetNames,
+        });
+      });
+    }
+
+    const durations = resolveSegmentDurations(
+      config.episodeDurationSec,
+      config.segmentDurationSec,
+      config.segmentDurationMinSec,
+      config.segmentDurationMaxSec,
+    );
+    const segmentCount = Math.max(durations.length, 1);
+    const scriptChunks = splitTextSegments(mergedContent || mergedTitle, segmentCount);
+    const segments = durations.map((durationSec, segmentIndex) => {
+      const scriptText = scriptChunks[segmentIndex] ?? mergedContent;
+      const sceneSummary = summarizeText(scriptText || mergedTitle, 120);
+      const location = inferLocationLabel(scriptText || mergedLocation || mergedTitle);
+      const timeOfDay = inferTimeOfDay(scriptText || mergedTimeOfDay || mergedTitle);
+      const segmentCharacters = uniqStrings([
+        ...buildCharacterCandidates(scriptText || mergedContent, 4),
+        ...mergedCharacters,
+      ]).slice(0, 5);
+      const segmentProps = uniqStrings([
+        ...inferProps(scriptText || mergedContent),
+        ...mergedProps,
+      ]).slice(0, 5);
+      const segmentAssets = uniqStrings([
+        ...mergedAssets,
+        `镜头参考:${sceneSummary || mergedTitle}`,
+      ]);
+      const promptPack = buildSegmentPromptPack({
+        config,
+        durationSec,
+        sourceChapterNumbers,
+        location,
+        timeOfDay,
+        characters: segmentCharacters,
+        props: segmentProps,
+        assets: segmentAssets,
+        focus: sceneSummary || mergedTitle,
+      });
+      return {
+        id: `seg-${episodeIndex + 1}-${segmentIndex + 1}`,
+        order: segmentIndex,
+        episodeNumber: episodeIndex + 1,
+        chapterNumber: leadChapterNumber,
+        sourceChapterNumbers,
+        title: `${config.generationStrategy === "episode" ? describeChapterNumbers(sourceChapterNumbers) : leadChapterTitle}-分段${segmentIndex + 1}`,
+        scene: buildSegmentSceneLabel(location, timeOfDay),
+        durationSec,
+        characters: segmentCharacters,
+        props: segmentProps,
+        assets: segmentAssets,
+        scriptText,
+        textToImagePrompt: promptPack.textToImagePrompt,
+        imageToVideoPrompt: promptPack.imageToVideoPrompt,
+      } satisfies ScriptWorkspaceSegment;
+    });
+
+    episodes.push({
+      episodeNumber: episodeIndex + 1,
+      chapterNumber: leadChapterNumber,
+      sourceChapterNumbers,
+      chapterTitle: mergedTitle,
+      title: `第${episodeIndex + 1}集`,
+      summary: summarizeText(mergedContent || mergedTitle, 140),
+      durationSec: config.episodeDurationSec,
+      segments,
+    });
+  }
+
+  const workspace = normalizeScriptWorkspace({
+    bookId: args.bookId,
+    selectedChapterNumbers,
+    updatedAt: new Date().toISOString(),
+    config,
+    scriptPrompt: "",
+    extraction: {
+      scenes: extractedScenes,
+      characters: [...extractedCharacters.values()],
+      props: [...extractedProps.values()],
+      assets: [...extractedAssets.values()],
+    },
+    episodes,
+  });
+  return {
+    ...workspace,
+    scriptPrompt: buildWorkspacePrompt(workspace),
+  };
+}
+
+function extractJsonObjectCandidate(content: string): string {
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]?.trim()) return fenced[1].trim();
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start >= 0 && end > start) return content.slice(start, end + 1).trim();
+  return content.trim();
+}
+
+function buildScriptWorkspacePlanFromWorkspace(workspace: ScriptWorkspace): ScriptWorkspacePlan {
+  return {
+    scriptPrompt: workspace.scriptPrompt,
+    extraction: workspace.extraction,
+    episodes: workspace.episodes.map((episode) => ({
+      episodeNumber: episode.episodeNumber,
+      chapterNumber: episode.chapterNumber,
+      sourceChapterNumbers: [...(episode.sourceChapterNumbers ?? [episode.chapterNumber])],
+      chapterTitle: episode.chapterTitle,
+      title: episode.title,
+      summary: episode.summary,
+      durationSec: episode.durationSec,
+      segmentBlueprints: episode.segments.map((segment) => ({
+        title: segment.title,
+        scene: segment.scene,
+        durationSec: segment.durationSec,
+        location: segment.scene.split("/")[0]?.trim() || inferLocationLabel(segment.scriptText || segment.scene),
+        timeOfDay: segment.scene.split("/")[1]?.trim() || inferTimeOfDay(segment.scriptText || segment.scene),
+        intent: segment.scriptText || summarizeText(segment.title, 80),
+        characters: [...segment.characters],
+        props: [...segment.props],
+        assets: [...segment.assets],
+      })),
+    })),
+  };
+}
+
+function normalizeScriptWorkspacePlan(raw: unknown, fallback: ScriptWorkspace): ScriptWorkspacePlan {
+  if (!raw || typeof raw !== "object") {
+    return buildScriptWorkspacePlanFromWorkspace(fallback);
+  }
+  const payload = raw as {
+    scriptPrompt?: unknown;
+    extraction?: Partial<ScriptWorkspaceExtraction>;
+    episodes?: Array<{
+      episodeNumber?: unknown;
+      chapterNumber?: unknown;
+      sourceChapterNumbers?: ReadonlyArray<unknown>;
+      chapterTitle?: unknown;
+      title?: unknown;
+      summary?: unknown;
+      durationSec?: unknown;
+      segmentBlueprints?: Array<Partial<ScriptWorkspaceSegmentBlueprint>>;
+      segments?: Array<Partial<ScriptWorkspaceSegment>>;
+    }>;
+  };
+  const fallbackPlan = buildScriptWorkspacePlanFromWorkspace(fallback);
+  return {
+    scriptPrompt: typeof payload.scriptPrompt === "string" && payload.scriptPrompt.trim()
+      ? payload.scriptPrompt.trim()
+      : fallbackPlan.scriptPrompt,
+    extraction: {
+      scenes: Array.isArray(payload.extraction?.scenes)
+        ? payload.extraction.scenes.map((scene) => normalizeWorkspaceScene(scene ?? {}))
+        : fallbackPlan.extraction.scenes,
+      characters: Array.isArray(payload.extraction?.characters)
+        ? payload.extraction.characters.map((entity) => normalizeWorkspaceEntity(entity ?? {}))
+        : fallbackPlan.extraction.characters,
+      props: Array.isArray(payload.extraction?.props)
+        ? payload.extraction.props.map((entity) => normalizeWorkspaceEntity(entity ?? {}))
+        : fallbackPlan.extraction.props,
+      assets: Array.isArray(payload.extraction?.assets)
+        ? payload.extraction.assets.map((entity) => normalizeWorkspaceEntity(entity ?? {}))
+        : fallbackPlan.extraction.assets,
+    },
+    episodes: Array.isArray(payload.episodes) && payload.episodes.length > 0
+      ? payload.episodes.map((episode, index) => {
+        const fallbackEpisode = fallbackPlan.episodes[index] ?? fallbackPlan.episodes[fallbackPlan.episodes.length - 1];
+        const blueprintSource = Array.isArray(episode.segmentBlueprints) && episode.segmentBlueprints.length > 0
+          ? episode.segmentBlueprints
+          : (Array.isArray(episode.segments) ? episode.segments : []);
+        const segmentBlueprints = blueprintSource.length > 0
+          ? blueprintSource.map((segment, segmentIndex) => {
+            const fallbackBlueprint = fallbackEpisode?.segmentBlueprints[segmentIndex] ?? fallbackEpisode?.segmentBlueprints[0];
+            const scene = typeof segment.scene === "string" && segment.scene.trim()
+              ? segment.scene.trim()
+              : (fallbackBlueprint?.scene ?? "故事现场 / 不定时段");
+            const location = typeof (segment as { location?: unknown }).location === "string" && String((segment as { location?: unknown }).location).trim()
+              ? String((segment as { location?: unknown }).location).trim()
+              : scene.split("/")[0]?.trim() || fallbackBlueprint?.location || "故事现场";
+            const timeOfDay = typeof (segment as { timeOfDay?: unknown }).timeOfDay === "string" && String((segment as { timeOfDay?: unknown }).timeOfDay).trim()
+              ? String((segment as { timeOfDay?: unknown }).timeOfDay).trim()
+              : scene.split("/")[1]?.trim() || fallbackBlueprint?.timeOfDay || "不定时段";
+            return {
+              title: typeof segment.title === "string" && segment.title.trim()
+                ? segment.title.trim()
+                : (fallbackBlueprint?.title ?? `分段${segmentIndex + 1}`),
+              scene,
+              durationSec: clampInt(
+                (segment as { durationSec?: unknown }).durationSec,
+                fallbackBlueprint?.durationSec ?? DEFAULT_SCRIPT_WORKSPACE_CONFIG.segmentDurationSec,
+                1,
+                120,
+              ),
+              location,
+              timeOfDay,
+              intent: typeof (segment as { intent?: unknown }).intent === "string" && String((segment as { intent?: unknown }).intent).trim()
+                ? String((segment as { intent?: unknown }).intent).trim()
+                : typeof (segment as { scriptText?: unknown }).scriptText === "string" && String((segment as { scriptText?: unknown }).scriptText).trim()
+                  ? String((segment as { scriptText?: unknown }).scriptText).trim()
+                  : (fallbackBlueprint?.intent ?? fallbackBlueprint?.title ?? `分段${segmentIndex + 1}`),
+              characters: uniqStrings(Array.isArray(segment.characters) ? segment.characters.map(String) : fallbackBlueprint?.characters ?? []),
+              props: uniqStrings(Array.isArray(segment.props) ? segment.props.map(String) : fallbackBlueprint?.props ?? []),
+              assets: uniqStrings(Array.isArray(segment.assets) ? segment.assets.map(String) : fallbackBlueprint?.assets ?? []),
+            } satisfies ScriptWorkspaceSegmentBlueprint;
+          })
+          : (fallbackEpisode?.segmentBlueprints ?? []);
+        return {
+          episodeNumber: clampInt(episode.episodeNumber, fallbackEpisode?.episodeNumber ?? index + 1, 1, 1_000_000),
+          chapterNumber: clampInt(episode.chapterNumber, fallbackEpisode?.chapterNumber ?? 1, 1, 1_000_000),
+          sourceChapterNumbers: normalizeNumberList(episode.sourceChapterNumbers as ReadonlyArray<unknown> | undefined).length > 0
+            ? normalizeNumberList(episode.sourceChapterNumbers as ReadonlyArray<unknown> | undefined)
+            : [...(fallbackEpisode?.sourceChapterNumbers ?? [fallbackEpisode?.chapterNumber ?? 1])],
+          chapterTitle: typeof episode.chapterTitle === "string" && episode.chapterTitle.trim()
+            ? episode.chapterTitle.trim()
+            : (fallbackEpisode?.chapterTitle ?? "章节"),
+          title: typeof episode.title === "string" && episode.title.trim()
+            ? episode.title.trim()
+            : (fallbackEpisode?.title ?? `第${index + 1}集`),
+          summary: typeof episode.summary === "string" && episode.summary.trim()
+            ? episode.summary.trim()
+            : (fallbackEpisode?.summary ?? ""),
+          durationSec: clampInt(episode.durationSec, fallbackEpisode?.durationSec ?? DEFAULT_SCRIPT_WORKSPACE_CONFIG.episodeDurationSec, 30, 1800),
+          segmentBlueprints,
+        } satisfies ScriptWorkspaceEpisodePlan;
+      })
+      : fallbackPlan.episodes,
+  };
+}
+
+function buildScriptWorkspaceLLMPlanPrompt(args: {
+  readonly config: ScriptWorkspaceConfig;
+  readonly chapterInputs: ReadonlyArray<ScriptWorkspaceChapterInput>;
+  readonly chapterGroups: ReadonlyArray<ReadonlyArray<number>>;
+}): string {
+  const chapterSections = args.chapterGroups.map((group, index) => {
+    const groupInputs = group
+      .map((chapterNumber) => args.chapterInputs.find((item) => item.chapterNumber === chapterNumber))
+      .filter((item): item is ScriptWorkspaceChapterInput => Boolean(item));
+    const mergedText = groupInputs.map((item) => item.rawContent).filter(Boolean).join("\n\n").slice(0, 10_000);
+    return [
+      `### 第${index + 1}集候选`,
+      `覆盖章节：${describeChapterNumbers(group)}`,
+      `章节标题：${groupInputs.map((item) => item.chapterTitle).join(" / ")}`,
+      `候选角色：${uniqStrings(groupInputs.flatMap((item) => item.characters)).join("、") || "无"}`,
+      `候选道具：${uniqStrings(groupInputs.flatMap((item) => item.props)).join("、") || "无"}`,
+      mergedText || "（正文为空，请根据章节标题规划分集结构）",
+    ].join("\n");
+  });
+  return [
+    "你是小说转短视频剧本工作台的分集规划助手。",
+    "请输出严格 JSON，不要输出 markdown，不要解释。",
+    "任务：先做分集规划与提取，不生成最终段落正文。",
+    "要求：",
+    "1. extraction 必须包含 scenes / characters / props / assets。",
+    `2. 当前策略：${args.config.generationStrategy === "episode" ? `按集，每集 ${args.config.chaptersPerEpisode ?? 2} 章` : "按章，每章一集"}。`,
+    "3. episodes 必须覆盖所有输入章节并保持顺序。",
+    "4. 每集必须给出 summary 和 segmentBlueprints。",
+    "5. segmentBlueprints 必须尽量接近镜头级切分，按地点变化、时间变化、动作转折、对白交锋拆段。",
+    "6. 每段 durationSec 必须落在配置范围内。",
+    "7. 只输出 JSON，字段内容全部用中文。",
+    "",
+    "输出 JSON 结构：",
+    "{",
+    '  "scriptPrompt": "整体改编策略总结",',
+    '  "extraction": {',
+    '    "scenes": [{ "id": "scene-1", "episodeNumber": 1, "chapterNumber": 1, "sourceChapterNumbers": [1], "title": "场景名", "description": "场景说明", "location": "地点", "timeOfDay": "时间", "characters": ["角色"], "props": ["道具"], "assets": ["素材"] }],',
+    '    "characters": [{ "name": "角色名", "description": "角色说明", "sourceChapterNumbers": [1] }],',
+    '    "props": [{ "name": "道具名", "description": "道具说明", "sourceChapterNumbers": [1] }],',
+    '    "assets": [{ "name": "素材名", "description": "素材说明", "sourceChapterNumbers": [1] }]',
+    "  },",
+    '  "episodes": [{',
+    '    "episodeNumber": 1,',
+    '    "chapterNumber": 1,',
+    '    "sourceChapterNumbers": [1],',
+    '    "chapterTitle": "章节标题",',
+    '    "title": "第1集",',
+    '    "summary": "本集概述",',
+    `    "durationSec": ${args.config.episodeDurationSec},`,
+    '    "segmentBlueprints": [{ "title": "分镜段标题", "scene": "地点 / 时段", "durationSec": 12, "location": "地点", "timeOfDay": "时段", "intent": "这一段的动作与情绪目标", "characters": ["角色"], "props": ["道具"], "assets": ["素材"] }]',
+    "  }]",
+    "}",
+    "",
+    `视觉风格：${args.config.visualStyle}`,
+    `导演手法：${args.config.directorMethod}`,
+    `AI：${args.config.aiTool} / ${args.config.aiModel}`,
+    `每集时长：${args.config.episodeDurationSec}秒`,
+    `每段目标时长：${args.config.segmentDurationSec}秒`,
+    `每段最小时长：${args.config.segmentDurationMinSec}秒`,
+    `每段最大时长：${args.config.segmentDurationMaxSec}秒`,
+    `剧本提示词：${args.config.scriptPrompts.script}`,
+    `文生图提示词：${args.config.scriptPrompts.image}`,
+    `图生视频提示词：${args.config.scriptPrompts.video}`,
+    "",
+    "输入章节：",
+    ...chapterSections,
+  ].join("\n");
+}
+
+function buildScriptWorkspaceLLMEpisodePrompt(args: {
+  readonly config: ScriptWorkspaceConfig;
+  readonly episodePlan: ScriptWorkspaceEpisodePlan;
+  readonly chapterInputs: ReadonlyArray<ScriptWorkspaceChapterInput>;
+}): string {
+  const chapterText = args.chapterInputs
+    .map((item) => [
+      `### 第${item.chapterNumber}章 ${item.chapterTitle}`,
+      item.rawContent ? item.rawContent.slice(0, 8_000) : "（正文为空）",
+    ].join("\n"))
+    .join("\n\n");
+  return [
+    "你是小说转短视频剧本工作台的逐集分镜生成助手。",
+    "请输出严格 JSON，不要输出 markdown，不要解释。",
+    "任务：基于既定分集规划，生成这一集每个分段的剧本正文、文生图提示词、图生视频提示词。",
+    "要求：",
+    "1. 只能输出一个 JSON 对象。",
+    "2. segments 数量应与给定的 segmentBlueprints 基本一致。",
+    "3. 每段必须保持镜头级表达，动作、视线、情绪、转场清晰。",
+    "4. 文生图提示词要明确视觉风格、景别、人物状态、光影、材质、道具。",
+    "5. 图生视频提示词要明确镜头运动、表演动作、节奏和转场。",
+    "6. 所有字段内容使用中文。",
+    "",
+    "输出 JSON 结构：",
+    "{",
+    '  "summary": "可选，本集总结",',
+    '  "segments": [{',
+    '    "title": "分段标题",',
+    '    "scene": "地点 / 时段",',
+    `    "durationSec": ${args.config.segmentDurationSec},`,
+    '    "characters": ["角色"],',
+    '    "props": ["道具"],',
+    '    "assets": ["素材"],',
+    '    "scriptText": "该分段剧本正文，强调动作、冲突、情绪与镜头重点",',
+    '    "textToImagePrompt": "文生图提示词",',
+    '    "imageToVideoPrompt": "图生视频提示词"',
+    "  }]",
+    "}",
+    "",
+    `视觉风格：${args.config.visualStyle}`,
+    `导演手法：${args.config.directorMethod}`,
+    `AI：${args.config.aiTool} / ${args.config.aiModel}`,
+    `本集标题：${args.episodePlan.title}`,
+    `覆盖章节：${describeChapterNumbers(args.episodePlan.sourceChapterNumbers)}`,
+    `本集概述：${args.episodePlan.summary}`,
+    `剧本提示词：${args.config.scriptPrompts.script}`,
+    `文生图提示词：${args.config.scriptPrompts.image}`,
+    `图生视频提示词：${args.config.scriptPrompts.video}`,
+    "",
+    "已定分集规划：",
+    JSON.stringify(args.episodePlan, null, 2),
+    "",
+    "原始章节内容：",
+    chapterText,
+  ].join("\n");
+}
+
+function buildWorkspaceFromPlanWithEpisodeOutputs(args: {
+  readonly bookId: string;
+  readonly selectedChapterNumbers: ReadonlyArray<number>;
+  readonly config: ScriptWorkspaceConfig;
+  readonly plan: ScriptWorkspacePlan;
+  readonly fallback: ScriptWorkspace;
+  readonly episodeOutputs: ReadonlyArray<unknown>;
+}): ScriptWorkspace {
+  const fallbackByEpisode = new Map<number, ScriptWorkspaceEpisode>(
+    args.fallback.episodes.map((episode) => [episode.episodeNumber, episode]),
+  );
+
+  const episodes = args.plan.episodes.map((episodePlan, episodeIndex) => {
+    const fallbackEpisode = fallbackByEpisode.get(episodePlan.episodeNumber)
+      ?? args.fallback.episodes[episodeIndex]
+      ?? args.fallback.episodes[0];
+    const rawOutput = args.episodeOutputs[episodeIndex];
+    const parsedOutput = rawOutput && typeof rawOutput === "object"
+      ? rawOutput as {
+        summary?: unknown;
+        segments?: Array<Partial<ScriptWorkspaceSegment> & { intent?: unknown; location?: unknown; timeOfDay?: unknown }>;
+      }
+      : null;
+    const outputSegments = Array.isArray(parsedOutput?.segments) ? parsedOutput.segments : [];
+    const segmentBlueprints = episodePlan.segmentBlueprints.length > 0
+      ? episodePlan.segmentBlueprints
+      : fallbackEpisode?.segments.map((segment) => ({
+        title: segment.title,
+        scene: segment.scene,
+        durationSec: segment.durationSec,
+        location: segment.scene.split("/")[0]?.trim() || "故事现场",
+        timeOfDay: segment.scene.split("/")[1]?.trim() || "不定时段",
+        intent: segment.scriptText || segment.title,
+        characters: [...segment.characters],
+        props: [...segment.props],
+        assets: [...segment.assets],
+      })) ?? [];
+
+    const segments = segmentBlueprints.map((blueprint, segmentIndex) => {
+      const generated = outputSegments[segmentIndex] ?? null;
+      const title = typeof generated?.title === "string" && generated.title.trim()
+        ? generated.title.trim()
+        : blueprint.title;
+      const scene = typeof generated?.scene === "string" && generated.scene.trim()
+        ? generated.scene.trim()
+        : blueprint.scene;
+      const location = typeof generated?.location === "string" && generated.location.trim()
+        ? generated.location.trim()
+        : scene.split("/")[0]?.trim() || blueprint.location || "故事现场";
+      const timeOfDay = typeof generated?.timeOfDay === "string" && generated.timeOfDay.trim()
+        ? generated.timeOfDay.trim()
+        : scene.split("/")[1]?.trim() || blueprint.timeOfDay || "不定时段";
+      const durationSec = clampInt(
+        generated?.durationSec,
+        blueprint.durationSec,
+        args.config.segmentDurationMinSec,
+        args.config.segmentDurationMaxSec,
+      );
+      const characters = uniqStrings(Array.isArray(generated?.characters) ? generated!.characters!.map(String) : blueprint.characters);
+      const props = uniqStrings(Array.isArray(generated?.props) ? generated!.props!.map(String) : blueprint.props);
+      const assets = uniqStrings(Array.isArray(generated?.assets) ? generated!.assets!.map(String) : blueprint.assets);
+      const scriptText = typeof generated?.scriptText === "string" && generated.scriptText.trim()
+        ? generated.scriptText.trim()
+        : blueprint.intent;
+      const promptPack = buildSegmentPromptPack({
+        config: args.config,
+        durationSec,
+        sourceChapterNumbers: episodePlan.sourceChapterNumbers,
+        location,
+        timeOfDay,
+        characters,
+        props,
+        assets,
+        focus: summarizeText(scriptText || blueprint.intent || title, 120),
+      });
+      return {
+        id: `seg-${episodePlan.episodeNumber}-${segmentIndex + 1}`,
+        order: segmentIndex,
+        episodeNumber: episodePlan.episodeNumber,
+        chapterNumber: episodePlan.chapterNumber,
+        sourceChapterNumbers: episodePlan.sourceChapterNumbers,
+        title,
+        scene: buildSegmentSceneLabel(location, timeOfDay),
+        durationSec,
+        characters,
+        props,
+        assets,
+        scriptText,
+        textToImagePrompt: typeof generated?.textToImagePrompt === "string" && generated.textToImagePrompt.trim()
+          ? generated.textToImagePrompt.trim()
+          : promptPack.textToImagePrompt,
+        imageToVideoPrompt: typeof generated?.imageToVideoPrompt === "string" && generated.imageToVideoPrompt.trim()
+          ? generated.imageToVideoPrompt.trim()
+          : promptPack.imageToVideoPrompt,
+      } satisfies ScriptWorkspaceSegment;
+    });
+
+    return {
+      episodeNumber: episodePlan.episodeNumber,
+      chapterNumber: episodePlan.chapterNumber,
+      sourceChapterNumbers: episodePlan.sourceChapterNumbers,
+      chapterTitle: episodePlan.chapterTitle,
+      title: episodePlan.title,
+      summary: typeof parsedOutput?.summary === "string" && parsedOutput.summary.trim()
+        ? parsedOutput.summary.trim()
+        : episodePlan.summary,
+      durationSec: episodePlan.durationSec,
+      segments,
+    } satisfies ScriptWorkspaceEpisode;
+  });
+
+  const workspace = normalizeScriptWorkspace({
+    bookId: args.bookId,
+    selectedChapterNumbers: args.selectedChapterNumbers,
+    updatedAt: new Date().toISOString(),
+    config: args.config,
+    scriptPrompt: args.plan.scriptPrompt,
+    extraction: args.plan.extraction,
+    episodes,
+  });
+  return {
+    ...workspace,
+    scriptPrompt: workspace.scriptPrompt || buildWorkspacePrompt(workspace),
+  };
+}
+
+async function readTaskChecklist(bookDir: string, bookId: string): Promise<{ bookId: string; templateId: string; items: TaskChecklistItem[]; updatedAt: string }> {
+  const checklistPath = join(bookDir, "story", "state", "task-checklist.json");
+  try {
+    const raw = await readFile(checklistPath, "utf-8");
+    const parsed = JSON.parse(raw) as { bookId?: unknown; templateId?: unknown; updatedAt?: unknown; items?: unknown };
+    const items = Array.isArray(parsed.items) ? parsed.items.map((item) => normalizeTaskChecklistItem(item as never)) : [];
+    return {
+      bookId,
+      templateId: resolveScriptWorkspaceChecklistTemplateId(typeof parsed.templateId === "string" ? parsed.templateId : undefined),
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+      items: sortTaskChecklistItems(items),
+    };
+  } catch {
+    return {
+      bookId,
+      templateId: resolveScriptWorkspaceChecklistTemplateId(),
+      updatedAt: new Date().toISOString(),
+      items: [],
+    };
+  }
+}
+
+async function writeTaskChecklist(bookDir: string, checklist: { bookId: string; templateId?: string; items: ReadonlyArray<TaskChecklistItem>; updatedAt?: string }): Promise<void> {
+  const checklistPath = join(bookDir, "story", "state", "task-checklist.json");
+  await mkdir(join(bookDir, "story", "state"), { recursive: true });
+  await writeFile(checklistPath, JSON.stringify({
+    bookId: checklist.bookId,
+    templateId: resolveScriptWorkspaceChecklistTemplateId(checklist.templateId),
+    updatedAt: checklist.updatedAt ?? new Date().toISOString(),
+    items: sortTaskChecklistItems(checklist.items),
+  }, null, 2), "utf-8");
+}
+
+async function readScriptWorkspace(bookDir: string, bookId: string, state: StateManager): Promise<ScriptWorkspace> {
+  const workspacePath = join(bookDir, "story", "state", "script-workspace.json");
+  try {
+    const raw = await readFile(workspacePath, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<ScriptWorkspace>;
+    return normalizeScriptWorkspace({
+      ...parsed,
+      bookId,
+    });
+  } catch {
+    const selectedChapterNumbers = (await state.loadChapterIndex(bookId).catch(() => [] as ChapterIndexEntryLike[]))
+      .map((chapter) => Number(chapter.number))
+      .filter((chapterNumber) => Number.isFinite(chapterNumber) && chapterNumber > 0);
+    return buildScriptWorkspaceFromChapters({
+      state,
+      bookId,
+      selectedChapterNumbers,
+    });
+  }
+}
+
+function productionWorkspacePath(bookDir: string): string {
+  return join(bookDir, "story", "state", PRODUCTION_WORKSPACE_FILE);
+}
+
+function directorPlanPath(bookDir: string): string {
+  return join(bookDir, "story", "state", DIRECTOR_PLAN_FILE);
+}
+
+function directorPlanHistoryPath(bookDir: string): string {
+  return join(bookDir, "story", "state", DIRECTOR_PLAN_HISTORY_FILE);
+}
+
+function assetLibraryPath(bookDir: string): string {
+  return join(bookDir, "story", "state", ASSET_LIBRARY_FILE);
+}
+
+function assetLibraryHistoryPath(bookDir: string): string {
+  return join(bookDir, "story", "state", ASSET_LIBRARY_HISTORY_FILE);
+}
+
+function inferShotType(text: string, durationSec: number): string {
+  if (/[“”"「」]/.test(text) || /(凝视|眼神|表情|低声|压低声音)/.test(text)) return "近景";
+  if (/(远眺|俯瞰|人群|街道|广场|城楼|山路|全貌|全景)/.test(text) || durationSec >= 14) return "全景";
+  return "中景";
+}
+
+function inferShotCameraMovement(text: string, order: number): string {
+  if (/(冲|跑|追|扑|转身|逼近|靠近|登上|走向)/.test(text)) return "跟拍";
+  if (/(忽然|突然|猛地|一下)/.test(text)) return "快速摇镜";
+  if (/[“”"「」]/.test(text)) return "缓推";
+  return order % 2 === 0 ? "静态镜头" : "缓推";
+}
+
+function inferShotMood(text: string): string {
+  if (/(愤怒|暴怒|杀意|压迫)/.test(text)) return "压迫紧绷";
+  if (/(悲伤|哽咽|沉默|落寞)/.test(text)) return "压抑低沉";
+  if (/(坚定|决绝|对峙|试探)/.test(text)) return "克制紧张";
+  if (/(惊讶|慌乱|害怕|惊恐)/.test(text)) return "不安失衡";
+  return "稳定叙事";
+}
+
+function inferShotLighting(text: string, scene: string): string {
+  if (/(夜|深夜|夜晚)/.test(text) || /夜/.test(scene)) return "低照度冷色边缘光，保留高反差阴影";
+  if (/(清晨|晨|天亮)/.test(text)) return "清晨侧光，空气透视明显";
+  if (/(黄昏|傍晚|日落)/.test(text)) return "黄昏逆光，暖冷交错";
+  return "环境主光明确，人物与背景层次分明";
+}
+
+function extractShotDialogue(text: string): { dialogue: string; dialogueType: ProductionDialogueType } {
+  const quoted = text.match(/[“"「]([^”"」]+)[”"」]/);
+  if (quoted?.[1]?.trim()) {
+    if (/(心想|心道|暗道|内心)/.test(text)) {
+      return { dialogue: quoted[1].trim(), dialogueType: "inner_monologue" };
+    }
+    if (/(画外音|旁白)/.test(text)) {
+      return { dialogue: quoted[1].trim(), dialogueType: "voiceover" };
+    }
+    return { dialogue: quoted[1].trim(), dialogueType: "dialogue" };
+  }
+  return { dialogue: "", dialogueType: "none" };
+}
+
+function buildProductionShotsFromSegment(segment: ScriptWorkspaceSegment, config: ScriptWorkspaceConfig): ProductionShot[] {
+  const beats = buildSemanticTextBeats(segment.scriptText || segment.title);
+  const shotCount = Math.max(1, Math.min(3, beats.length));
+  const shotTexts = rebalanceTextBeats(beats, shotCount);
+  const shotDurations = resolveSegmentDurations(
+    segment.durationSec,
+    Math.max(3, Math.round(segment.durationSec / shotCount)),
+    3,
+    Math.max(3, segment.durationSec),
+  );
+  return shotTexts.map((shotText, index) => {
+    const scene = buildSegmentSceneLabel(
+      inferLocationLabel(shotText || segment.scene),
+      inferTimeOfDay(shotText || segment.scene),
+    );
+    const dialogue = extractShotDialogue(shotText);
+    const shotType = inferShotType(shotText, shotDurations[index] ?? 5);
+    const cameraMovement = inferShotCameraMovement(shotText, index);
+    const mood = inferShotMood(shotText);
+    const lighting = inferShotLighting(shotText, scene);
+    const promptPack = buildSegmentPromptPack({
+      config,
+      durationSec: shotDurations[index] ?? 5,
+      sourceChapterNumbers: segment.sourceChapterNumbers ?? [segment.chapterNumber],
+      location: scene.split("/")[0]?.trim() || "故事现场",
+      timeOfDay: scene.split("/")[1]?.trim() || "不定时段",
+      characters: segment.characters,
+      props: segment.props,
+      assets: uniqStrings([
+        ...segment.assets,
+        `镜头类型:${shotType}`,
+        `运镜:${cameraMovement}`,
+      ]),
+      focus: summarizeText(shotText || segment.scriptText || segment.title, 100),
+    });
+    return normalizeProductionShot({
+      id: `shot-${segment.episodeNumber}-${segment.order + 1}-${index + 1}`,
+      episodeNumber: segment.episodeNumber,
+      chapterNumber: segment.chapterNumber,
+      sourceChapterNumbers: segment.sourceChapterNumbers,
+      segmentId: segment.id,
+      segmentOrder: segment.order,
+      shotNumber: index + 1,
+      track: "main",
+      title: `${segment.title}-镜头${index + 1}`,
+      scene,
+      durationSec: shotDurations[index] ?? 5,
+      shotType,
+      cameraMovement,
+      dialogue: dialogue.dialogue,
+      dialogueType: dialogue.dialogueType,
+      mood,
+      lighting,
+      shouldGenerateImage: true,
+      characters: segment.characters,
+      props: segment.props,
+      assets: uniqStrings([
+        ...segment.assets,
+        `镜头类型:${shotType}`,
+        `运镜:${cameraMovement}`,
+      ]),
+      scriptText: shotText,
+      textToImagePrompt: promptPack.textToImagePrompt,
+      imageToVideoPrompt: promptPack.imageToVideoPrompt,
+    });
+  });
+}
+
+function buildProductionWorkspaceFromScriptWorkspace(workspace: ScriptWorkspace): ProductionWorkspace {
+  const episodes = workspace.episodes.map((episode) => {
+    const shots = episode.segments.flatMap((segment) => buildProductionShotsFromSegment(segment, workspace.config));
+    return normalizeProductionEpisode({
+      episodeNumber: episode.episodeNumber,
+      chapterNumber: episode.chapterNumber,
+      sourceChapterNumbers: episode.sourceChapterNumbers,
+      title: episode.title,
+      chapterTitle: episode.chapterTitle,
+      summary: episode.summary,
+      durationSec: episode.durationSec,
+      trackCount: 1,
+      shots,
+    });
+  });
+  return normalizeProductionWorkspace({
+    bookId: workspace.bookId,
+    selectedChapterNumbers: workspace.selectedChapterNumbers,
+    updatedAt: new Date().toISOString(),
+    sourceScriptUpdatedAt: workspace.updatedAt,
+    sourceConfig: workspace.config,
+    episodes,
+  });
+}
+
+function buildDirectorPlanFromProductionWorkspace(workspace: ProductionWorkspace): DirectorPlan {
+  const episodePlans = workspace.episodes.map((episode) => {
+    const moods = uniqStrings(episode.shots.map((shot) => shot.mood).filter(Boolean));
+    const lightings = uniqStrings(episode.shots.map((shot) => shot.lighting).filter(Boolean));
+    const lensRules = uniqStrings(episode.shots.map((shot) => `${shot.shotType} / ${shot.cameraMovement}`).filter(Boolean));
+    const characters = uniqStrings(episode.shots.flatMap((shot) => shot.characters));
+    const props = uniqStrings(episode.shots.flatMap((shot) => shot.props));
+    return normalizeDirectorPlanEpisode({
+      episodeNumber: episode.episodeNumber,
+      title: episode.title,
+      storyGoal: episode.summary || summarizeText(episode.shots.map((shot) => shot.scriptText).join(" "), 120),
+      emotionalBeat: moods.join(" -> ") || "稳定叙事",
+      pacing: `${episode.durationSec} 秒 / ${episode.shots.length} 镜头，按 ${workspace.sourceConfig.directorMethod} 控制节奏切换`,
+      lensLanguage: lensRules.join("；") || workspace.sourceConfig.directorMethod,
+      blockingNotes: `场景围绕 ${episode.chapterTitle} 展开，重点角色：${characters.join("、") || "无"}。`,
+      lightingNotes: lightings.join("；") || workspace.sourceConfig.visualStyle,
+      soundNotes: episode.shots.some((shot) => shot.dialogueType !== "none")
+        ? "保留关键对白，环境声衔接镜头转场。"
+        : "以环境氛围和动作声补足镜头节奏。",
+      continuityNotes: `注意角色造型、道具 ${props.join("、") || "无"} 与镜头顺序连续性。`,
+    });
+  });
+  return normalizeDirectorPlan({
+    bookId: workspace.bookId,
+    updatedAt: new Date().toISOString(),
+    sourceProductionUpdatedAt: workspace.updatedAt,
+    sourceConfig: workspace.sourceConfig,
+    visualStatement: `${workspace.sourceConfig.visualStyle}，服务于 ${workspace.episodes.length} 集短视频改编的统一视觉表达。`,
+    directorIntent: `${workspace.sourceConfig.directorMethod}，并确保每段镜头在 ${workspace.sourceConfig.segmentDurationMinSec}-${workspace.sourceConfig.segmentDurationMaxSec} 秒内完成明确动作和情绪交代。`,
+    visualRules: [
+      `角色、场景、道具需保持 ${workspace.sourceConfig.visualStyle} 的统一质感`,
+      "每个镜头必须有明确的主体、景别与前后景关系",
+      "出图镜头优先保证角色识别度与场景连续性",
+    ],
+    cameraRules: [
+      `主导运镜遵循：${workspace.sourceConfig.directorMethod}`,
+      "对白镜头优先保证视线关系和轴线稳定",
+      "动作镜头优先保留运动方向连续性",
+    ],
+    colorScript: episodePlans.map((episode) => `${episode.title}：${episode.lightingNotes || "延续统一色彩脚本"}`),
+    episodePlans,
+  });
+}
+
+function buildAssetLibraryFromProductionWorkspace(workspace: ProductionWorkspace): AssetLibrary {
+  const records = new Map<string, AssetLibraryItem>();
+  const pushItem = (
+    type: AssetLibraryItemType,
+    name: string,
+    description: string,
+    episodeNumber: number,
+    shotId: string,
+    prompt: string,
+    tags: ReadonlyArray<string>,
+  ) => {
+    const normalizedName = name.trim();
+    if (!normalizedName) return;
+    const key = `${type}:${normalizedName}`;
+    const existing = records.get(key);
+    if (existing) {
+      records.set(key, normalizeAssetLibraryItem({
+        ...existing,
+        description: existing.description || description,
+        episodeNumbers: normalizeNumberList([...existing.episodeNumbers, episodeNumber]),
+        shotIds: uniqStrings([...existing.shotIds, shotId]),
+        referenceCount: uniqStrings([...existing.shotIds, shotId]).length,
+        prompt: existing.prompt || prompt,
+        tags: uniqStrings([...existing.tags, ...tags]),
+      }));
+      return;
+    }
+    records.set(key, normalizeAssetLibraryItem({
+      id: `asset-${records.size + 1}`,
+      type,
+      name: normalizedName,
+      description,
+      episodeNumbers: [episodeNumber],
+      shotIds: [shotId],
+      referenceCount: 1,
+      prompt,
+      status: "draft",
+      thumbnailPath: "",
+      filePath: "",
+      generation: {
+        imageStatus: "pending",
+        videoStatus: "pending",
+        needsRegeneration: false,
+        lastError: "",
+        notes: "",
+      },
+      tags,
+    }));
+  };
+
+  for (const episode of workspace.episodes) {
+    for (const shot of episode.shots) {
+      for (const character of shot.characters) {
+        pushItem(
+          "character",
+          character,
+          `${episode.title} 出镜角色`,
+          episode.episodeNumber,
+          shot.id,
+          `${workspace.sourceConfig.visualStyle}，角色 ${character}，匹配镜头 ${shot.title} 的表演与服化道连续性`,
+          [episode.title, "character"],
+        );
+      }
+      for (const prop of shot.props) {
+        pushItem(
+          "prop",
+          prop,
+          `${episode.title} 关键道具`,
+          episode.episodeNumber,
+          shot.id,
+          `${workspace.sourceConfig.visualStyle}，道具 ${prop}，与场景 ${shot.scene} 保持材质和比例一致`,
+          [episode.title, "prop"],
+        );
+      }
+      pushItem(
+        "scene",
+        shot.scene,
+        `${episode.title} 场景参考`,
+        episode.episodeNumber,
+        shot.id,
+        `${workspace.sourceConfig.visualStyle}，场景 ${shot.scene}，适配 ${shot.shotType} 与 ${shot.cameraMovement}`,
+        [episode.title, "scene"],
+      );
+      for (const asset of shot.assets) {
+        pushItem(
+          "reference",
+          asset,
+          `${episode.title} 视觉参考`,
+          episode.episodeNumber,
+          shot.id,
+          `${workspace.sourceConfig.visualStyle}，参考资产 ${asset}，用于镜头 ${shot.title} 的画面一致性控制`,
+          [episode.title, "reference"],
+        );
+      }
+    }
+  }
+
+  return normalizeAssetLibrary({
+    bookId: workspace.bookId,
+    updatedAt: new Date().toISOString(),
+    sourceProductionUpdatedAt: workspace.updatedAt,
+    items: [...records.values()],
+  });
+}
+
+async function readProductionWorkspace(bookDir: string, bookId: string, state: StateManager): Promise<ProductionWorkspace> {
+  const workspacePath = productionWorkspacePath(bookDir);
+  try {
+    const raw = await readFile(workspacePath, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<ProductionWorkspace>;
+    return normalizeProductionWorkspace({
+      ...parsed,
+      bookId,
+    });
+  } catch {
+    const scriptWorkspace = await readScriptWorkspace(bookDir, bookId, state);
+    return buildProductionWorkspaceFromScriptWorkspace(scriptWorkspace);
+  }
+}
+
+async function writeProductionWorkspace(bookDir: string, workspace: ProductionWorkspace): Promise<ProductionWorkspace> {
+  const workspacePath = productionWorkspacePath(bookDir);
+  const normalized = normalizeProductionWorkspace({
+    ...workspace,
+    updatedAt: new Date().toISOString(),
+  });
+  await mkdir(join(bookDir, "story", "state"), { recursive: true });
+  await writeFile(workspacePath, JSON.stringify(normalized, null, 2), "utf-8");
+  return normalized;
+}
+
+async function readDirectorPlan(bookDir: string, bookId: string, state: StateManager): Promise<DirectorPlan> {
+  const filePath = directorPlanPath(bookDir);
+  try {
+    const raw = await readFile(filePath, "utf-8");
+    return normalizeDirectorPlan({
+      ...JSON.parse(raw) as Partial<DirectorPlan>,
+      bookId,
+    });
+  } catch {
+    const productionWorkspace = await readProductionWorkspace(bookDir, bookId, state);
+    return buildDirectorPlanFromProductionWorkspace(productionWorkspace);
+  }
+}
+
+async function writeDirectorPlan(bookDir: string, plan: DirectorPlan): Promise<DirectorPlan> {
+  const { plan: savedPlan } = await writeDirectorPlanWithHistory(bookDir, plan, "save");
+  return savedPlan;
+}
+
+async function readAssetLibrary(bookDir: string, bookId: string, state: StateManager): Promise<AssetLibrary> {
+  const filePath = assetLibraryPath(bookDir);
+  try {
+    const raw = await readFile(filePath, "utf-8");
+    return normalizeAssetLibrary({
+      ...JSON.parse(raw) as Partial<AssetLibrary>,
+      bookId,
+    });
+  } catch {
+    const productionWorkspace = await readProductionWorkspace(bookDir, bookId, state);
+    return buildAssetLibraryFromProductionWorkspace(productionWorkspace);
+  }
+}
+
+async function writeAssetLibrary(bookDir: string, library: AssetLibrary): Promise<AssetLibrary> {
+  const { library: savedLibrary } = await writeAssetLibraryWithHistory(bookDir, library, "save");
+  return savedLibrary;
+}
+
+function normalizeAssetLibraryHistoryVersion(raw: unknown): number {
+  const version = Number(raw);
+  if (!Number.isFinite(version) || version < 1) return 1;
+  return Math.trunc(version);
+}
+
+function cloneAssetLibrarySnapshot(library: unknown): AssetLibrary | null {
+  if (!library || typeof library !== "object") return null;
+  try {
+    return normalizeAssetLibrary(structuredClone(library) as Partial<AssetLibrary>);
+  } catch {
+    return normalizeAssetLibrary(library as Partial<AssetLibrary>);
+  }
+}
+
+function normalizeAssetLibraryHistoryEntry(raw: unknown): AssetLibraryHistoryEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const payload = raw as Partial<AssetLibraryHistoryEntry> & { library?: unknown };
+  const library = cloneAssetLibrarySnapshot(payload.library);
+  if (!library) return null;
+  const bookId = typeof payload.bookId === "string" && payload.bookId.trim()
+    ? payload.bookId.trim()
+    : library.bookId;
+  if (!bookId) return null;
+  return {
+    bookId,
+    version: normalizeAssetLibraryHistoryVersion(payload.version),
+    action: typeof payload.action === "string" && payload.action.trim() ? payload.action.trim() : "save",
+    savedAt: typeof payload.savedAt === "string" && payload.savedAt.trim() ? payload.savedAt.trim() : new Date().toISOString(),
+    library: normalizeAssetLibrary({
+      ...library,
+      bookId,
+    }),
+  };
+}
+
+interface AssetLibraryHistoryStore {
+  readonly entries: AssetLibraryHistoryEntry[];
+  readonly updatedAt?: string;
+}
+
+function loadAssetLibraryHistoryJson(raw: string): AssetLibraryHistoryStore {
+  const parsed = JSON.parse(raw) as unknown;
+  if (Array.isArray(parsed)) {
+    return {
+      entries: parsed
+        .map((item) => normalizeAssetLibraryHistoryEntry(item))
+        .filter((item): item is AssetLibraryHistoryEntry => item !== null),
+    };
+  }
+  if (!parsed || typeof parsed !== "object") return { entries: [] };
+  const payload = parsed as { entries?: unknown; updatedAt?: unknown };
+  const entries = Array.isArray(payload.entries)
+    ? payload.entries
+      .map((item) => normalizeAssetLibraryHistoryEntry(item))
+      .filter((item): item is AssetLibraryHistoryEntry => item !== null)
+    : [];
+  return {
+    entries,
+    ...(typeof payload.updatedAt === "string" && payload.updatedAt.trim() ? { updatedAt: payload.updatedAt.trim() } : {}),
+  };
+}
+
+async function readAssetLibraryHistoryStore(historyPath: string): Promise<AssetLibraryHistoryStore> {
+  try {
+    const raw = await readFile(historyPath, "utf-8");
+    return loadAssetLibraryHistoryJson(raw);
+  } catch {
+    return { entries: [] };
+  }
+}
+
+function dedupeAssetLibraryHistoryEntries(entries: ReadonlyArray<AssetLibraryHistoryEntry>): AssetLibraryHistoryEntry[] {
+  const map = new Map<string, AssetLibraryHistoryEntry>();
+  for (const entry of entries) {
+    const key = `${entry.bookId}:${entry.version}`;
+    const existing = map.get(key);
+    if (!existing || existing.savedAt <= entry.savedAt) {
+      map.set(key, entry);
+    }
+  }
+  return [...map.values()].sort((left, right) => {
+    if (left.bookId !== right.bookId) return left.bookId.localeCompare(right.bookId);
+    if (left.version !== right.version) return left.version - right.version;
+    return left.savedAt.localeCompare(right.savedAt);
+  });
+}
+
+async function readAssetLibraryHistoryEntries(bookDir: string, bookId: string, currentLibrary?: AssetLibrary | null): Promise<AssetLibraryHistoryEntry[]> {
+  const historyPath = assetLibraryHistoryPath(bookDir);
+  const store = await readAssetLibraryHistoryStore(historyPath);
+  const entries = store.entries.filter((entry) => entry.bookId === bookId);
+  if (currentLibrary && entries.length === 0) {
+    entries.push({
+      bookId,
+      version: 1,
+      action: "current",
+      savedAt: currentLibrary.updatedAt,
+      library: normalizeAssetLibrary(currentLibrary),
+    });
+  }
+  return dedupeAssetLibraryHistoryEntries(entries);
+}
+
+async function writeAssetLibraryWithHistory(
+  bookDir: string,
+  library: AssetLibrary,
+  action: "save" | "generate" | "rollback" | "upload" = "save",
+): Promise<{ library: AssetLibrary; version: number }> {
+  const filePath = assetLibraryPath(bookDir);
+  const historyPath = assetLibraryHistoryPath(bookDir);
+  const now = new Date().toISOString();
+  const normalized = normalizeAssetLibrary({
+    ...library,
+    updatedAt: now,
+  });
+  await mkdir(join(bookDir, "story", "state"), { recursive: true });
+  const historyStore = await readAssetLibraryHistoryStore(historyPath);
+  const existing = historyStore.entries.filter((entry) => entry.bookId === normalized.bookId);
+  const version = existing.length > 0 ? Math.max(...existing.map((entry) => entry.version)) + 1 : 1;
+  historyStore.entries.push({
+    bookId: normalized.bookId,
+    version,
+    action,
+    savedAt: now,
+    library: normalized,
+  });
+  await writeFile(filePath, JSON.stringify(normalized, null, 2), "utf-8");
+  await writeFile(historyPath, JSON.stringify({
+    entries: dedupeAssetLibraryHistoryEntries(historyStore.entries),
+    updatedAt: now,
+  }, null, 2), "utf-8");
+  return { library: normalized, version };
+}
+
+function summarizeAssetLibraryHistoryEntry(entry: AssetLibraryHistoryEntry): AssetLibraryHistoryEntry {
+  return {
+    ...entry,
+    library: normalizeAssetLibrary(entry.library),
+  };
+}
+
+function compareAssetLibraryVersions(from: AssetLibrary, to: AssetLibrary): AssetLibraryDiffResult {
+  const changedFields = [
+    "sourceProductionUpdatedAt",
+    "items",
+  ].filter((field) => JSON.stringify(from[field as keyof AssetLibrary]) !== JSON.stringify(to[field as keyof AssetLibrary]));
+  return {
+    fromVersion: 0,
+    toVersion: 0,
+    changedFields,
+    from,
+    to,
+  };
+}
+
+function sanitizeAssetFileName(value: string): string {
+  const cleaned = value.replace(/[/\\?%*:|"<>]/g, "").replace(/\s+/g, "_").trim();
+  return cleaned || `asset-${Date.now()}`;
+}
+
+function decodeDataUrl(dataUrl: string): { mimeType: string; buffer: Buffer } | null {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match?.[1] || !match[2]) return null;
+  try {
+    return {
+      mimeType: match[1],
+      buffer: Buffer.from(match[2], "base64"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function assetLibraryPublicUrl(bookId: string, path: string): string {
+  return `/api/v1/books/${encodeURIComponent(bookId)}/asset-library/file?path=${encodeURIComponent(path)}`;
+}
+
+async function persistAssetLibraryUpload(
+  bookDir: string,
+  bookId: string,
+  payload: AssetLibraryUploadPayload,
+  state: StateManager,
+): Promise<Omit<AssetLibraryUploadResponse, "library">> {
+  const decoded = decodeDataUrl(payload.dataUrl);
+  if (!decoded) {
+    throw new ApiError(400, "INVALID_UPLOAD", "Invalid dataUrl payload");
+  }
+  const library = await readAssetLibrary(bookDir, bookId, state);
+  const item = library.items.find((entry) => entry.id === payload.itemId);
+  if (!item) {
+    throw new ApiError(404, "ASSET_NOT_FOUND", "Asset library item not found");
+  }
+  const safeName = sanitizeAssetFileName(payload.fileName);
+  const prefix = payload.kind === "thumbnail" ? "thumb" : "source";
+  const targetRelativePath = join("story", "assets", "asset-library", item.id, `${prefix}-${safeName}`).replace(/\\/g, "/");
+  const targetAbsolutePath = resolve(bookDir, targetRelativePath);
+  const bookRoot = resolve(bookDir);
+  if (!targetAbsolutePath.startsWith(bookRoot)) {
+    throw new ApiError(400, "INVALID_UPLOAD_PATH", "Resolved upload path escapes book directory");
+  }
+  await mkdir(dirname(targetAbsolutePath), { recursive: true });
+  await writeFile(targetAbsolutePath, decoded.buffer);
+  return {
+    path: targetRelativePath,
+    fileName: safeName,
+    url: assetLibraryPublicUrl(bookId, targetRelativePath),
+  };
+}
+
+function scriptWorkspaceHistoryPath(bookDir: string): string {
+  return join(bookDir, "story", "state", SCRIPT_WORKSPACE_HISTORY_FILE);
+}
+
+function normalizeDirectorPlanHistoryVersion(raw: unknown): number {
+  const version = Number(raw);
+  if (!Number.isFinite(version) || version < 1) return 1;
+  return Math.trunc(version);
+}
+
+function cloneDirectorPlanSnapshot(plan: unknown): DirectorPlan | null {
+  if (!plan || typeof plan !== "object") return null;
+  try {
+    return normalizeDirectorPlan(structuredClone(plan) as Partial<DirectorPlan>);
+  } catch {
+    return normalizeDirectorPlan(plan as Partial<DirectorPlan>);
+  }
+}
+
+function normalizeDirectorPlanHistoryEntry(raw: unknown): DirectorPlanHistoryEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const payload = raw as Partial<DirectorPlanHistoryEntry> & { plan?: unknown };
+  const plan = cloneDirectorPlanSnapshot(payload.plan);
+  if (!plan) return null;
+  const bookId = typeof payload.bookId === "string" && payload.bookId.trim()
+    ? payload.bookId.trim()
+    : plan.bookId;
+  if (!bookId) return null;
+  return {
+    bookId,
+    version: normalizeDirectorPlanHistoryVersion(payload.version),
+    action: typeof payload.action === "string" && payload.action.trim() ? payload.action.trim() : "save",
+    savedAt: typeof payload.savedAt === "string" && payload.savedAt.trim() ? payload.savedAt.trim() : new Date().toISOString(),
+    plan: normalizeDirectorPlan({
+      ...plan,
+      bookId,
+    }),
+  };
+}
+
+interface DirectorPlanHistoryStore {
+  readonly entries: DirectorPlanHistoryEntry[];
+  readonly updatedAt?: string;
+}
+
+function loadDirectorPlanHistoryJson(raw: string): DirectorPlanHistoryStore {
+  const parsed = JSON.parse(raw) as unknown;
+  if (Array.isArray(parsed)) {
+    return {
+      entries: parsed
+        .map((item) => normalizeDirectorPlanHistoryEntry(item))
+        .filter((item): item is DirectorPlanHistoryEntry => item !== null),
+    };
+  }
+  if (!parsed || typeof parsed !== "object") return { entries: [] };
+  const payload = parsed as { entries?: unknown; updatedAt?: unknown };
+  const entries = Array.isArray(payload.entries)
+    ? payload.entries
+      .map((item) => normalizeDirectorPlanHistoryEntry(item))
+      .filter((item): item is DirectorPlanHistoryEntry => item !== null)
+    : [];
+  return {
+    entries,
+    ...(typeof payload.updatedAt === "string" && payload.updatedAt.trim() ? { updatedAt: payload.updatedAt.trim() } : {}),
+  };
+}
+
+async function readDirectorPlanHistoryStore(historyPath: string): Promise<DirectorPlanHistoryStore> {
+  try {
+    const raw = await readFile(historyPath, "utf-8");
+    return loadDirectorPlanHistoryJson(raw);
+  } catch {
+    return { entries: [] };
+  }
+}
+
+function dedupeDirectorPlanHistoryEntries(entries: ReadonlyArray<DirectorPlanHistoryEntry>): DirectorPlanHistoryEntry[] {
+  const map = new Map<string, DirectorPlanHistoryEntry>();
+  for (const entry of entries) {
+    const key = `${entry.bookId}:${entry.version}`;
+    const existing = map.get(key);
+    if (!existing || existing.savedAt <= entry.savedAt) {
+      map.set(key, entry);
+    }
+  }
+  return [...map.values()].sort((left, right) => {
+    if (left.bookId !== right.bookId) return left.bookId.localeCompare(right.bookId);
+    if (left.version !== right.version) return left.version - right.version;
+    return left.savedAt.localeCompare(right.savedAt);
+  });
+}
+
+async function readDirectorPlanHistoryEntries(bookDir: string, bookId: string, currentPlan?: DirectorPlan | null): Promise<DirectorPlanHistoryEntry[]> {
+  const historyPath = directorPlanHistoryPath(bookDir);
+  const store = await readDirectorPlanHistoryStore(historyPath);
+  const entries = store.entries.filter((entry) => entry.bookId === bookId);
+  if (currentPlan && entries.length === 0) {
+    entries.push({
+      bookId,
+      version: 1,
+      action: "current",
+      savedAt: currentPlan.updatedAt,
+      plan: normalizeDirectorPlan(currentPlan),
+    });
+  }
+  return dedupeDirectorPlanHistoryEntries(entries);
+}
+
+async function writeDirectorPlanWithHistory(
+  bookDir: string,
+  plan: DirectorPlan,
+  action: "save" | "generate" | "rollback" = "save",
+): Promise<{ plan: DirectorPlan; version: number }> {
+  const filePath = directorPlanPath(bookDir);
+  const historyPath = directorPlanHistoryPath(bookDir);
+  const now = new Date().toISOString();
+  const normalized = normalizeDirectorPlan({
+    ...plan,
+    updatedAt: now,
+  });
+  await mkdir(join(bookDir, "story", "state"), { recursive: true });
+  const historyStore = await readDirectorPlanHistoryStore(historyPath);
+  const existing = historyStore.entries.filter((entry) => entry.bookId === normalized.bookId);
+  const version = existing.length > 0 ? Math.max(...existing.map((entry) => entry.version)) + 1 : 1;
+  historyStore.entries.push({
+    bookId: normalized.bookId,
+    version,
+    action,
+    savedAt: now,
+    plan: normalized,
+  });
+  await writeFile(filePath, JSON.stringify(normalized, null, 2), "utf-8");
+  await writeFile(historyPath, JSON.stringify({
+    entries: dedupeDirectorPlanHistoryEntries(historyStore.entries),
+    updatedAt: now,
+  }, null, 2), "utf-8");
+  return { plan: normalized, version };
+}
+
+function summarizeDirectorPlanHistoryEntry(entry: DirectorPlanHistoryEntry): DirectorPlanHistoryEntry {
+  return {
+    ...entry,
+    plan: normalizeDirectorPlan(entry.plan),
+  };
+}
+
+function compareDirectorPlanVersions(from: DirectorPlan, to: DirectorPlan): DirectorPlanDiffResult {
+  const changedFields = [
+    "sourceProductionUpdatedAt",
+    "sourceConfig",
+    "visualStatement",
+    "directorIntent",
+    "visualRules",
+    "cameraRules",
+    "colorScript",
+    "episodePlans",
+  ].filter((field) => JSON.stringify(from[field as keyof DirectorPlan]) !== JSON.stringify(to[field as keyof DirectorPlan]));
+  return {
+    fromVersion: 0,
+    toVersion: 0,
+    changedFields,
+    from,
+    to,
+  };
+}
+
+function normalizeScriptWorkspaceHistoryVersion(raw: unknown): number {
+  const version = Number(raw);
+  if (!Number.isFinite(version) || version < 1) return 1;
+  return Math.trunc(version);
+}
+
+function cloneScriptWorkspaceSnapshot(workspace: unknown): ScriptWorkspace | null {
+  if (!workspace || typeof workspace !== "object") return null;
+  try {
+    return normalizeScriptWorkspace(structuredClone(workspace) as Partial<ScriptWorkspace>);
+  } catch {
+    return normalizeScriptWorkspace(workspace as Partial<ScriptWorkspace>);
+  }
+}
+
+function normalizeScriptWorkspaceHistoryEntry(raw: unknown): ScriptWorkspaceHistoryEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const payload = raw as Partial<ScriptWorkspaceHistoryEntry> & { workspace?: unknown };
+  const workspace = cloneScriptWorkspaceSnapshot(payload.workspace);
+  if (!workspace) return null;
+  const bookId = typeof payload.bookId === "string" && payload.bookId.trim()
+    ? payload.bookId.trim()
+    : workspace.bookId;
+  if (!bookId) return null;
+  return {
+    bookId,
+    version: normalizeScriptWorkspaceHistoryVersion(payload.version),
+    action: typeof payload.action === "string" && payload.action.trim() ? payload.action.trim() : "save",
+    savedAt: typeof payload.savedAt === "string" && payload.savedAt.trim() ? payload.savedAt.trim() : new Date().toISOString(),
+    workspace: normalizeScriptWorkspace({
+      ...workspace,
+      bookId,
+    }),
+  };
+}
+
+function loadScriptWorkspaceHistoryJson(raw: string): ScriptWorkspaceHistoryStore {
+  const parsed = JSON.parse(raw) as unknown;
+  if (Array.isArray(parsed)) {
+    return {
+      entries: parsed
+        .map((item) => normalizeScriptWorkspaceHistoryEntry(item))
+        .filter((item): item is ScriptWorkspaceHistoryEntry => item !== null),
+    };
+  }
+  if (!parsed || typeof parsed !== "object") return { entries: [] };
+  const payload = parsed as { entries?: unknown; updatedAt?: unknown };
+  const entries = Array.isArray(payload.entries)
+    ? payload.entries
+      .map((item) => normalizeScriptWorkspaceHistoryEntry(item))
+      .filter((item): item is ScriptWorkspaceHistoryEntry => item !== null)
+    : [];
+  return {
+    entries,
+    ...(typeof payload.updatedAt === "string" && payload.updatedAt.trim() ? { updatedAt: payload.updatedAt.trim() } : {}),
+  };
+}
+
+async function readScriptWorkspaceHistoryStore(historyPath: string): Promise<ScriptWorkspaceHistoryStore> {
+  try {
+    const raw = await readFile(historyPath, "utf-8");
+    return loadScriptWorkspaceHistoryJson(raw);
+  } catch {
+    return { entries: [] };
+  }
+}
+
+function dedupeScriptWorkspaceHistoryEntries(entries: ReadonlyArray<ScriptWorkspaceHistoryEntry>): ScriptWorkspaceHistoryEntry[] {
+  const map = new Map<string, ScriptWorkspaceHistoryEntry>();
+  for (const entry of entries) {
+    const key = `${entry.bookId}:${entry.version}`;
+    const existing = map.get(key);
+    if (!existing || existing.savedAt <= entry.savedAt) {
+      map.set(key, entry);
+    }
+  }
+  return [...map.values()].sort((left, right) => {
+    if (left.bookId !== right.bookId) return left.bookId.localeCompare(right.bookId);
+    if (left.version !== right.version) return left.version - right.version;
+    return left.savedAt.localeCompare(right.savedAt);
+  });
+}
+
+async function readScriptWorkspaceHistoryEntries(bookDir: string, bookId: string, currentWorkspace?: ScriptWorkspace | null): Promise<ScriptWorkspaceHistoryEntry[]> {
+  const historyPath = scriptWorkspaceHistoryPath(bookDir);
+  const store = await readScriptWorkspaceHistoryStore(historyPath);
+  const entries = store.entries.filter((entry) => entry.bookId === bookId);
+  if (currentWorkspace && entries.length === 0) {
+    entries.push({
+      bookId,
+      version: 1,
+      action: "current",
+      savedAt: currentWorkspace.updatedAt,
+      workspace: normalizeScriptWorkspace(currentWorkspace),
+    });
+  }
+  return dedupeScriptWorkspaceHistoryEntries(entries);
+}
+
+async function writeScriptWorkspace(
+  bookDir: string,
+  workspace: ScriptWorkspace,
+  action: "save" | "generate" | "rollback" = "save",
+): Promise<{ workspace: ScriptWorkspace; version: number }> {
+  const workspacePath = join(bookDir, "story", "state", "script-workspace.json");
+  const historyPath = scriptWorkspaceHistoryPath(bookDir);
+  const now = new Date().toISOString();
+  const normalizedWorkspace = normalizeScriptWorkspace({
+    ...workspace,
+    updatedAt: now,
+  });
+  await mkdir(join(bookDir, "story", "state"), { recursive: true });
+  const historyStore = await readScriptWorkspaceHistoryStore(historyPath);
+  const existing = historyStore.entries.filter((entry) => entry.bookId === normalizedWorkspace.bookId);
+  const version = existing.length > 0 ? Math.max(...existing.map((entry) => entry.version)) + 1 : 1;
+  historyStore.entries.push({
+    bookId: normalizedWorkspace.bookId,
+    version,
+    action,
+    savedAt: now,
+    workspace: normalizedWorkspace,
+  });
+  await writeFile(workspacePath, JSON.stringify(normalizedWorkspace, null, 2), "utf-8");
+  await writeFile(historyPath, JSON.stringify({
+    entries: dedupeScriptWorkspaceHistoryEntries(historyStore.entries),
+    updatedAt: now,
+  }, null, 2), "utf-8");
+  return { workspace: normalizedWorkspace, version };
+}
+
+function summarizeScriptWorkspaceHistoryEntry(entry: ScriptWorkspaceHistoryEntry): ScriptWorkspaceHistoryEntry {
+  return {
+    ...entry,
+    workspace: normalizeScriptWorkspace(entry.workspace),
+  };
+}
+
+function compareScriptWorkspaceVersions(from: ScriptWorkspace, to: ScriptWorkspace): ScriptWorkspaceDiffResult {
+  const changedFields = [
+    "selectedChapterNumbers",
+    "config",
+    "scriptPrompt",
+    "extraction",
+    "episodes",
+  ].filter((field) => JSON.stringify(from[field as keyof ScriptWorkspace]) !== JSON.stringify(to[field as keyof ScriptWorkspace]));
+  return {
+    fromVersion: 0,
+    toVersion: 0,
+    changedFields,
+    from,
+    to,
+  };
+}
+
 function inferChapterNumberFromText(message: string): number | undefined {
   const zhMatch = message.match(/第\s*(\d+)\s*章/i);
   if (zhMatch?.[1]) {
@@ -177,6 +2542,104 @@ function inferChapterNumberFromText(message: string): number | undefined {
     if (Number.isFinite(value) && value > 0) return value;
   }
   return undefined;
+}
+
+function normalizeMarkdownForWrite(content: string): string {
+  return content.trimEnd() + "\n";
+}
+
+async function readWizardStepMarkdown(bookDir: string, step: BookCreationWizardStep): Promise<string> {
+  const wizardDir = join(bookDir, "wizard");
+  const candidates = [
+    WIZARD_STEP_FILE_NAMES[step],
+    LEGACY_WIZARD_STEP_FILE_NAMES[step],
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+
+  for (const fileName of candidates) {
+    const content = await readFile(join(wizardDir, fileName), "utf-8").catch(() => "");
+    if (content.trim()) {
+      return normalizeMarkdownForWrite(content);
+    }
+  }
+  return "";
+}
+
+async function writeStoryArtifactCopies(paths: ReadonlyArray<string>, content: string): Promise<void> {
+  if (!content.trim()) return;
+  const normalized = normalizeMarkdownForWrite(content);
+  await Promise.all(paths.map(async (targetPath) => {
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, normalized, "utf-8");
+  }));
+}
+
+async function syncWizardArtifactsToStory(bookDir: string): Promise<void> {
+  const syncPlan: ReadonlyArray<{
+    readonly step: BookCreationWizardStep;
+    readonly targets: ReadonlyArray<string>;
+  }> = [
+    {
+      step: "intro",
+      targets: [
+        join(bookDir, "story", "foundation_brief.md"),
+      ],
+    },
+    {
+      step: "world",
+      targets: [
+        join(bookDir, "story", "outline", "story_frame.md"),
+        join(bookDir, "story", "story_bible.md"),
+      ],
+    },
+    {
+      step: "outline",
+      targets: [
+        join(bookDir, "story", "novel_outline.md"),
+      ],
+    },
+    {
+      step: "volume",
+      targets: [
+        join(bookDir, "story", "outline", "volume_map.md"),
+        join(bookDir, "story", "volume_outline.md"),
+      ],
+    },
+    {
+      step: "characters",
+      targets: [
+        join(bookDir, "story", "character_matrix.md"),
+      ],
+    },
+    {
+      step: "arc",
+      targets: [
+        join(bookDir, "story", "character_arc.md"),
+      ],
+    },
+    {
+      step: "relation",
+      targets: [
+        join(bookDir, "story", "relationship_map.md"),
+      ],
+    },
+  ];
+
+  for (const entry of syncPlan) {
+    const content = await readWizardStepMarkdown(bookDir, entry.step);
+    if (!content.trim()) continue;
+    await writeStoryArtifactCopies(entry.targets, content);
+  }
+}
+
+function resolveTruthFileReadPath(bookDir: string, file: string): string {
+  const storagePath = resolveArtifactStoragePath(file);
+  return storagePath.startsWith("story/")
+    ? join(bookDir, storagePath)
+    : join(bookDir, "story", storagePath);
+}
+
+function resolveTruthFileResponseName(file: string): string {
+  return normalizeArtifactFile(file);
 }
 
 function hasLogContextPrefix(message: string): boolean {
@@ -298,6 +2761,11 @@ interface ChapterPlanHistoryEntry {
 
 interface ChapterPlanHistoryStore {
   readonly entries: ChapterPlanHistoryEntry[];
+  readonly updatedAt?: string;
+}
+
+interface ScriptWorkspaceHistoryStore {
+  readonly entries: ScriptWorkspaceHistoryEntry[];
   readonly updatedAt?: string;
 }
 
@@ -667,7 +3135,7 @@ interface NormalizedReviseAuditSummary {
 type PipelineAuditDraftResult = Awaited<ReturnType<PipelineRunner["auditDraft"]>>;
 type PipelineReviseDraftResult = Awaited<ReturnType<PipelineRunner["reviseDraft"]>>;
 
-const AUTO_REVISE_MAX_ROUNDS = 2;
+const AUTO_REVISE_MAX_ROUNDS = 3;
 const AUTO_REVISE_MODE = "spot-fix" as const;
 const AUTO_REVISE_MODES = ["polish", "rewrite", "rework", "spot-fix", "anti-detect"] as const;
 type AutoReviseMode = typeof AUTO_REVISE_MODES[number];
@@ -2091,11 +4559,30 @@ function normalizeWriteAuditSummary(
   };
 }
 
-function emitSyntheticDraftDeltas(args: {
+function emitSyntheticThinkingAndDraftDeltas(args: {
   readonly sessionId: string;
   readonly runId: string;
+  readonly thinking: string[];
   readonly text: string;
 }): void {
+  for (const item of args.thinking) {
+    const chunk = item.trim();
+    if (!chunk) continue;
+    broadcast("thinking:start", {
+      sessionId: args.sessionId,
+      runId: args.runId,
+    });
+    broadcast("thinking:delta", {
+      sessionId: args.sessionId,
+      runId: args.runId,
+      text: chunk,
+    });
+    broadcast("thinking:end", {
+      sessionId: args.sessionId,
+      runId: args.runId,
+    });
+  }
+
   const text = args.text;
   if (!text) return;
   const chunkSize = 120;
@@ -2108,6 +4595,19 @@ function emitSyntheticDraftDeltas(args: {
       text: chunk,
     });
   }
+}
+
+function emitSyntheticDraftDeltas(args: {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly text: string;
+}): void {
+  emitSyntheticThinkingAndDraftDeltas({
+    sessionId: args.sessionId,
+    runId: args.runId,
+    thinking: [],
+    text: args.text,
+  });
 }
 
 interface CollectedToolExec {
@@ -3189,7 +5689,17 @@ function normalizeServiceConfig(raw: unknown): ServiceConfigEntry[] {
 function mergeServiceConfig(existing: ServiceConfigEntry[], updates: ServiceConfigEntry[]): ServiceConfigEntry[] {
   const merged = new Map(existing.map((entry) => [serviceConfigKey(entry), entry]));
   for (const update of updates) {
-    merged.set(serviceConfigKey(update), update);
+    const key = serviceConfigKey(update);
+    const current = merged.get(key);
+    if (!current) {
+      merged.set(key, update);
+      continue;
+    }
+    merged.set(key, {
+      ...current,
+      ...update,
+      ...(update.models !== undefined ? { models: update.models } : {}),
+    });
   }
   return [...merged.values()];
 }
@@ -3245,6 +5755,16 @@ function isWriteInstruction(instruction: string): boolean {
     return false;
   }
   return /(写下一章|下一章|连写|连续写|写第?\d+章|write next|next chapter|write\s+\d+\s+chapters?)/i.test(text);
+}
+
+function isWizardStepRequest(step: unknown): step is BookCreationWizardStep {
+  return step === "intro"
+    || step === "world"
+    || step === "outline"
+    || step === "volume"
+    || step === "characters"
+    || step === "arc"
+    || step === "relation";
 }
 
 type DeterministicAgentAction =
@@ -5033,11 +7553,12 @@ async function probeServiceCapabilities(args: {
 
 // --- Server factory ---
 
-export function createStudioServer(initialConfig: ProjectConfig, root: string) {
+export function createStudioServer(initialConfig: ProjectConfig, root: string, options: StudioServerOptions = {}) {
   const app = new Hono();
   const state = new StateManager(root);
   const reviewMetricsByBook = new Map<string, ReviewMetricsBookStore>();
   let cachedConfig = initialConfig;
+  const openPath = options.openPath ?? openPathWithSystemDefault;
 
   function recordReviewMetrics(args: {
     bookId: string;
@@ -5635,15 +8156,178 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     return { summary, tasks };
   }
 
+  async function tryGenerateScriptWorkspaceWithLLM(args: {
+    readonly bookId: string;
+    readonly selectedChapterNumbers: ReadonlyArray<number>;
+    readonly config: ScriptWorkspaceConfig;
+  }): Promise<ScriptWorkspace | null> {
+    try {
+      const currentConfig = await loadCurrentProjectConfig({ requireApiKey: false });
+      const client = createLLMClient(currentConfig.llm);
+      const fallbackWorkspace = await buildScriptWorkspaceFromChapters({
+        state,
+        bookId: args.bookId,
+        selectedChapterNumbers: args.selectedChapterNumbers,
+        config: args.config,
+      });
+      const { chapterInputs, chapterGroups, selectedChapterNumbers } = await loadScriptWorkspaceChapterInputs({
+        state,
+        bookId: args.bookId,
+        selectedChapterNumbers: args.selectedChapterNumbers,
+        config: args.config,
+      });
+
+      const planPrompt = buildScriptWorkspaceLLMPlanPrompt({
+        config: args.config,
+        chapterInputs,
+        chapterGroups,
+      });
+      const planResponse = await chatCompletion(
+        client,
+        currentConfig.llm.model,
+        [
+          {
+            role: "system",
+            content: "你是短视频剧本与提示词结构化输出助手。只输出 JSON，不要输出任何额外说明。",
+          },
+          { role: "user", content: planPrompt },
+        ],
+        { maxTokens: 8_192 },
+      );
+      const planCandidate = extractJsonObjectCandidate(planResponse.content ?? "");
+      if (!planCandidate) return null;
+      const parsedPlan = JSON.parse(planCandidate) as unknown;
+      const normalizedPlan = normalizeScriptWorkspacePlan(parsedPlan, fallbackWorkspace);
+      if (normalizedPlan.episodes.length === 0) return null;
+
+      const episodeOutputs: unknown[] = [];
+      for (const episodePlan of normalizedPlan.episodes) {
+        const episodeChapterInputs = chapterInputs.filter((input) => episodePlan.sourceChapterNumbers.includes(input.chapterNumber));
+        const episodePrompt = buildScriptWorkspaceLLMEpisodePrompt({
+          config: args.config,
+          episodePlan,
+          chapterInputs: episodeChapterInputs.length > 0 ? episodeChapterInputs : chapterInputs,
+        });
+        const episodeResponse = await chatCompletion(
+          client,
+          currentConfig.llm.model,
+          [
+            {
+              role: "system",
+              content: "你是短视频剧本与提示词结构化输出助手。只输出 JSON，不要输出任何额外说明。",
+            },
+            { role: "user", content: episodePrompt },
+          ],
+          { maxTokens: 8_192 },
+        );
+        const episodeCandidate = extractJsonObjectCandidate(episodeResponse.content ?? "");
+        episodeOutputs.push(episodeCandidate ? JSON.parse(episodeCandidate) : null);
+      }
+
+      const workspace = buildWorkspaceFromPlanWithEpisodeOutputs({
+        bookId: args.bookId,
+        selectedChapterNumbers,
+        config: args.config,
+        plan: normalizedPlan,
+        fallback: fallbackWorkspace,
+        episodeOutputs,
+      });
+      if (workspace.episodes.length === 0) return null;
+      return workspace;
+    } catch {
+      return null;
+    }
+  }
+
+  const WIZARD_STEP_ORDER: ReadonlyArray<BookCreationWizardStep> = [
+    "intro",
+    "world",
+    "outline",
+    "volume",
+    "characters",
+    "arc",
+    "relation",
+  ];
+
+  type BookCreationSummary = {
+    readonly shellCreated: boolean;
+    readonly wizardCompleted: boolean;
+    readonly currentStep: BookCreationWizardStep;
+    readonly resumeStep: BookCreationWizardStep;
+    readonly completedSteps: ReadonlyArray<BookCreationWizardStep>;
+    readonly completedCount: number;
+    readonly totalSteps: number;
+  };
+
+  type BookConfigWithCreationState = Awaited<ReturnType<typeof state.loadBookConfig>> & {
+    readonly creationState?: "wizard" | "ready";
+  };
+
+  function resolveBookCreationSummary(
+    creationState: "wizard" | "ready" | undefined,
+    wizard: Awaited<ReturnType<typeof state.loadBookWizardState>> | null | undefined,
+  ): BookCreationSummary {
+    if (creationState === "ready") {
+      return {
+        shellCreated: false,
+        wizardCompleted: true,
+        currentStep: "relation",
+        resumeStep: "relation",
+        completedSteps: WIZARD_STEP_ORDER,
+        completedCount: WIZARD_STEP_ORDER.length,
+        totalSteps: WIZARD_STEP_ORDER.length,
+      };
+    }
+
+    const savedStepCount = wizard ? WIZARD_STEP_ORDER.filter((step) => wizard.steps?.[step]?.status === "saved").length : 0;
+    const hasWizardProgress = Boolean(
+      wizard?.bookShellCreated
+      || savedStepCount > 0
+      || (wizard && WIZARD_STEP_ORDER.some((step) => wizard.steps?.[step]?.version && wizard.steps?.[step]?.version > 0)),
+    );
+
+    if (!hasWizardProgress && creationState !== "wizard") {
+      return {
+        shellCreated: false,
+        wizardCompleted: true,
+        currentStep: "relation",
+        resumeStep: "relation",
+        completedSteps: WIZARD_STEP_ORDER,
+        completedCount: WIZARD_STEP_ORDER.length,
+        totalSteps: WIZARD_STEP_ORDER.length,
+      };
+    }
+
+    const completedSteps = WIZARD_STEP_ORDER.filter((step) => wizard?.steps?.[step]?.status === "saved");
+    const wizardCompleted = completedSteps.length >= WIZARD_STEP_ORDER.length;
+    const firstIncompleteStep = WIZARD_STEP_ORDER.find((step) => !completedSteps.includes(step));
+    const currentStep = wizard && WIZARD_STEP_ORDER.includes(wizard.currentStep) ? wizard.currentStep : "intro";
+
+    return {
+      shellCreated: Boolean(wizard?.bookShellCreated || creationState === "wizard"),
+      wizardCompleted,
+      currentStep,
+      resumeStep: wizardCompleted ? "relation" : (firstIncompleteStep ?? currentStep),
+      completedSteps,
+      completedCount: completedSteps.length,
+      totalSteps: WIZARD_STEP_ORDER.length,
+    };
+  }
+
   // --- Books ---
 
   app.get("/api/v1/books", async (c) => {
     const bookIds = await state.listBooks();
     const books = await Promise.all(
       bookIds.map(async (id) => {
-        const book = await state.loadBookConfig(id);
+        const book = await state.loadBookConfig(id) as BookConfigWithCreationState;
         const nextChapter = await state.getNextChapterNumber(id);
-        return { ...book, chaptersWritten: nextChapter - 1 };
+        const wizard = await state.loadBookWizardState(id).catch(() => null);
+        return {
+          ...book,
+          chaptersWritten: nextChapter - 1,
+          creation: resolveBookCreationSummary(book.creationState, wizard),
+        };
       }),
     );
     return c.json({ books });
@@ -5652,12 +8336,165 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   app.get("/api/v1/books/:id", async (c) => {
     const id = c.req.param("id");
     try {
-      const book = await state.loadBookConfig(id);
+      const book = await state.loadBookConfig(id) as BookConfigWithCreationState;
       const chapters = await state.loadChapterIndex(id);
       const nextChapter = await state.getNextChapterNumber(id);
-      return c.json({ book, chapters, nextChapter });
+      const wizard = await state.loadBookWizardState(id).catch(() => null);
+      return c.json({
+        book,
+        chapters,
+        nextChapter,
+        creation: resolveBookCreationSummary(book.creationState, wizard),
+      });
     } catch {
       return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
+  // --- Wizard ---
+
+  app.get("/api/v1/books/:id/wizard", async (c) => {
+    const id = c.req.param("id");
+    const book = await state.loadBookConfig(id).catch(() => null);
+    if (!book) {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+    const wizard = await state.loadBookWizardState(id).catch(() => null);
+    if (!wizard) return c.json({ error: `Wizard state for "${id}" not found` }, 404);
+    return c.json({ wizard });
+  });
+
+  app.get("/api/v1/books/:id/wizard/:step", async (c) => {
+    const id = c.req.param("id");
+    const step = c.req.param("step") as BookCreationWizardStep;
+    if (!["intro", "world", "outline", "volume", "characters", "arc", "relation"].includes(step)) {
+      return c.json({ error: `Invalid wizard step "${step}"` }, 400);
+    }
+    const book = await state.loadBookConfig(id).catch(() => null);
+    if (!book) return c.json({ error: `Book "${id}" not found` }, 404);
+    try {
+      const wizard = await state.loadBookWizardStep(id, step);
+      return c.json({ step, ...wizard });
+    } catch {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
+  app.post("/api/v1/books/:id/wizard/shell", async (c) => {
+    const id = c.req.param("id");
+    const book = await state.loadBookConfig(id).catch(() => null);
+    if (!book) return c.json({ error: `Book "${id}" not found` }, 404);
+    try {
+      const wizard = await state.markBookShellCreated(id);
+      return c.json({ ok: true, wizard });
+    } catch {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
+  app.post("/api/v1/books/:id/wizard/complete", async (c) => {
+    const id = c.req.param("id");
+    const book = await state.loadBookConfig(id).catch(() => null);
+    if (!book) return c.json({ error: `Book "${id}" not found` }, 404);
+    try {
+      const updatedBook = await state.markBookReady(id);
+      const wizard = await state.markBookShellCreated(id);
+      return c.json({ ok: true, book: updatedBook, wizard });
+    } catch {
+      return c.json({ error: `Book "${id}" not found` }, 404);
+    }
+  });
+
+  app.post("/api/v1/books/:id/wizard/:step", async (c) => {
+    const id = c.req.param("id");
+    const step = c.req.param("step") as BookCreationWizardStep;
+    if (!["intro", "world", "outline", "volume", "characters", "arc", "relation"].includes(step)) {
+      return c.json({ error: `Invalid wizard step "${step}"` }, 400);
+    }
+    const book = await state.loadBookConfig(id).catch(() => null);
+    if (!book) return c.json({ error: `Book "${id}" not found` }, 404);
+    const body = await c.req.json<{
+      content?: string;
+      expectedVersion?: number;
+    }>().catch(() => null);
+    const content = body?.content ?? "";
+    const expectedVersion = body?.expectedVersion;
+    try {
+      const result = await state.saveBookWizardStep(
+        id,
+        step,
+        content,
+        expectedVersion,
+      );
+      return c.json({ ok: true, step, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/version conflict/i.test(message)) {
+        return c.json({ error: message }, 409);
+      }
+      return c.json({ error: message }, 400);
+    }
+  });
+
+  const WIZARD_FILES = new Set([
+    "intro.md",
+    "world.md",
+    "outline.md",
+    "volume.md",
+    "characters.md",
+    "character_arc.md",
+    "relationship_map.md",
+  ]);
+
+  const WIZARD_FILE_TO_STEP: Readonly<Record<string, BookCreationWizardStep>> = {
+    "intro.md": "intro",
+    "world.md": "world",
+    "outline.md": "outline",
+    "volume.md": "volume",
+    "characters.md": "characters",
+    "character_arc.md": "arc",
+    "relationship_map.md": "relation",
+  };
+
+  app.get("/api/v1/books/:id/wizard-file/:file", async (c) => {
+    const id = c.req.param("id");
+    const file = c.req.param("file");
+    if (!WIZARD_FILES.has(file)) {
+      return c.json({ error: "Invalid wizard file" }, 400);
+    }
+    try {
+      const step = WIZARD_FILE_TO_STEP[file];
+      const wizard = await state.loadBookWizardStep(id, step);
+      return c.json({ step, file, ...wizard });
+    } catch {
+      const step = WIZARD_FILE_TO_STEP[file];
+      return c.json({ step, file, content: "", status: "empty", version: 0 });
+    }
+  });
+
+  app.put("/api/v1/books/:id/wizard-file/:file", async (c) => {
+    const id = c.req.param("id");
+    const file = c.req.param("file");
+    if (!WIZARD_FILES.has(file)) {
+      return c.json({ error: "Invalid wizard file" }, 400);
+    }
+    const body = await c.req.json<{ content?: string; expectedVersion?: number }>().catch(() => null);
+    const content = typeof body?.content === "string" ? body.content : "";
+    try {
+      const step = WIZARD_FILE_TO_STEP[file];
+      const result = await state.saveBookWizardStep(
+        id,
+        step,
+        content,
+        typeof body?.expectedVersion === "number" ? body.expectedVersion : undefined,
+      );
+      return c.json({ ok: true, step, file, ...result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/version conflict/i.test(message)) {
+        return c.json({ error: message }, 409);
+      }
+      return c.json({ error: message }, 500);
     }
   });
 
@@ -5680,6 +8517,40 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   });
 
   // --- Book Create ---
+
+  app.post("/api/v1/books/create-shell", async (c) => {
+    const body = await c.req.json<{
+      title: string;
+      genre: string;
+      language?: string;
+      platform?: string;
+      chapterWordCount?: number;
+      targetChapters?: number;
+      blurb?: string;
+      storyBackground?: string;
+      introMarkdown?: string;
+    }>();
+
+    const now = new Date().toISOString();
+    const bookConfig = buildStudioBookConfig(body, now);
+    const bookId = bookConfig.id;
+    const bookDir = state.bookDir(bookId);
+    const introContent = body.introMarkdown?.trim()
+      || [body.blurb?.trim(), body.storyBackground?.trim()].filter(Boolean).join("\n\n");
+
+    try {
+      await access(join(bookDir, "book.json"));
+    } catch {
+      await state.saveBookConfig(bookId, bookConfig);
+    }
+
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+
+    const introState = await state.loadBookWizardStep(bookId, "intro");
+    await state.saveBookWizardStep(bookId, "intro", introContent || "", introState.version);
+    const wizard = await state.markBookShellCreated(bookId);
+    return c.json({ ok: true, bookId, book: bookConfig, wizard });
+  });
 
   app.post("/api/v1/books/create", async (c) => {
     const body = await c.req.json<{
@@ -5861,8 +8732,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
   // --- Truth files ---
 
   const TRUTH_FILES = [
-    "brief.md",
+    "foundation_brief.md",
     "author_intent.md", "current_focus.md",
+    "story/outline/story_frame.md",
+    "story/outline/volume_map.md",
     "story_bible.md", "novel_outline.md", "volume_outline.md", "current_state.md",
     "particle_ledger.md", "pending_hooks.md", "chapter_summaries.md",
     "subplot_board.md", "emotional_arcs.md", "character_matrix.md",
@@ -5870,11 +8743,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     "style_guide.md", "parent_canon.md", "fanfic_canon.md", "book_rules.md",
   ];
   const TRUTH_FILE_PATHS = new Set([
-    "brief.md",
+    "foundation_brief.md",
     "author_intent.md",
     "current_focus.md",
     "story/author_intent.md",
     "story/current_focus.md",
+    "story/outline/story_frame.md",
+    "story/outline/volume_map.md",
     "story_bible.md",
     "novel_outline.md",
     "volume_outline.md",
@@ -5903,10 +8778,10 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
     const bookDir = state.bookDir(id);
     try {
-      const content = await readFile(file.startsWith("story/") ? join(bookDir, file) : join(bookDir, "story", file), "utf-8");
-      return c.json({ file, content });
+      const content = await readFile(resolveTruthFileReadPath(bookDir, file), "utf-8");
+      return c.json({ file: resolveTruthFileResponseName(file), content });
     } catch {
-      return c.json({ file, content: null });
+      return c.json({ file: resolveTruthFileResponseName(file), content: null });
     }
   });
 
@@ -6309,8 +9184,12 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const llm = (config.llm as Record<string, unknown> | undefined) ?? {};
     const services = normalizeServiceConfig(llm.services);
     const envConfig = await readEnvConfigStatus(root);
+    const configuredService = typeof llm.service === "string" && llm.service.trim().length > 0
+      ? llm.service.trim()
+      : null;
     return c.json({
       services,
+      service: configuredService,
       defaultModel: llm.defaultModel ?? null,
       configSource: normalizeConfigSource(llm.configSource),
       envConfig,
@@ -6659,12 +9538,25 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const bookDir = state.bookDir(id);
     const storyDir = join(bookDir, "story");
     try {
-      const files = await readdir(storyDir);
-      const mdFiles = files.filter((f) => f.endsWith(".md"));
+      const rootFiles = await readdir(storyDir).catch(() => [] as string[]);
+      const outlineDir = join(storyDir, "outline");
+      const outlineFiles = await readdir(outlineDir).catch(() => [] as string[]);
+      const mdFiles = [
+        ...rootFiles.filter((f) => f.endsWith(".md")),
+        ...outlineFiles.filter((f) => f.endsWith(".md")).map((f) => `story/outline/${f}`),
+      ];
+      const deduped = new Map<string, { path: string; alias: string }>();
+      for (const file of mdFiles) {
+        const alias = TRUTH_FILE_ALIASES[file] ?? file;
+        const existing = deduped.get(alias);
+        if (!existing || (existing.path === "volume_outline.md" && file === "story/outline/volume_map.md")) {
+          deduped.set(alias, { path: file, alias });
+        }
+      }
       const result = await Promise.all(
-        mdFiles.map(async (f) => {
-          const content = await readFile(join(storyDir, f), "utf-8");
-          return { name: f, size: content.length, preview: content.slice(0, 200) };
+        [...deduped.values()].map(async ({ path, alias }) => {
+          const content = await readFile(resolveTruthFileReadPath(bookDir, path), "utf-8");
+          return { name: resolveTruthFileResponseName(alias), size: content.length, preview: content.slice(0, 200) };
         }),
       );
       return c.json({ files: result });
@@ -6824,7 +9716,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
 
   app.get("/api/v1/sessions/:sessionId", async (c) => {
     const session = await loadBookSession(root, c.req.param("sessionId"));
-    if (!session) return c.json({ error: "Session not found" }, 404);
+    if (!session) return c.json({ session: null });
     return c.json({ session });
   });
 
@@ -6927,8 +9819,11 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       quickMode?: boolean;
       preferFastWriterModel?: boolean;
       forceStream?: boolean;
+      responseFormat?: "json_object";
+      wizardStep?: string;
       wizardAdvance?: {
         wizardStep: string;
+        nextStep?: string;
         language: string;
         stepTitle: string;
         title?: string;
@@ -6949,12 +9844,19 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       quickMode: reqQuickMode,
       preferFastWriterModel: reqPreferFastWriterModel,
       forceStream: reqForceStream,
+      responseFormat: reqResponseFormat,
+      wizardStep: reqWizardStep,
       wizardAdvance: reqWizardAdvance,
     } = payload;
     const sessionId = reqSessionId;
     const runId = reqRunId?.trim() || createAgentRunId();
-    const writeIntent = isWriteInstruction(instruction ?? "");
-    const deterministicAction = activeBookId ? parseDeterministicAgentAction(instruction ?? "") : null;
+    const isWizardContext = isWizardStepRequest(reqWizardStep)
+      || isWizardStepRequest(reqWizardAdvance?.wizardStep)
+      || isWizardStepRequest(reqWizardAdvance?.nextStep);
+    const writeIntent = isWizardContext ? false : isWriteInstruction(instruction ?? "");
+    const deterministicAction = activeBookId && !isWizardContext
+      ? parseDeterministicAgentAction(instruction ?? "")
+      : null;
     const destructiveInstructionRequested = deterministicAction?.kind === "rewrite"
       || deterministicAction?.kind === "rewrite-batch";
     const writerKernelIntent = writeIntent
@@ -6963,6 +9865,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const quickMode = reqQuickMode ?? writeIntent;
     const preferFastWriterModel = reqPreferFastWriterModel ?? true;
     const forceStream = reqForceStream === true;
+    const responseFormat = reqResponseFormat;
     let writeIndexBefore: ReadonlyArray<ChapterIndexEntryLike> = [];
     if (!instruction?.trim()) {
       return c.json({ error: "No instruction provided" }, 400);
@@ -7007,7 +9910,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     try {
       // Load config + create LLM client (pipeline created after model resolution)
       const config = await loadCurrentProjectConfig({ requireApiKey: false });
-      const client = createLLMClient(forceStream ? { ...config.llm, stream: true } : config.llm);
+      const mergedLlmExtra = responseFormat
+        ? { ...(config.llm.extra ?? {}), response_format: { type: responseFormat } }
+        : config.llm.extra;
+      const baseLlmConfig = {
+        ...config.llm,
+        ...(mergedLlmExtra ? { extra: mergedLlmExtra } : {}),
+      };
+      const client = createLLMClient(forceStream ? { ...baseLlmConfig, stream: true } : baseLlmConfig);
 
       const loadedBookSession = await loadBookSession(root, sessionId);
       if (!loadedBookSession) {
@@ -7028,6 +9938,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               language: reqWizardAdvance.language,
               stepTitle: reqWizardAdvance.stepTitle,
               wizardStep: reqWizardAdvance.wizardStep,
+              ...(reqWizardAdvance.nextStep ? { nextStep: reqWizardAdvance.nextStep } : {}),
               ...(reqWizardAdvance.title ? { title: reqWizardAdvance.title } : {}),
               ...(reqWizardAdvance.genre ? { genre: reqWizardAdvance.genre } : {}),
               ...(reqWizardAdvance.platform ? { platform: reqWizardAdvance.platform } : {}),
@@ -7264,7 +10175,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       // Let createLLMClient resolve baseUrl from the service preset.
       const pipelineClient = (effectiveReqService && effectiveReqModel && resolvedApiKey)
         ? createLLMClient({
-            ...config.llm,
+            ...baseLlmConfig,
             service: configuredEntry?.service ?? effectiveReqService,
             model: effectiveReqModel,
             apiKey: resolvedApiKey,
@@ -7289,6 +10200,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         defaultWriteNextQuickMode: quickMode,
         writeStageHeartbeatMs: resolveWriteStageHeartbeatMs(),
       }));
+      const tools = createInteractionToolsFromDeps(pipeline, state, {
+        onThinkingDelta: (text: string) => {
+          broadcast("thinking:delta", { sessionId: streamSessionId, runId, text });
+        },
+        onDraftTextDelta: (text: string) => {
+          broadcast("draft:delta", { sessionId: streamSessionId, runId, text });
+        },
+        onDraftRawDelta: (text: string) => {
+          broadcast("draft:delta", { sessionId: streamSessionId, runId, text });
+        },
+      } as any);
 
       // Run pi-agent session
       const collectedToolExecs: CollectedToolExec[] = [];
@@ -7300,6 +10222,122 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       let precomputedWritePersistence: WritePersistenceCheckResult | null = null;
       let latestAuditReport: AuditToolReport | null = null;
       let explicitAuditToolCalled = false;
+      const isIntroRevisionRequest = typeof instruction === "string"
+        && /^\/intro(?:\s+|$)/i.test(instruction.trim())
+        && (reqWizardStep === "intro" || reqWizardAdvance?.wizardStep === "intro" || /wizardStep=intro/i.test(instruction));
+      const isWizardDraftRequest = !isIntroRevisionRequest
+        && isWizardStepRequest(reqWizardStep)
+        && reqWizardStep !== "intro";
+
+      if (isIntroRevisionRequest) {
+        if (!tools.reviseBookIntro) {
+          throw new Error("简介正文生成工具未就绪。");
+        }
+        const introSeed = reqWizardAdvance?.instruction?.trim() || instruction.trim();
+        broadcast("thinking:start", { sessionId: streamSessionId, runId });
+        const introToolResult = await tools.reviseBookIntro(
+          introSeed,
+          bookSession.creationDraft,
+          (instruction.includes("mode=polish") || instruction.includes("润色")) ? "polish" : "generate",
+          reqWizardAdvance?.genre ?? bookSession.creationDraft?.genre,
+        );
+        broadcast("thinking:end", { sessionId: streamSessionId, runId });
+        const metadata = introToolResult && typeof introToolResult === "object" && "__interaction" in introToolResult
+          ? (introToolResult as { __interaction?: { responseText?: string; details?: { creationDraft?: unknown; draftRaw?: string } } }).__interaction
+          : undefined;
+        const introDraft = metadata?.details?.creationDraft as unknown;
+        const responseText = metadata?.responseText?.trim() || (introDraft && typeof introDraft === "object" && "introMarkdown" in introDraft ? String((introDraft as { introMarkdown?: unknown }).introMarkdown ?? "") : "");
+        if (!responseText) {
+          throw new Error("简介正文生成失败：未返回正文。");
+        }
+        const nextSession = metadata?.details?.creationDraft
+          ? ({
+              ...bookSession,
+              creationDraft: metadata.details.creationDraft as any,
+            } as typeof bookSession)
+          : bookSession;
+        bookSession = appendBookSessionMessage(nextSession, {
+          role: "assistant",
+          content: responseText,
+          timestamp: assistantCheckpointTimestamp,
+        });
+        persistedBookSession = bookSession;
+        await persistBookSession(root, bookSession);
+        return c.json({
+          response: responseText,
+          runId,
+          session: {
+            sessionId: bookSession.sessionId,
+            bookId: bookSession.bookId,
+            title: bookSession.title,
+            activeBookId: bookSession.bookId ?? undefined,
+            creationDraft: metadata?.details?.creationDraft,
+          },
+          details: {
+            draftRaw: metadata?.details?.draftRaw,
+          },
+        });
+      }
+
+      if (isWizardDraftRequest) {
+        if (!tools.saveBookWizardStep) {
+          throw new Error("向导正文生成工具未就绪。");
+        }
+        const wizardStep = reqWizardStep as Exclude<BookCreationWizardStep, "intro">;
+        const wizardInput = instruction.trim();
+        broadcast("thinking:start", { sessionId: streamSessionId, runId });
+        const wizardToolResult = await tools.saveBookWizardStep(
+          wizardInput,
+          bookSession.creationDraft,
+          wizardStep,
+        );
+        broadcast("thinking:end", { sessionId: streamSessionId, runId });
+        const metadata = wizardToolResult && typeof wizardToolResult === "object" && "__interaction" in wizardToolResult
+          ? (wizardToolResult as {
+              __interaction?: {
+                responseText?: string;
+                details?: {
+                  creationDraft?: unknown;
+                  draftRaw?: string;
+                };
+              };
+            }).__interaction
+          : undefined;
+        const draftRaw = metadata?.details?.draftRaw?.trim() || "";
+        const responseText = draftRaw || metadata?.responseText?.trim() || "";
+        if (!responseText) {
+          throw new Error("向导正文生成失败：未返回正文。");
+        }
+        broadcast("draft:delta", { sessionId: streamSessionId, runId, text: responseText });
+        const nextSession = metadata?.details?.creationDraft
+          ? ({
+              ...bookSession,
+              creationDraft: metadata.details.creationDraft as any,
+            } as typeof bookSession)
+          : bookSession;
+        bookSession = appendBookSessionMessage(nextSession, {
+          role: "assistant",
+          content: responseText,
+          timestamp: assistantCheckpointTimestamp,
+          wizardStep,
+        } as any);
+        persistedBookSession = bookSession;
+        await persistBookSession(root, bookSession);
+        return c.json({
+          response: responseText,
+          runId,
+          session: {
+            sessionId: bookSession.sessionId,
+            bookId: bookSession.bookId,
+            title: bookSession.title,
+            activeBookId: bookSession.bookId ?? undefined,
+            creationDraft: metadata?.details?.creationDraft,
+          },
+          details: {
+            draftRaw: metadata?.details?.draftRaw,
+          },
+        });
+      }
 
       const persistTelemetryHooks = {
         onPersistCheck: (payload: PersistCheckTelemetry) => {
@@ -8039,7 +11077,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
               : [
                 `自动闭环：最多${unified.autoReview.maxReviseRounds}轮修订，本次执行${unified.autoReview.reviseRoundsUsed}轮。`,
                 unified.autoReview.stoppedByMaxRounds && !finalAudit.passed
-                  ? "结果：二次修订后仍未通过，已自动中止。"
+                  ? `结果：${unified.autoReview.maxReviseRounds}轮修订后仍未通过，已自动中止。`
                   : "结果：已达标并结束自动闭环。",
               ];
             autoSummaryLines.push(
@@ -10946,14 +13984,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
         }
       }
 
-      return c.json({
-        response: result.responseText,
-        runId,
-        tokenUsage: agentTokenUsage,
-        ...(destructiveInstructionRequested ? { destructive: true } : {}),
-        ...(writePersistence
-          ? {
-              details: {
+        const interactionDetails = result && typeof result === "object" && "details" in result
+          ? ((result as { details?: Record<string, unknown> }).details ?? {})
+          : {};
+        const details = {
+          ...interactionDetails,
+          ...(writePersistence
+            ? {
                 effects: {
                   writeNext: {
                     persisted: true,
@@ -10982,14 +14019,20 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
                   missingChapterFiles: writePersistence.missingChapterFiles,
                   repair: writePersistence.repair,
                 },
-              },
-            }
-          : {}),
-        session: {
-          sessionId: bookSession.sessionId,
-          ...(bookSession.bookId ? { activeBookId: bookSession.bookId } : {}),
-        },
-      });
+              }
+            : {}),
+        };
+        return c.json({
+          response: result.responseText,
+          runId,
+          tokenUsage: agentTokenUsage,
+          ...(Object.keys(details).length > 0 ? { details } : {}),
+          ...(destructiveInstructionRequested ? { destructive: true } : {}),
+          session: {
+            sessionId: bookSession.sessionId,
+            ...(bookSession.bookId ? { activeBookId: bookSession.bookId } : {}),
+          },
+        });
     } catch (e) {
       if (e instanceof ApiError) {
         await persistAssistantErrorResponse(e.message);
@@ -11380,6 +14423,26 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     }
   });
 
+  app.post("/api/v1/books/:id/export-open", async (c) => {
+    const id = c.req.param("id");
+    const { path: exportPath } = await c.req.json<{ path?: string }>().catch(() => ({ path: "" }));
+    if (!exportPath || !exportPath.trim()) {
+      return c.json({ error: "Export path is required" }, 400);
+    }
+
+    const resolvedPath = resolveExportPathForProject(root, exportPath);
+    if (!resolvedPath) {
+      return c.json({ error: "Invalid export path" }, 400);
+    }
+
+    try {
+      await openPath(resolvedPath);
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
   // --- Genre detail + copy ---
 
   app.get("/api/v1/genres/:id", async (c) => {
@@ -11479,8 +14542,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     const { content } = await c.req.json<{ content: string }>();
     const bookDir = state.bookDir(id);
     const { writeFile: writeFileFs, mkdir: mkdirFs } = await import("node:fs/promises");
-    await mkdirFs(join(bookDir, "story"), { recursive: true });
-    await writeFileFs(join(bookDir, "story", file), content, "utf-8");
+    const targetPath = resolveTruthFileReadPath(bookDir, file);
+    await mkdirFs(dirname(targetPath), { recursive: true });
+    await writeFileFs(targetPath, content, "utf-8");
+    if (file === "story_bible.md") {
+      await mkdirFs(join(bookDir, "story"), { recursive: true });
+      await writeFileFs(join(bookDir, "story", "story_bible.md"), content, "utf-8");
+    }
+    if (file === "volume_outline.md") {
+      await mkdirFs(join(bookDir, "story"), { recursive: true });
+      await writeFileFs(join(bookDir, "story", "volume_outline.md"), content, "utf-8");
+    }
     return c.json({ ok: true });
   });
 
@@ -12214,8 +15286,17 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
     readonly volumeOutline: string;
   } | null> {
     const volumeOutline = (await readVolumeMap(bookDir, "")).trim();
-    if (!volumeOutline) return null;
-    return { volumeOutline };
+    if (volumeOutline) return { volumeOutline };
+
+    const wizardVolume = (await readWizardStepMarkdown(bookDir, "volume")).trim();
+    if (!wizardVolume) return null;
+
+    await writeStoryArtifactCopies([
+      join(bookDir, "story", "outline", "volume_map.md"),
+      join(bookDir, "story", "volume_outline.md"),
+    ], wizardVolume);
+
+    return { volumeOutline: wizardVolume };
   }
 
   function resolveChapterLimitFromBook(book: { targetChapters?: number } | null | undefined): number | null {
@@ -12985,6 +16066,415 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string) {
       partial: failedChapters.length > 0 && allPlans.length > 0,
       successChapters: allPlans.map((p) => p.chapterNumber),
       failedChapters: failedChapters.length > 0 ? failedChapters : undefined,
+    });
+  });
+
+  // --- Task Checklist ---
+
+  app.get("/api/v1/books/:id/task-checklist", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const checklist = await readTaskChecklist(bookDir, id);
+    return c.json({
+      checklist,
+      templates: listScriptWorkspaceChecklistTemplates(),
+    });
+  });
+
+  // --- Script Workspace ---
+
+  app.get("/api/v1/books/:id/script-workspace", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const workspace = await readScriptWorkspace(bookDir, id, state);
+    return c.json({ workspace });
+  });
+
+  app.get("/api/v1/books/:id/script-workspace/history", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const currentWorkspace = await readScriptWorkspace(bookDir, id, state);
+    const history = await readScriptWorkspaceHistoryEntries(bookDir, id, currentWorkspace);
+    return c.json({
+      history: history.map((entry) => summarizeScriptWorkspaceHistoryEntry(entry)),
+    } satisfies ScriptWorkspaceHistoryResponse);
+  });
+
+  app.put("/api/v1/books/:id/script-workspace", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<ScriptWorkspaceSavePayload>().catch(() => ({ workspace: null as never }));
+    const workspace = normalizeScriptWorkspace({
+      ...(body.workspace ?? {}),
+      bookId: id,
+      updatedAt: new Date().toISOString(),
+    });
+    const saved = await writeScriptWorkspace(bookDir, workspace, "save");
+    return c.json({ workspace: saved.workspace });
+  });
+
+  app.post("/api/v1/books/:id/script-workspace/generate", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<ScriptWorkspaceGeneratePayload>().catch(() => ({ selectedChapterNumbers: [], config: undefined }));
+    const existing = await readScriptWorkspace(bookDir, id, state);
+    const selectedChapterNumbers = body.selectedChapterNumbers ?? existing.selectedChapterNumbers;
+    const config = normalizeWorkspaceConfig(body.config ?? existing.config);
+    const llmWorkspace = await tryGenerateScriptWorkspaceWithLLM({
+      bookId: id,
+      selectedChapterNumbers,
+      config,
+    });
+    const fallbackWorkspace = await buildScriptWorkspaceFromChapters({
+      state,
+      bookId: id,
+      selectedChapterNumbers,
+      config,
+      existing,
+    });
+    const workspace = llmWorkspace ?? fallbackWorkspace;
+    const saved = await writeScriptWorkspace(bookDir, workspace, "generate");
+    return c.json({ workspace: saved.workspace });
+  });
+
+  app.get("/api/v1/books/:id/script-workspace/diff", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const fromVersion = Number(c.req.query("fromVersion"));
+    const toVersion = Number(c.req.query("toVersion"));
+    if (!Number.isFinite(fromVersion) || !Number.isFinite(toVersion) || fromVersion < 1 || toVersion < 1) {
+      return c.json({ error: "fromVersion and toVersion are required" }, 400);
+    }
+    const currentWorkspace = await readScriptWorkspace(bookDir, id, state);
+    const history = await readScriptWorkspaceHistoryEntries(bookDir, id, currentWorkspace);
+    const from = history.find((entry) => entry.version === Math.trunc(fromVersion));
+    const to = history.find((entry) => entry.version === Math.trunc(toVersion));
+    if (!from || !to) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const diff = compareScriptWorkspaceVersions(from.workspace, to.workspace);
+    return c.json({
+      ...diff,
+      fromVersion: from.version,
+      toVersion: to.version,
+    } satisfies ScriptWorkspaceDiffResult);
+  });
+
+  app.post("/api/v1/books/:id/script-workspace/rollback", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<{ targetVersion?: number }>().catch(() => ({ targetVersion: undefined }));
+    const targetVersion = Number(body.targetVersion);
+    if (!Number.isFinite(targetVersion) || targetVersion < 1) {
+      return c.json({ error: "targetVersion is required" }, 400);
+    }
+    const currentWorkspace = await readScriptWorkspace(bookDir, id, state);
+    const history = await readScriptWorkspaceHistoryEntries(bookDir, id, currentWorkspace);
+    const target = history.find((entry) => entry.version === Math.trunc(targetVersion));
+    if (!target) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const saved = await writeScriptWorkspace(bookDir, target.workspace, "rollback");
+    return c.json({ ok: true, workspace: saved.workspace });
+  });
+
+  app.get("/api/v1/books/:id/production-workspace", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const workspace = await readProductionWorkspace(bookDir, id, state);
+    return c.json({ workspace } satisfies ProductionWorkspaceResponse);
+  });
+
+  app.put("/api/v1/books/:id/production-workspace", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<ProductionWorkspaceSavePayload>().catch(() => ({ workspace: null as never }));
+    const workspace = normalizeProductionWorkspace({
+      ...(body.workspace ?? {}),
+      bookId: id,
+      updatedAt: new Date().toISOString(),
+    });
+    const saved = await writeProductionWorkspace(bookDir, workspace);
+    return c.json({ workspace: saved } satisfies ProductionWorkspaceResponse);
+  });
+
+  app.post("/api/v1/books/:id/production-workspace/generate", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<ProductionWorkspaceGeneratePayload>().catch(() => ({ scriptWorkspace: undefined }));
+    const scriptWorkspace = body.scriptWorkspace
+      ? normalizeScriptWorkspace({
+        ...body.scriptWorkspace,
+        bookId: id,
+      })
+      : await readScriptWorkspace(bookDir, id, state);
+    const workspace = buildProductionWorkspaceFromScriptWorkspace(scriptWorkspace);
+    const saved = await writeProductionWorkspace(bookDir, workspace);
+    return c.json({ workspace: saved } satisfies ProductionWorkspaceResponse);
+  });
+
+  app.get("/api/v1/books/:id/director-plan", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const plan = await readDirectorPlan(bookDir, id, state);
+    return c.json({ plan } satisfies DirectorPlanResponse);
+  });
+
+  app.get("/api/v1/books/:id/director-plan/history", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const currentPlan = await readDirectorPlan(bookDir, id, state);
+    const history = await readDirectorPlanHistoryEntries(bookDir, id, currentPlan);
+    return c.json({
+      history: history.map((entry) => summarizeDirectorPlanHistoryEntry(entry)),
+    } satisfies DirectorPlanHistoryResponse);
+  });
+
+  app.put("/api/v1/books/:id/director-plan", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<DirectorPlanSavePayload>().catch(() => ({ plan: null as never }));
+    const plan = normalizeDirectorPlan({
+      ...(body.plan ?? {}),
+      bookId: id,
+      updatedAt: new Date().toISOString(),
+    });
+    const saved = await writeDirectorPlanWithHistory(bookDir, plan, "save");
+    return c.json({ plan: saved.plan } satisfies DirectorPlanResponse);
+  });
+
+  app.post("/api/v1/books/:id/director-plan/generate", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<DirectorPlanGeneratePayload>().catch(() => ({ productionWorkspace: undefined }));
+    const productionWorkspace = body.productionWorkspace
+      ? normalizeProductionWorkspace({
+        ...body.productionWorkspace,
+        bookId: id,
+      })
+      : await readProductionWorkspace(bookDir, id, state);
+    const plan = buildDirectorPlanFromProductionWorkspace(productionWorkspace);
+    const saved = await writeDirectorPlanWithHistory(bookDir, plan, "generate");
+    return c.json({ plan: saved.plan } satisfies DirectorPlanResponse);
+  });
+
+  app.get("/api/v1/books/:id/director-plan/diff", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const fromVersion = Number(c.req.query("fromVersion"));
+    const toVersion = Number(c.req.query("toVersion"));
+    if (!Number.isFinite(fromVersion) || !Number.isFinite(toVersion) || fromVersion < 1 || toVersion < 1) {
+      return c.json({ error: "fromVersion and toVersion are required" }, 400);
+    }
+    const currentPlan = await readDirectorPlan(bookDir, id, state);
+    const history = await readDirectorPlanHistoryEntries(bookDir, id, currentPlan);
+    const from = history.find((entry) => entry.version === Math.trunc(fromVersion));
+    const to = history.find((entry) => entry.version === Math.trunc(toVersion));
+    if (!from || !to) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const diff = compareDirectorPlanVersions(from.plan, to.plan);
+    return c.json({
+      ...diff,
+      fromVersion: from.version,
+      toVersion: to.version,
+    } satisfies DirectorPlanDiffResult);
+  });
+
+  app.post("/api/v1/books/:id/director-plan/rollback", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<{ targetVersion?: number }>().catch(() => ({ targetVersion: undefined }));
+    const targetVersion = Number(body.targetVersion);
+    if (!Number.isFinite(targetVersion) || targetVersion < 1) {
+      return c.json({ error: "targetVersion is required" }, 400);
+    }
+    const currentPlan = await readDirectorPlan(bookDir, id, state);
+    const history = await readDirectorPlanHistoryEntries(bookDir, id, currentPlan);
+    const target = history.find((entry) => entry.version === Math.trunc(targetVersion));
+    if (!target) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const saved = await writeDirectorPlanWithHistory(bookDir, target.plan, "rollback");
+    return c.json({ ok: true, plan: saved.plan });
+  });
+
+  app.get("/api/v1/books/:id/asset-library", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const library = await readAssetLibrary(bookDir, id, state);
+    return c.json({ library } satisfies AssetLibraryResponse);
+  });
+
+  app.get("/api/v1/books/:id/asset-library/history", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const currentLibrary = await readAssetLibrary(bookDir, id, state);
+    const history = await readAssetLibraryHistoryEntries(bookDir, id, currentLibrary);
+    return c.json({
+      history: history.map((entry) => summarizeAssetLibraryHistoryEntry(entry)),
+    } satisfies AssetLibraryHistoryResponse);
+  });
+
+  app.put("/api/v1/books/:id/asset-library", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<AssetLibrarySavePayload>().catch(() => ({ library: null as never }));
+    const library = normalizeAssetLibrary({
+      ...(body.library ?? {}),
+      bookId: id,
+      updatedAt: new Date().toISOString(),
+    });
+    const saved = await writeAssetLibrary(bookDir, library);
+    return c.json({ library: saved } satisfies AssetLibraryResponse);
+  });
+
+  app.get("/api/v1/books/:id/asset-library/diff", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const fromVersion = Number(c.req.query("fromVersion"));
+    const toVersion = Number(c.req.query("toVersion"));
+    if (!Number.isFinite(fromVersion) || !Number.isFinite(toVersion) || fromVersion < 1 || toVersion < 1) {
+      return c.json({ error: "fromVersion and toVersion are required" }, 400);
+    }
+    const currentLibrary = await readAssetLibrary(bookDir, id, state);
+    const history = await readAssetLibraryHistoryEntries(bookDir, id, currentLibrary);
+    const from = history.find((entry) => entry.version === Math.trunc(fromVersion));
+    const to = history.find((entry) => entry.version === Math.trunc(toVersion));
+    if (!from || !to) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const diff = compareAssetLibraryVersions(from.library, to.library);
+    return c.json({
+      ...diff,
+      fromVersion: from.version,
+      toVersion: to.version,
+    } satisfies AssetLibraryDiffResult);
+  });
+
+  app.post("/api/v1/books/:id/asset-library/generate", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<AssetLibraryGeneratePayload>().catch(() => ({ productionWorkspace: undefined }));
+    const productionWorkspace = body.productionWorkspace
+      ? normalizeProductionWorkspace({
+        ...body.productionWorkspace,
+        bookId: id,
+      })
+      : await readProductionWorkspace(bookDir, id, state);
+    const library = buildAssetLibraryFromProductionWorkspace(productionWorkspace);
+    const saved = await writeAssetLibraryWithHistory(bookDir, library, "generate");
+    return c.json({ library: saved.library } satisfies AssetLibraryResponse);
+  });
+
+  app.post("/api/v1/books/:id/asset-library/rollback", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<{ targetVersion?: number }>().catch(() => ({ targetVersion: undefined }));
+    const targetVersion = Number(body.targetVersion);
+    if (!Number.isFinite(targetVersion) || targetVersion < 1) {
+      return c.json({ error: "targetVersion is required" }, 400);
+    }
+    const currentLibrary = await readAssetLibrary(bookDir, id, state);
+    const history = await readAssetLibraryHistoryEntries(bookDir, id, currentLibrary);
+    const target = history.find((entry) => entry.version === Math.trunc(targetVersion));
+    if (!target) {
+      return c.json({ error: "Version not found" }, 404);
+    }
+    const saved = await writeAssetLibraryWithHistory(bookDir, target.library, "rollback");
+    return c.json({ ok: true, library: saved.library });
+  });
+
+  app.post("/api/v1/books/:id/asset-library/upload", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<AssetLibraryUploadPayload>().catch(() => ({
+      itemId: "",
+      kind: "file" as const,
+      fileName: "",
+      dataUrl: "",
+    }));
+    const uploaded = await persistAssetLibraryUpload(bookDir, id, body, state);
+    const currentLibrary = await readAssetLibrary(bookDir, id, state);
+    const nextLibrary = normalizeAssetLibrary({
+      ...currentLibrary,
+      items: currentLibrary.items.map((item) => item.id === body.itemId
+        ? {
+          ...item,
+          ...(body.kind === "thumbnail" ? { thumbnailPath: uploaded.path } : { filePath: uploaded.path }),
+        }
+        : item),
+    });
+    const saved = await writeAssetLibraryWithHistory(bookDir, nextLibrary, "upload");
+    return c.json({
+      ...uploaded,
+      library: saved.library,
+    } satisfies AssetLibraryUploadResponse);
+  });
+
+  app.get("/api/v1/books/:id/asset-library/file", async (c) => {
+    const id = c.req.param("id");
+    const relativePath = String(c.req.query("path") ?? "").trim();
+    if (!relativePath) return c.notFound();
+    const bookDir = state.bookDir(id);
+    const resolvedPath = resolve(bookDir, relativePath);
+    const bookRoot = resolve(bookDir);
+    if (!resolvedPath.startsWith(bookRoot)) {
+      return c.json({ error: "Invalid file path" }, 400);
+    }
+    try {
+      const content = await readFile(resolvedPath);
+      const ext = resolvedPath.split(".").pop()?.toLowerCase() ?? "";
+      const contentTypes: Record<string, string> = {
+        png: "image/png",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        webp: "image/webp",
+        gif: "image/gif",
+        mp4: "video/mp4",
+        mov: "video/quicktime",
+        txt: "text/plain; charset=utf-8",
+        json: "application/json",
+      };
+      return new Response(content, {
+        headers: { "Content-Type": contentTypes[ext] ?? "application/octet-stream" },
+      });
+    } catch {
+      return c.notFound();
+    }
+  });
+
+  app.put("/api/v1/books/:id/task-checklist", async (c) => {
+    const id = c.req.param("id");
+    const bookDir = state.bookDir(id);
+    const body = await c.req.json<{
+      templateId?: string;
+      items?: Array<{
+        id?: string;
+        text?: string;
+        done?: boolean;
+        note?: string | null;
+      }>;
+    }>().catch(() => ({ templateId: undefined, items: [] as Array<{
+      id?: string;
+      text?: string;
+      done?: boolean;
+      note?: string | null;
+    }> }));
+    const items = (body.items ?? []).map((item, index) => normalizeTaskChecklistItem({
+      ...item,
+      order: index,
+    }));
+    const checklist = {
+      bookId: id,
+      templateId: resolveScriptWorkspaceChecklistTemplateId(body.templateId),
+      items: sortTaskChecklistItems(items),
+      updatedAt: new Date().toISOString(),
+    };
+    await writeTaskChecklist(bookDir, checklist);
+    return c.json({
+      checklist,
+      templates: listScriptWorkspaceChecklistTemplates(),
     });
   });
 

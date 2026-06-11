@@ -928,11 +928,13 @@ async function chatCompletionViaPiAi(
 ): Promise<LLMResponse> {
   const piModel = resolvePiModel(client, model);
   const context = toPiContext(messages);
+  const streamExtra = stripReservedKeys(resolved.extra);
   const streamOpts = {
     temperature: resolved.temperature,
     maxTokens: resolved.maxTokens,
     apiKey: client._apiKey,
     headers: piModel.headers,
+    ...streamExtra,
   };
 
   if (!client.stream) {

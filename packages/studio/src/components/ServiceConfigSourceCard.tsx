@@ -1,36 +1,15 @@
 import { useEffect, useState } from "react";
 import { fetchJson } from "../hooks/use-api";
-
-type ConfigSource = "env" | "studio";
-type EnvScope = "project" | "global" | null;
-
-interface EnvConfigSummary {
-  detected: boolean;
-  provider: string | null;
-  baseUrl: string | null;
-  model: string | null;
-  hasApiKey: boolean;
-}
-
-interface ServiceConfigPayload {
-  services: Array<Record<string, unknown>>;
-  defaultModel: string | null;
-  configSource: ConfigSource;
-  envConfig: {
-    project: EnvConfigSummary;
-    global: EnvConfigSummary;
-    effectiveSource: EnvScope;
-  };
-}
+import type { ConfigSource, ServicesConfigPayload } from "../hooks/use-services-config";
 
 export function ServiceConfigSourceCard({ onChange }: { onChange?: () => void }) {
-  const [data, setData] = useState<ServiceConfigPayload | null>(null);
+  const [data, setData] = useState<ServicesConfigPayload | null>(null);
   const [saving, setSaving] = useState<ConfigSource | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = async () => {
     try {
-      const payload = await fetchJson<ServiceConfigPayload>("/services/config");
+      const payload = await fetchJson<ServicesConfigPayload>("/services/config");
       setData(payload);
       setError(null);
     } catch (e) {

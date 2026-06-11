@@ -831,15 +831,15 @@ export function attachSessionStreamListeners({
       const chapterNumber = typeof data?.chapterNumber === "number" ? data.chapterNumber : undefined;
       const isPatchPreview = data?.previewType === "patch";
       if (!isPatchPreview) {
-        set((state) => ({
-          sessions: updateSession(state.sessions, sessionId, (runtime) => {
-            const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
-            const parts = appendTextPart([...(stream.parts ?? [])], text);
-            return { messages: replaceLast(messages, mergeStreamMessage(stream, parts)) };
-          }),
-        }));
-        return;
-      }
+      set((state) => ({
+        sessions: updateSession(state.sessions, sessionId, (runtime) => {
+          const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
+          const parts = appendTextPart([...(stream.parts ?? [])], text);
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, parts), getWizardStep(runtime))) };
+        }),
+      }));
+      return;
+    }
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);

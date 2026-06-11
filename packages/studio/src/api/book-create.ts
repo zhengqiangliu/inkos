@@ -15,6 +15,7 @@ export interface StudioBookConfigDraft {
   readonly platform: Platform;
   readonly genre: string;
   readonly status: "outlining";
+  readonly creationState?: "wizard";
   readonly targetChapters: number;
   readonly chapterWordCount: number;
   readonly language?: "zh" | "en";
@@ -57,6 +58,7 @@ export function buildStudioBookConfig(body: StudioCreateBookBody, now: string): 
     platform: normalizeStudioPlatform(body.platform),
     genre: body.genre,
     status: "outlining",
+    creationState: "wizard",
     targetChapters: body.targetChapters ?? 200,
     chapterWordCount: body.chapterWordCount ?? 3000,
     ...(body.language === "en"

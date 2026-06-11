@@ -14,6 +14,7 @@ import { analyzeChapterCadence } from "../utils/chapter-cadence.js";
 import { buildPlannerHookAgenda, deriveHookDebtBudget } from "../utils/hook-agenda.js";
 import { HOOK_HEALTH_DEFAULTS } from "../utils/hook-policy.js";
 import { readBrief } from "./planner-context.js";
+import { readStoryFrame, readVolumeMap } from "../utils/outline-paths.js";
 
 export interface PlanChapterInput {
   readonly book: BookConfig;
@@ -42,8 +43,6 @@ export class PlannerAgent extends BaseAgent {
     const sourcePaths = {
       authorIntent: join(storyDir, "author_intent.md"),
       currentFocus: join(storyDir, "current_focus.md"),
-      storyBible: join(storyDir, "story_bible.md"),
-      volumeOutline: join(storyDir, "volume_outline.md"),
       chapterSummaries: join(storyDir, "chapter_summaries.md"),
       bookRules: join(storyDir, "book_rules.md"),
       currentState: join(storyDir, "current_state.md"),
@@ -61,8 +60,8 @@ export class PlannerAgent extends BaseAgent {
     ] = await Promise.all([
       this.readFileOrDefault(sourcePaths.authorIntent),
       this.readFileOrDefault(sourcePaths.currentFocus),
-      this.readFileOrDefault(sourcePaths.storyBible),
-      this.readFileOrDefault(sourcePaths.volumeOutline),
+      readStoryFrame(input.bookDir, ""),
+      readVolumeMap(input.bookDir, ""),
       this.readFileOrDefault(sourcePaths.chapterSummaries),
       this.readFileOrDefault(sourcePaths.bookRules),
       this.readFileOrDefault(sourcePaths.currentState),
@@ -140,6 +139,8 @@ export class PlannerAgent extends BaseAgent {
       intentMarkdown,
       plannerInputs: [
         ...Object.values(sourcePaths),
+        join(storyDir, "outline", "story_frame.md"),
+        join(storyDir, "outline", "volume_map.md"),
         join(storyDir, "pending_hooks.md"),
         ...(memorySelection.dbPath ? [memorySelection.dbPath] : []),
       ],

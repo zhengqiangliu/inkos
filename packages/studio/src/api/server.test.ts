@@ -3,6 +3,7 @@ import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+const WIZARD_STEPS = ["intro", "world", "outline", "volume", "characters", "arc", "relation"] as const;
 const schedulerStartMock = vi.fn<() => Promise<void>>();
 const initBookMock = vi.fn();
 const runRadarMock = vi.fn();
@@ -184,8 +185,14 @@ vi.mock("@actalk/inkos-core", () => {
       }
     }
 
-    async loadBookConfig(): Promise<never> {
-      return await loadBookConfigMock() as never;
+    async loadBookConfig(bookId: string): Promise<never> {
+      const mocked = await loadBookConfigMock(bookId);
+      if (mocked !== undefined) {
+        return mocked as never;
+      }
+      const file = join(this.root, "books", bookId, "book.json");
+      const raw = await readFile(file, "utf-8");
+      return JSON.parse(raw) as never;
     }
 
     async loadChapterIndex(bookId: string): Promise<[]> {
@@ -194,6 +201,58 @@ vi.mock("@actalk/inkos-core", () => {
 
     async saveChapterIndex(bookId: string, index: unknown): Promise<void> {
       await saveChapterIndexMock(bookId, index);
+    }
+
+    async saveBookConfig(bookId: string, config: unknown): Promise<void> {
+      await writeFile(
+        join(this.root, "books", bookId, "book.json"),
+        JSON.stringify(config, null, 2),
+        "utf-8",
+      );
+    }
+
+    async markBookReady(bookId: string): Promise<unknown> {
+      const raw = await readFile(join(this.root, "books", bookId, "book.json"), "utf-8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const bookDir = join(this.root, "books", bookId);
+      const storyDir = join(bookDir, "story");
+      const outlineDir = join(storyDir, "outline");
+      await mkdir(outlineDir, { recursive: true });
+      const volumeDraft = await readFile(join(this.root, "books", bookId, "wizard", "volume.md"), "utf-8").catch(() => "");
+      if (volumeDraft.trim()) {
+        await writeFile(join(outlineDir, "volume_map.md"), volumeDraft, "utf-8");
+        await writeFile(join(storyDir, "volume_outline.md"), volumeDraft, "utf-8");
+      }
+      const updated = {
+        ...parsed,
+        creationState: "ready",
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      };
+      await this.saveBookConfig(bookId, updated);
+      return updated;
+    }
+
+    async markBookShellCreated(bookId: string): Promise<unknown> {
+      const wizardDir = join(this.root, "books", bookId, "wizard");
+      await mkdir(wizardDir, { recursive: true });
+      const indexPath = join(wizardDir, "index.json");
+      const raw = await readFile(indexPath, "utf-8").catch(() => "");
+      const parsed = raw.trim()
+        ? JSON.parse(raw) as Record<string, unknown>
+        : {
+            version: 1,
+            bookShellCreated: false,
+            currentStep: "intro",
+            updatedAt: "2026-04-12T00:00:00.000Z",
+            steps: Object.fromEntries(WIZARD_STEPS.map((step) => [step, { status: "empty", version: 0 }])),
+          };
+      const updated = {
+        ...parsed,
+        bookShellCreated: true,
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      };
+      await writeFile(indexPath, JSON.stringify(updated, null, 2), "utf-8");
+      return updated;
     }
 
     async rollbackToChapter(bookId: string, chapterNumber: number): Promise<number[]> {
@@ -208,6 +267,132 @@ vi.mock("@actalk/inkos-core", () => {
       const next = await getNextChapterNumberMock(bookId);
       if (typeof next === "number" && Number.isFinite(next)) return next;
       return 1;
+    }
+
+    async loadBookWizardState(bookId: string): Promise<{
+      version: 1;
+      bookShellCreated: boolean;
+      currentStep: typeof WIZARD_STEPS[number];
+      updatedAt: string;
+      steps: Record<typeof WIZARD_STEPS[number], { status: "empty" | "saved" | "dirty"; version: number; updatedAt?: string }>;
+    }> {
+      const indexPath = join(this.root, "books", bookId, "wizard", "index.json");
+      const raw = await readFile(indexPath, "utf-8").catch(() => null);
+      if (!raw) {
+        throw new Error(`Wizard index for "${bookId}" not found`);
+      }
+      const parsed = JSON.parse(raw) as {
+        version?: number;
+        bookShellCreated?: boolean;
+        currentStep?: string;
+        updatedAt?: string;
+        steps?: Record<string, { status?: string; version?: number; updatedAt?: string }>;
+      };
+      const steps = Object.fromEntries(WIZARD_STEPS.map((step) => {
+        const record = parsed.steps?.[step];
+        return [step, {
+          status: record?.status === "saved" || record?.status === "dirty" || record?.status === "empty"
+            ? record.status
+            : "empty",
+          version: typeof record?.version === "number" ? record.version : 0,
+          ...(record?.updatedAt ? { updatedAt: record.updatedAt } : {}),
+        }];
+      })) as Record<typeof WIZARD_STEPS[number], { status: "empty" | "saved" | "dirty"; version: number; updatedAt?: string }>;
+      return {
+        version: 1,
+        bookShellCreated: parsed.bookShellCreated === true,
+        currentStep: WIZARD_STEPS.includes(parsed.currentStep as typeof WIZARD_STEPS[number])
+          ? parsed.currentStep as typeof WIZARD_STEPS[number]
+          : "intro",
+        updatedAt: parsed.updatedAt ?? "2026-04-12T00:00:00.000Z",
+        steps,
+      };
+    }
+
+    async loadBookWizardStep(bookId: string, step: typeof WIZARD_STEPS[number]): Promise<{
+      content: string;
+      status: "empty" | "saved" | "dirty";
+      version: number;
+      updatedAt?: string;
+    }> {
+      const fileMap: Record<typeof WIZARD_STEPS[number], string> = {
+        intro: "intro.md",
+        world: "world.md",
+        outline: "outline.md",
+        volume: "volume.md",
+        characters: "characters.md",
+        arc: "character_arc.md",
+        relation: "relationship_map.md",
+      };
+      const legacyFileMap: Partial<Record<typeof WIZARD_STEPS[number], string>> = {
+        arc: "arc.md",
+        relation: "relation.md",
+      };
+      const primaryPath = join(this.root, "books", bookId, "wizard", fileMap[step]);
+      const legacyPath = legacyFileMap[step]
+        ? join(this.root, "books", bookId, "wizard", legacyFileMap[step]!)
+        : null;
+      const content = await readFile(primaryPath, "utf-8").catch(async () => {
+        if (!legacyPath) return "";
+        return readFile(legacyPath, "utf-8").catch(() => "");
+      });
+      const state = await this.loadBookWizardState(bookId);
+      const record = state.steps[step];
+      return {
+        content,
+        status: record.status,
+        version: record.version,
+        ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
+      };
+    }
+
+    async saveBookWizardStep(bookId: string, step: typeof WIZARD_STEPS[number], content: string, expectedVersion?: number): Promise<{
+      version: number;
+      updatedAt: string;
+    }> {
+      const fileMap: Record<typeof WIZARD_STEPS[number], string> = {
+        intro: "intro.md",
+        world: "world.md",
+        outline: "outline.md",
+        volume: "volume.md",
+        characters: "characters.md",
+        arc: "character_arc.md",
+        relation: "relationship_map.md",
+      };
+      const legacyFileMap: Partial<Record<typeof WIZARD_STEPS[number], string>> = {
+        arc: "arc.md",
+        relation: "relation.md",
+      };
+      const state = await this.loadBookWizardState(bookId);
+      const record = state.steps[step];
+      if (typeof expectedVersion === "number" && expectedVersion !== record.version) {
+        throw new Error(`Wizard step "${step}" version conflict for book "${bookId}"`);
+      }
+      const now = "2026-04-12T00:00:00.000Z";
+      const wizardDir = join(this.root, "books", bookId, "wizard");
+      await mkdir(wizardDir, { recursive: true });
+      await writeFile(join(wizardDir, fileMap[step]), content.trimEnd() + "\n", "utf-8");
+      const legacyName = legacyFileMap[step];
+      if (legacyName) {
+        await rm(join(wizardDir, legacyName), { force: true });
+      }
+      const nextVersion = record.version + 1;
+      const nextState = {
+        ...state,
+        currentStep: step,
+        bookShellCreated: true,
+        updatedAt: now,
+        steps: {
+          ...state.steps,
+          [step]: {
+            status: content.trim() ? "saved" : "empty",
+            version: nextVersion,
+            updatedAt: now,
+          },
+        },
+      };
+      await writeFile(join(wizardDir, "index.json"), JSON.stringify(nextState, null, 2), "utf-8");
+      return { version: nextVersion, updatedAt: now };
     }
 
     async ensureControlDocuments(): Promise<void> {
@@ -994,6 +1179,61 @@ describe("createStudioServer daemon lifecycle", () => {
     ]);
   });
 
+  it("preserves custom service baseUrl when updating only preferredModel", async () => {
+    await writeFile(join(root, "inkos.json"), JSON.stringify({
+      ...projectConfig,
+      llm: {
+        services: [
+          {
+            service: "custom",
+            name: "nvidia",
+            baseUrl: "https://integrate.api.nvidia.com/v1",
+            apiFormat: "chat",
+            stream: true,
+            preferredModel: "old-model",
+          },
+        ],
+        service: "custom:nvidia",
+        defaultModel: "old-model",
+      },
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const save = await app.request("http://localhost/api/v1/services/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        service: "custom:nvidia",
+        defaultModel: "deepseek-ai/deepseek-v4-flash",
+        services: [
+          {
+            service: "custom",
+            name: "nvidia",
+            preferredModel: "deepseek-ai/deepseek-v4-flash",
+          },
+        ],
+      }),
+    });
+
+    expect(save.status).toBe(200);
+
+    const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
+    expect(raw.llm.service).toBe("custom:nvidia");
+    expect(raw.llm.defaultModel).toBe("deepseek-ai/deepseek-v4-flash");
+    expect(raw.llm.services).toEqual([
+      {
+        service: "custom",
+        name: "nvidia",
+        baseUrl: "https://integrate.api.nvidia.com/v1",
+        apiFormat: "chat",
+        stream: true,
+        preferredModel: "deepseek-ai/deepseek-v4-flash",
+      },
+    ]);
+  });
+
   it("reports config source and detected env overrides for Studio switching", async () => {
     await writeFile(join(root, ".env"), [
       "INKOS_LLM_PROVIDER=openai",
@@ -1093,6 +1333,27 @@ describe("createStudioServer daemon lifecycle", () => {
     const raw = JSON.parse(await readFile(join(root, "inkos.json"), "utf-8"));
     expect(raw.llm.defaultModel).toBe("new-model");
     expect(raw.llm.model).toBe("new-model");
+  });
+
+  it("returns configured service together with defaultModel from services config", async () => {
+    await writeFile(join(root, "inkos.json"), JSON.stringify({
+      ...projectConfig,
+      llm: {
+        ...projectConfig.llm,
+        service: "moonshot",
+        defaultModel: "kimi-k2.5",
+      },
+    }, null, 2), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/services/config");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      service: "moonshot",
+      defaultModel: "kimi-k2.5",
+    });
   });
 
   it("tests and lists models for custom services using baseUrl and stored config", async () => {
@@ -2893,6 +3154,156 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("marks a wizard shell complete without waiting for the create pipeline", async () => {
+    await mkdir(join(root, "books", "demo-book"), { recursive: true });
+    await writeFile(join(root, "books", "demo-book", "book.json"), JSON.stringify({
+      id: "demo-book",
+      title: "Demo Book",
+      platform: "qidian",
+      genre: "xuanhuan",
+      status: "outlining",
+      creationState: "wizard",
+      targetChapters: 100,
+      chapterWordCount: 3000,
+      createdAt: "2026-04-12T00:00:00.000Z",
+      updatedAt: "2026-04-12T00:00:00.000Z",
+    }), "utf-8");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/wizard/complete", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      book: expect.objectContaining({
+        creationState: "ready",
+      }),
+    });
+  });
+
+  it("syncs wizard volume planning into canonical story outline files on wizard completion", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "wizard"), { recursive: true });
+    await writeFile(join(bookDir, "book.json"), JSON.stringify({
+      id: "demo-book",
+      title: "Demo Book",
+      platform: "qidian",
+      genre: "xuanhuan",
+      status: "outlining",
+      creationState: "wizard",
+      targetChapters: 100,
+      chapterWordCount: 3000,
+      createdAt: "2026-04-12T00:00:00.000Z",
+      updatedAt: "2026-04-12T00:00:00.000Z",
+    }), "utf-8");
+    await writeFile(join(bookDir, "wizard", "volume.md"), "# 卷纲规划\n\n## 第一卷\n- 第1-10章建立账本谜团。", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/wizard/complete", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(readFile(join(bookDir, "story", "outline", "volume_map.md"), "utf-8")).resolves.toContain("第一卷");
+    await expect(readFile(join(bookDir, "story", "volume_outline.md"), "utf-8")).resolves.toContain("第一卷");
+  });
+
+  it("lists canonical outline files through the truth browser using normalized artifact names", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+    await writeFile(join(bookDir, "story", "outline", "volume_map.md"), "# 卷纲规划\n\n总章数 20 章", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/truth");
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { files: Array<{ name: string; preview: string }> };
+    expect(payload.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: "outline/volume_map.md",
+        preview: expect.stringContaining("总章数 20 章"),
+      }),
+    ]));
+  });
+
+  it("prefers canonical volume_map content over legacy volume_outline in truth browser listings", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+    await writeFile(join(bookDir, "story", "outline", "volume_map.md"), "# 卷纲规划\n\n新卷纲内容", "utf-8");
+    await writeFile(join(bookDir, "story", "volume_outline.md"), "# 卷纲规划\n\n旧卷纲内容", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/truth");
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as { files: Array<{ name: string; preview: string }> };
+    expect(payload.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: "outline/volume_map.md",
+        preview: expect.stringContaining("新卷纲内容"),
+      }),
+    ]));
+  });
+
+  it("writes volume outline edits to the canonical outline path while keeping legacy compatibility", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/truth/volume_outline.md", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: "# 卷纲规划\n\n第1卷到第3卷" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(readFile(join(bookDir, "story", "outline", "volume_map.md"), "utf-8")).resolves.toContain("第1卷到第3卷");
+    await expect(readFile(join(bookDir, "story", "volume_outline.md"), "utf-8")).resolves.toContain("第1卷到第3卷");
+  });
+
+  it("hydrates volume outline from wizard volume markdown when no story outline exists yet", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "wizard"), { recursive: true });
+    await writeFile(join(bookDir, "book.json"), JSON.stringify({
+      id: "demo-book",
+      title: "Demo Book",
+      platform: "qidian",
+      genre: "xianxia",
+      status: "outlining",
+      creationState: "ready",
+      targetChapters: 20,
+      chapterWordCount: 3000,
+      language: "zh",
+      createdAt: "2026-04-12T00:00:00.000Z",
+      updatedAt: "2026-04-12T00:00:00.000Z",
+    }), "utf-8");
+    await writeFile(join(bookDir, "wizard", "volume.md"), "# 卷纲规划\n\n总章数 20 章", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/precheck-generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 1, count: 3 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(readFile(join(bookDir, "story", "outline", "volume_map.md"), "utf-8")).resolves.toContain("总章数 20 章");
+    await expect(readFile(join(bookDir, "story", "volume_outline.md"), "utf-8")).resolves.toContain("总章数 20 章");
+  });
+
   it("routes standalone audit through pipeline auditDraft", async () => {
     loadChapterIndexMock.mockResolvedValue([
       {
@@ -2960,7 +3371,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(auditDraftMock).toHaveBeenCalledWith("demo-book", 3);
   });
 
-  it("auto-revises up to two rounds when standalone audit keeps failing", async () => {
+  it("auto-revises up to three rounds when standalone audit keeps failing", async () => {
     loadChapterIndexMock.mockResolvedValue([
       {
         number: 3,
@@ -2983,7 +3394,30 @@ describe("createStudioServer daemon lifecycle", () => {
     auditDraftMock
       .mockResolvedValueOnce(failedAudit)
       .mockResolvedValueOnce(failedAudit)
+      .mockResolvedValueOnce(failedAudit)
       .mockResolvedValueOnce(failedAudit);
+    reviseDraftMock
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 1800,
+        fixedIssues: ["focus restored"],
+        applied: true,
+        status: "audit-failed",
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 1800,
+        fixedIssues: ["focus restored"],
+        applied: true,
+        status: "audit-failed",
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 1800,
+        fixedIssues: ["focus restored"],
+        applied: true,
+        status: "audit-failed",
+      });
     reviseDraftMock
       .mockResolvedValueOnce({
         chapterNumber: 3,
@@ -3029,9 +3463,9 @@ describe("createStudioServer daemon lifecycle", () => {
       passed: false,
       autoReview: {
         enabled: true,
-        maxReviseRounds: 2,
-        reviseRoundsUsed: 2,
-        auditRounds: 3,
+        maxReviseRounds: 3,
+        reviseRoundsUsed: 3,
+        auditRounds: 4,
         stoppedByMaxRounds: true,
         finalState: "failed-max-rounds",
         stopReason: "达到自动修订轮次上限，仍未通过审计",
@@ -3039,7 +3473,7 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     expect(payload.autoReview?.revisions?.[0]).toMatchObject({
       round: 1,
-      fixedIssues: ["- 修复设定冲突段落"],
+      fixedIssues: ["focus restored"],
     });
     expect(payload.autoReview?.revisions?.[0]?.issueResolutions?.[0]).toMatchObject({
       issueId: "ISSUE-01",
@@ -3063,7 +3497,7 @@ describe("createStudioServer daemon lifecycle", () => {
         }),
       ]),
     );
-    expect(auditDraftMock).toHaveBeenCalledTimes(3);
+    expect(auditDraftMock).toHaveBeenCalledTimes(4);
     expect(reviseDraftMock).toHaveBeenNthCalledWith(
       1,
       "demo-book",
@@ -3339,7 +3773,7 @@ describe("createStudioServer daemon lifecycle", () => {
       passed: true,
       autoReview: {
         enabled: true,
-        maxReviseRounds: 2,
+        maxReviseRounds: 3,
         reviseRoundsUsed: 1,
         auditRounds: 2,
         stoppedByMaxRounds: false,
@@ -3704,8 +4138,8 @@ describe("createStudioServer daemon lifecycle", () => {
       sample_size: 3,
       fpr0: 67,
       fpr1: 67,
-      failed_max_rounds_rate: 33,
-      structural_ratio: 100,
+      failed_max_rounds_rate: 0,
+      structural_ratio: 0,
     });
     expect(payload?.reviewMetricsByEntry?.["write-next"]).toMatchObject({
       sample_size: 1,
@@ -3719,7 +4153,7 @@ describe("createStudioServer daemon lifecycle", () => {
     });
     expect(payload?.reviewMetricsByEntry?.rewrite).toMatchObject({
       sample_size: 1,
-      failed_max_rounds_rate: 100,
+      failed_max_rounds_rate: 0,
     });
   });
 
@@ -4799,6 +5233,1653 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(resyncChapterArtifactsMock).toHaveBeenCalledWith("demo-book", 3);
   });
 
+  it("builds a default script workspace from selected chapter content", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await writeFile(
+      join(bookDir, "chapters", "0003_Demo.md"),
+      "# 第3章 仓库夜谈\n\n夜里，陈默带着手机和钥匙走进仓库。\n\n林雾在门边翻看文件，桌上压着照片。",
+      "utf-8",
+    );
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "仓库夜谈",
+        status: "draft",
+        wordCount: 36,
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      },
+    ]);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/script-workspace");
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      workspace: {
+        selectedChapterNumbers: number[];
+        scriptPrompt: string;
+        config: {
+          episodeDurationSec: number;
+          segmentDurationSec: number;
+          segmentDurationMinSec: number;
+          segmentDurationMaxSec: number;
+        };
+        extraction: {
+          scenes: Array<{ location: string; timeOfDay: string }>;
+          props: Array<{ name: string }>;
+        };
+        episodes: Array<{
+          chapterNumber: number;
+          durationSec: number;
+          segments: Array<{ durationSec: number; imageToVideoPrompt: string; textToImagePrompt: string }>;
+        }>;
+      };
+    };
+    expect(payload.workspace.selectedChapterNumbers).toEqual([3]);
+    expect(payload.workspace.config).toMatchObject({
+      episodeDurationSec: 60,
+      segmentDurationSec: 12,
+      segmentDurationMinSec: 10,
+      segmentDurationMaxSec: 15,
+    });
+    expect(payload.workspace.extraction.scenes).toEqual([
+      expect.objectContaining({
+        location: "仓库",
+        timeOfDay: "夜晚",
+      }),
+    ]);
+    expect(payload.workspace.extraction.props).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "手机" }),
+      expect.objectContaining({ name: "钥匙" }),
+      expect.objectContaining({ name: "门" }),
+      expect.objectContaining({ name: "照片" }),
+    ]));
+    expect(payload.workspace.episodes).toHaveLength(1);
+    expect(payload.workspace.episodes[0]).toEqual(expect.objectContaining({
+      chapterNumber: 3,
+      durationSec: 60,
+    }));
+    expect(payload.workspace.episodes[0]?.segments).toHaveLength(5);
+    expect(payload.workspace.episodes[0]?.segments.every((segment) => segment.durationSec === 12)).toBe(true);
+    expect(payload.workspace.episodes[0]?.segments[0]?.textToImagePrompt).toContain("视觉风格：");
+    expect(payload.workspace.episodes[0]?.segments[0]?.imageToVideoPrompt).toContain("每段时长：12秒");
+    expect(payload.workspace.scriptPrompt).toContain("选中章节：3");
+  });
+
+  it("builds script workspace by episode when the strategy merges chapters", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await writeFile(
+      join(bookDir, "chapters", "0003_Demo.md"),
+      "# 第3章 仓库夜谈\n\n夜里，陈默带着手机和钥匙走进仓库。",
+      "utf-8",
+    );
+    await writeFile(
+      join(bookDir, "chapters", "0004_Demo.md"),
+      "# 第4章 楼顶对峙\n\n清晨，林雾拿着文件和照片来到楼顶。",
+      "utf-8",
+    );
+    loadChapterIndexMock.mockResolvedValue([
+      { number: 3, title: "仓库夜谈", status: "draft", wordCount: 20, updatedAt: "2026-04-12T00:00:00.000Z" },
+      { number: 4, title: "楼顶对峙", status: "draft", wordCount: 20, updatedAt: "2026-04-12T00:00:00.000Z" },
+    ]);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/script-workspace/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selectedChapterNumbers: [3, 4],
+        config: {
+          generationStrategy: "episode",
+          chaptersPerEpisode: 2,
+          visualStyle: "国风赛博",
+          directorMethod: "快速摇镜与短促推镜",
+          aiTool: "即梦Ai",
+          aiModel: "turbo",
+          episodeDurationSec: 60,
+          segmentDurationSec: 15,
+          segmentDurationMinSec: 15,
+          segmentDurationMaxSec: 15,
+          scriptPrompts: {
+            script: "按短视频节奏改写剧本",
+            image: "突出霓虹夜色和人物张力",
+            video: "按镜头拆分动作与情绪变化",
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      workspace: {
+        config: { generationStrategy?: string; chaptersPerEpisode?: number };
+        episodes: Array<{
+          chapterNumber: number;
+          sourceChapterNumbers?: number[];
+          chapterTitle: string;
+          segments: Array<{ sourceChapterNumbers?: number[]; title: string }>;
+        }>;
+      };
+    };
+    expect(payload.workspace.config).toMatchObject({
+      generationStrategy: "episode",
+      chaptersPerEpisode: 2,
+    });
+    expect(payload.workspace.episodes).toHaveLength(1);
+    expect(payload.workspace.episodes[0]?.sourceChapterNumbers).toEqual([3, 4]);
+    expect(payload.workspace.episodes[0]?.chapterNumber).toBe(3);
+    expect(payload.workspace.episodes[0]?.chapterTitle).toContain("仓库夜谈");
+    expect(payload.workspace.episodes[0]?.chapterTitle).toContain("楼顶对峙");
+    expect(payload.workspace.episodes[0]?.segments[0]?.sourceChapterNumbers).toEqual([3, 4]);
+    expect(payload.workspace.episodes[0]?.segments[0]?.title).toContain("第3-4章");
+  });
+
+  it("persists a saved script workspace under story state", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/script-workspace", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspace: {
+          bookId: "demo-book",
+          selectedChapterNumbers: [3],
+          updatedAt: "2026-06-10T00:00:00.000Z",
+          config: {
+            visualStyle: "黑色电影风",
+            directorMethod: "固定镜头",
+            aiTool: "即梦Ai",
+            aiModel: "pro",
+            episodeDurationSec: 90,
+            segmentDurationSec: 15,
+            segmentDurationMinSec: 10,
+            segmentDurationMaxSec: 15,
+            scriptPrompts: {
+              script: "生成剧本",
+              image: "生成图片",
+              video: "生成视频",
+            },
+          },
+          scriptPrompt: "自定义剧本提示词",
+          extraction: {
+            scenes: [
+              {
+                id: "scene-3",
+                episodeNumber: 1,
+                chapterNumber: 3,
+                title: "仓库夜谈",
+                description: "在仓库交换情报",
+                location: "仓库",
+                timeOfDay: "夜晚",
+                characters: ["陈默", "林雾"],
+                props: ["手机"],
+                assets: ["场景素材:仓库"],
+              },
+            ],
+            characters: [{ name: "陈默", description: "主角", sourceChapterNumbers: [3] }],
+            props: [{ name: "手机", description: "关键道具", sourceChapterNumbers: [3] }],
+            assets: [{ name: "场景素材:仓库", description: "场景参考", sourceChapterNumbers: [3] }],
+          },
+          episodes: [
+            {
+              episodeNumber: 1,
+              chapterNumber: 3,
+              chapterTitle: "仓库夜谈",
+              title: "第1集",
+              summary: "交换情报",
+              durationSec: 90,
+              segments: [
+                {
+                  id: "seg-3-1",
+                  order: 0,
+                  episodeNumber: 1,
+                  chapterNumber: 3,
+                  title: "开场",
+                  scene: "仓库 / 夜晚",
+                  durationSec: 15,
+                  characters: ["陈默"],
+                  props: ["手机"],
+                  assets: ["场景素材:仓库"],
+                  scriptText: "陈默进入仓库。",
+                  textToImagePrompt: "黑色电影风的仓库开场",
+                  imageToVideoPrompt: "固定镜头，15秒，陈默进入仓库",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      workspace: {
+        config: { visualStyle: string; episodeDurationSec: number };
+        episodes: Array<{ segments: Array<{ durationSec: number }> }>;
+      };
+    };
+    expect(payload.workspace.config).toMatchObject({
+      visualStyle: "黑色电影风",
+      episodeDurationSec: 90,
+    });
+    expect(payload.workspace.episodes[0]?.segments[0]?.durationSec).toBe(15);
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "script-workspace.json"), "utf-8"),
+    ) as {
+      bookId: string;
+      config: { visualStyle: string; aiModel: string };
+      episodes: Array<{ segments: Array<{ title: string }> }>;
+    };
+    expect(saved.bookId).toBe("demo-book");
+    expect(saved.config).toMatchObject({
+      visualStyle: "黑色电影风",
+      aiModel: "pro",
+    });
+    expect(saved.episodes[0]?.segments[0]?.title).toBe("开场");
+  });
+
+  it("regenerates script workspace using request-time duration and prompt config", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await writeFile(
+      join(bookDir, "chapters", "0003_Demo.md"),
+      "# 第3章 天台对峙\n\n夜里，陈默和林雾在楼顶对峙，风吹动衣角。\n\n两人围着一份文件试探彼此底线。",
+      "utf-8",
+    );
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "天台对峙",
+        status: "draft",
+        wordCount: 40,
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      },
+    ]);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/script-workspace/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selectedChapterNumbers: [3],
+        config: {
+          visualStyle: "国风赛博",
+          directorMethod: "快速摇镜与短促推镜",
+          aiTool: "即梦Ai",
+          aiModel: "turbo",
+          episodeDurationSec: 45,
+          segmentDurationSec: 15,
+          segmentDurationMinSec: 15,
+          segmentDurationMaxSec: 15,
+          scriptPrompts: {
+            script: "按短视频节奏改写剧本",
+            image: "突出霓虹夜色和人物张力",
+            video: "按镜头拆分动作与情绪变化",
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      workspace: {
+        config: {
+          visualStyle: string;
+          directorMethod: string;
+          aiModel: string;
+          episodeDurationSec: number;
+        };
+        scriptPrompt: string;
+        episodes: Array<{
+          durationSec: number;
+          segments: Array<{ durationSec: number; textToImagePrompt: string; imageToVideoPrompt: string }>;
+        }>;
+      };
+    };
+    expect(payload.workspace.config).toMatchObject({
+      visualStyle: "国风赛博",
+      directorMethod: "快速摇镜与短促推镜",
+      aiModel: "turbo",
+      episodeDurationSec: 45,
+    });
+    expect(payload.workspace.episodes[0]?.durationSec).toBe(45);
+    expect(payload.workspace.episodes[0]?.segments).toHaveLength(3);
+    expect(payload.workspace.episodes[0]?.segments.every((segment) => segment.durationSec === 15)).toBe(true);
+    expect(payload.workspace.episodes[0]?.segments[0]?.textToImagePrompt).toContain("突出霓虹夜色和人物张力");
+    expect(payload.workspace.episodes[0]?.segments[0]?.imageToVideoPrompt).toContain("导演手法：快速摇镜与短促推镜");
+    expect(payload.workspace.episodes[0]?.segments[0]?.imageToVideoPrompt).toContain("AI：即梦Ai / turbo");
+    expect(payload.workspace.scriptPrompt).toContain("视觉风格：国风赛博");
+    expect(payload.workspace.scriptPrompt).toContain("图生视频提示词：按镜头拆分动作与情绪变化");
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "script-workspace.json"), "utf-8"),
+    ) as {
+      config: { episodeDurationSec: number; visualStyle: string };
+      episodes: Array<{ segments: Array<{ durationSec: number }> }>;
+    };
+    expect(saved.config).toMatchObject({
+      episodeDurationSec: 45,
+      visualStyle: "国风赛博",
+    });
+    expect(saved.episodes[0]?.segments.map((segment) => segment.durationSec)).toEqual([15, 15, 15]);
+  });
+
+  it("prefers llm-generated script workspace when the model returns valid structured json", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await writeFile(
+      join(bookDir, "chapters", "0003_Demo.md"),
+      "# 第3章 天台对峙\n\n夜里，陈默和林雾在楼顶对峙。",
+      "utf-8",
+    );
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "天台对峙",
+        status: "draft",
+        wordCount: 20,
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      },
+    ]);
+    chatCompletionMock.mockResolvedValueOnce({
+      content: JSON.stringify({
+        scriptPrompt: "LLM 生成的整体剧本提示词",
+        extraction: {
+          scenes: [
+            {
+              id: "scene-3",
+              episodeNumber: 1,
+              chapterNumber: 3,
+              title: "楼顶夜战",
+              description: "主角与对手在楼顶正面对峙",
+              location: "楼顶",
+              timeOfDay: "夜晚",
+              characters: ["陈默", "林雾"],
+              props: ["文件"],
+              assets: ["场景素材:楼顶"],
+            },
+          ],
+          characters: [
+            { name: "陈默", description: "主角", sourceChapterNumbers: [3] },
+            { name: "林雾", description: "对手", sourceChapterNumbers: [3] },
+          ],
+          props: [
+            { name: "文件", description: "冲突核心道具", sourceChapterNumbers: [3] },
+          ],
+          assets: [
+            { name: "场景素材:楼顶", description: "夜色楼顶参考", sourceChapterNumbers: [3] },
+          ],
+        },
+        episodes: [
+          {
+            episodeNumber: 1,
+            chapterNumber: 3,
+            chapterTitle: "天台对峙",
+            title: "第1集",
+            summary: "楼顶夜色下的心理交锋",
+            durationSec: 45,
+            segments: [
+              {
+                id: "seg-3-1",
+                order: 0,
+                episodeNumber: 1,
+                chapterNumber: 3,
+                title: "对峙开场",
+                scene: "楼顶 / 夜晚",
+                durationSec: 15,
+                characters: ["陈默", "林雾"],
+                props: ["文件"],
+                assets: ["场景素材:楼顶"],
+                scriptText: "陈默与林雾在楼顶拉开距离，互相试探。",
+                textToImagePrompt: "夜色楼顶，双人对峙，霓虹边缘光，冷峻写实",
+                imageToVideoPrompt: "15秒，夜色楼顶对峙，缓慢推镜，情绪紧绷",
+              },
+            ],
+          },
+        ],
+      }),
+      usage: { promptTokens: 100, completionTokens: 200, totalTokens: 300 },
+    });
+    chatCompletionMock.mockResolvedValueOnce({
+      content: JSON.stringify({
+        summary: "楼顶夜色下的心理交锋",
+        segments: [
+          {
+            title: "对峙开场",
+            scene: "楼顶 / 夜晚",
+            durationSec: 15,
+            characters: ["陈默", "林雾"],
+            props: ["文件"],
+            assets: ["场景素材:楼顶"],
+            scriptText: "陈默与林雾在楼顶拉开距离，互相试探。",
+            textToImagePrompt: "夜色楼顶，双人对峙，霓虹边缘光，冷峻写实",
+            imageToVideoPrompt: "15秒，夜色楼顶对峙，缓慢推镜，情绪紧绷",
+          },
+        ],
+      }),
+      usage: { promptTokens: 80, completionTokens: 160, totalTokens: 240 },
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/script-workspace/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selectedChapterNumbers: [3],
+        config: {
+          visualStyle: "电影感夜景",
+          directorMethod: "缓慢推镜",
+          aiTool: "即梦Ai",
+          aiModel: "turbo",
+          episodeDurationSec: 45,
+          segmentDurationSec: 15,
+          segmentDurationMinSec: 15,
+          segmentDurationMaxSec: 15,
+          scriptPrompts: {
+            script: "按短视频节奏生成剧本",
+            image: "强调夜景与人物张力",
+            video: "强调推镜与对峙情绪",
+          },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      workspace: {
+        scriptPrompt: string;
+        extraction: { scenes: Array<{ title: string; location: string }> };
+        episodes: Array<{ segments: Array<{ title: string; imageToVideoPrompt: string }> }>;
+      };
+    };
+    expect(payload.workspace.scriptPrompt).toBe("LLM 生成的整体剧本提示词");
+    expect(payload.workspace.extraction.scenes[0]).toMatchObject({
+      title: "楼顶夜战",
+      location: "楼顶",
+    });
+    expect(payload.workspace.episodes[0]?.segments[0]).toMatchObject({
+      title: "对峙开场",
+      imageToVideoPrompt: "15秒，夜色楼顶对峙，缓慢推镜，情绪紧绷",
+    });
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "script-workspace.json"), "utf-8"),
+    ) as {
+      scriptPrompt: string;
+      extraction: { scenes: Array<{ title: string }> };
+    };
+    expect(saved.scriptPrompt).toBe("LLM 生成的整体剧本提示词");
+    expect(saved.extraction.scenes[0]?.title).toBe("楼顶夜战");
+  });
+
+  it("reads and persists task checklist template selection", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const initialResponse = await app.request("http://localhost/api/v1/books/demo-book/task-checklist");
+    expect(initialResponse.status).toBe(200);
+    const initialPayload = await initialResponse.json() as {
+      checklist: { templateId?: string; items: Array<unknown> };
+      templates?: Array<{ id: string; label: string }>;
+    };
+    expect(initialPayload.checklist.templateId).toBe("short-video");
+    expect(initialPayload.templates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "short-video" }),
+      expect.objectContaining({ id: "comic-adaptation" }),
+      expect.objectContaining({ id: "previs" }),
+    ]));
+
+    const saveResponse = await app.request("http://localhost/api/v1/books/demo-book/task-checklist", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        templateId: "comic-adaptation",
+        items: [
+          { id: "shot-board", text: "拆分镜头级场景板", done: false, note: "按动作和对白切段" },
+          { id: "character-look", text: "整理角色造型参考", done: true },
+        ],
+      }),
+    });
+
+    expect(saveResponse.status).toBe(200);
+    const savePayload = await saveResponse.json() as {
+      checklist: { templateId?: string; items: Array<{ id: string; done: boolean }> };
+      templates?: Array<{ id: string }>;
+    };
+    expect(savePayload.checklist.templateId).toBe("comic-adaptation");
+    expect(savePayload.checklist.items).toEqual([
+      expect.objectContaining({ id: "shot-board", done: false }),
+      expect.objectContaining({ id: "character-look", done: true }),
+    ]);
+    expect(savePayload.templates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "comic-adaptation" }),
+    ]));
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "task-checklist.json"), "utf-8"),
+    ) as {
+      templateId?: string;
+      items: Array<{ id: string; order: number }>;
+    };
+    expect(saved.templateId).toBe("comic-adaptation");
+    expect(saved.items.map((item) => item.order)).toEqual([0, 1]);
+  });
+
+  it("derives production workspace from script workspace when no production state exists", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "state", "script-workspace.json"),
+      JSON.stringify({
+        bookId: "demo-book",
+        selectedChapterNumbers: [3],
+        updatedAt: "2026-06-10T01:00:00.000Z",
+        config: {
+          visualStyle: "电影感夜景",
+          directorMethod: "缓慢推镜",
+          aiTool: "即梦Ai",
+          aiModel: "turbo",
+          episodeDurationSec: 45,
+          segmentDurationSec: 15,
+          segmentDurationMinSec: 10,
+          segmentDurationMaxSec: 15,
+          scriptPrompts: {
+            script: "按短视频节奏生成剧本",
+            image: "强调夜景与人物张力",
+            video: "强调推镜与对峙情绪",
+          },
+        },
+        scriptPrompt: "整体剧本提示词",
+        extraction: {
+          scenes: [
+            {
+              id: "scene-3",
+              episodeNumber: 1,
+              chapterNumber: 3,
+              title: "楼顶夜战",
+              description: "主角与对手在楼顶正面对峙",
+              location: "楼顶",
+              timeOfDay: "夜晚",
+              characters: ["陈默", "林雾"],
+              props: ["文件"],
+              assets: ["场景素材:楼顶"],
+            },
+          ],
+          characters: [
+            { name: "陈默", description: "主角", sourceChapterNumbers: [3] },
+            { name: "林雾", description: "对手", sourceChapterNumbers: [3] },
+          ],
+          props: [
+            { name: "文件", description: "冲突核心道具", sourceChapterNumbers: [3] },
+          ],
+          assets: [
+            { name: "场景素材:楼顶", description: "夜色楼顶参考", sourceChapterNumbers: [3] },
+          ],
+        },
+        episodes: [
+          {
+            episodeNumber: 1,
+            chapterNumber: 3,
+            chapterTitle: "天台对峙",
+            title: "第1集",
+            summary: "楼顶夜色下的心理交锋",
+            durationSec: 45,
+            segments: [
+              {
+                id: "seg-3-1",
+                order: 0,
+                episodeNumber: 1,
+                chapterNumber: 3,
+                title: "对峙开场",
+                scene: "楼顶 / 夜晚",
+                durationSec: 15,
+                characters: ["陈默", "林雾"],
+                props: ["文件"],
+                assets: ["场景素材:楼顶"],
+                scriptText: "陈默冷声道：“把文件交出来。”林雾沉默着逼近一步。",
+                textToImagePrompt: "夜色楼顶，双人对峙，霓虹边缘光，冷峻写实",
+                imageToVideoPrompt: "15秒，夜色楼顶对峙，缓慢推镜，情绪紧绷",
+              },
+              {
+                id: "seg-3-2",
+                order: 1,
+                episodeNumber: 1,
+                chapterNumber: 3,
+                title: "心理压迫",
+                scene: "楼顶 / 夜晚",
+                durationSec: 15,
+                characters: ["林雾"],
+                props: ["文件"],
+                assets: ["场景素材:楼顶"],
+                scriptText: "林雾低声说，这是你最后一次机会。",
+                textToImagePrompt: "楼顶近景，角色压迫感，风吹衣角",
+                imageToVideoPrompt: "15秒，角色近景，慢推镜，压迫氛围",
+              },
+            ],
+          },
+        ],
+      }, null, 2),
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/production-workspace");
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      workspace: {
+        selectedChapterNumbers: number[];
+        sourceConfig: { visualStyle: string };
+        episodes: Array<{
+          trackCount: number;
+          shots: Array<{
+            shotType: string;
+            cameraMovement: string;
+            dialogueType: string;
+            characters: string[];
+          }>;
+        }>;
+      };
+    };
+    expect(payload.workspace.selectedChapterNumbers).toEqual([3]);
+    expect(payload.workspace.sourceConfig.visualStyle).toBe("电影感夜景");
+    expect(payload.workspace.episodes).toHaveLength(1);
+    expect(payload.workspace.episodes[0]?.shots.length).toBeGreaterThan(0);
+    expect(payload.workspace.episodes[0]?.trackCount).toBeGreaterThan(0);
+    expect(payload.workspace.episodes[0]?.shots[0]).toEqual(expect.objectContaining({
+      shotType: expect.any(String),
+      cameraMovement: expect.any(String),
+      dialogueType: "dialogue",
+      characters: expect.arrayContaining(["陈默"]),
+    }));
+  });
+
+  it("generates and persists production workspace storyboard state", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/production-workspace/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scriptWorkspace: {
+          bookId: "demo-book",
+          selectedChapterNumbers: [5],
+          updatedAt: "2026-06-10T02:00:00.000Z",
+          config: {
+            visualStyle: "废土写实",
+            directorMethod: "手持跟拍",
+            aiTool: "即梦Ai",
+            aiModel: "turbo",
+            episodeDurationSec: 60,
+            segmentDurationSec: 12,
+            segmentDurationMinSec: 10,
+            segmentDurationMaxSec: 15,
+            scriptPrompts: {
+              script: "突出追逐与危险感",
+              image: "强调废墟质感和尘土空气",
+              video: "强调手持抖动与呼吸感",
+            },
+          },
+          scriptPrompt: "生产测试剧本",
+          extraction: {
+            scenes: [],
+            characters: [{ name: "顾临", description: "幸存者", sourceChapterNumbers: [5] }],
+            props: [{ name: "背包", description: "生存物资", sourceChapterNumbers: [5] }],
+            assets: [{ name: "场景素材:废墟街道", description: "废土街景", sourceChapterNumbers: [5] }],
+          },
+          episodes: [
+            {
+              episodeNumber: 1,
+              chapterNumber: 5,
+              chapterTitle: "废墟追踪",
+              title: "第1集",
+              summary: "穿越废墟街道寻找出口",
+              durationSec: 60,
+              segments: [
+                {
+                  id: "seg-5-1",
+                  order: 0,
+                  episodeNumber: 1,
+                  chapterNumber: 5,
+                  title: "穿街而过",
+                  scene: "废墟街道 / 黄昏",
+                  durationSec: 12,
+                  characters: ["顾临"],
+                  props: ["背包"],
+                  assets: ["场景素材:废墟街道"],
+                  scriptText: "顾临背着背包穿过残破街道，耳边只有风声。",
+                  textToImagePrompt: "废墟街道，黄昏逆光，人物快速穿行，写实电影感",
+                  imageToVideoPrompt: "12秒，手持跟拍，人物穿越废墟，风沙扬起",
+                },
+                {
+                  id: "seg-5-2",
+                  order: 1,
+                  episodeNumber: 1,
+                  chapterNumber: 5,
+                  title: "危机回望",
+                  scene: "废墟街道 / 黄昏",
+                  durationSec: 12,
+                  characters: ["顾临"],
+                  props: ["背包"],
+                  assets: ["场景素材:废墟街道"],
+                  scriptText: "顾临回头低声说：“别再跟着我。”",
+                  textToImagePrompt: "废墟街口回望近景，黄昏灰尘，紧张警惕",
+                  imageToVideoPrompt: "12秒，先跟拍后停顿回望，紧张喘息感",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      workspace: {
+        sourceConfig: { directorMethod: string };
+        episodes: Array<{
+          shots: Array<{
+            title: string;
+            shotType: string;
+            cameraMovement: string;
+            dialogueType: string;
+            props: string[];
+          }>;
+        }>;
+      };
+    };
+    expect(payload.workspace.sourceConfig.directorMethod).toBe("手持跟拍");
+    expect(payload.workspace.episodes[0]?.shots.length).toBeGreaterThan(0);
+    expect(payload.workspace.episodes[0]?.shots[0]).toEqual(expect.objectContaining({
+      title: expect.any(String),
+      shotType: expect.any(String),
+      cameraMovement: expect.any(String),
+      props: expect.arrayContaining(["背包"]),
+    }));
+    expect(payload.workspace.episodes[0]?.shots.some((shot) => shot.dialogueType === "dialogue")).toBe(true);
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "production-workspace.json"), "utf-8"),
+    ) as {
+      bookId: string;
+      sourceConfig: { visualStyle: string; directorMethod: string };
+      episodes: Array<{
+        title: string;
+        shots: Array<{ dialogueType: string; scene: string; durationSec: number }>;
+      }>;
+    };
+    expect(saved.bookId).toBe("demo-book");
+    expect(saved.sourceConfig).toMatchObject({
+      visualStyle: "废土写实",
+      directorMethod: "手持跟拍",
+    });
+    expect(saved.episodes[0]?.shots[0]?.scene).toContain("街道");
+    expect(saved.episodes[0]?.shots[0]?.durationSec).toBeGreaterThan(0);
+  });
+
+  it("derives director plan from production workspace when no director-plan state exists", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "state", "production-workspace.json"),
+      JSON.stringify({
+        bookId: "demo-book",
+        selectedChapterNumbers: [3],
+        updatedAt: "2026-06-10T03:00:00.000Z",
+        sourceScriptUpdatedAt: "2026-06-10T02:00:00.000Z",
+        sourceConfig: {
+          visualStyle: "电影感夜景",
+          directorMethod: "缓慢推镜",
+          aiTool: "即梦Ai",
+          aiModel: "turbo",
+          episodeDurationSec: 45,
+          segmentDurationSec: 15,
+          segmentDurationMinSec: 10,
+          segmentDurationMaxSec: 15,
+          scriptPrompts: {
+            script: "按短视频节奏生成剧本",
+            image: "强调夜景与人物张力",
+            video: "强调推镜与对峙情绪",
+          },
+        },
+        episodes: [
+          {
+            episodeNumber: 1,
+            chapterNumber: 3,
+            title: "第1集",
+            chapterTitle: "天台对峙",
+            summary: "楼顶夜色下的心理交锋",
+            durationSec: 45,
+            trackCount: 1,
+            shots: [
+              {
+                id: "shot-1",
+                episodeNumber: 1,
+                chapterNumber: 3,
+                segmentId: "seg-1",
+                segmentOrder: 0,
+                shotNumber: 1,
+                track: "main",
+                title: "对峙开场",
+                scene: "楼顶 / 夜晚",
+                durationSec: 15,
+                shotType: "近景",
+                cameraMovement: "缓推",
+                dialogue: "把文件交出来",
+                dialogueType: "dialogue",
+                mood: "克制紧张",
+                lighting: "低照度冷色边缘光",
+                shouldGenerateImage: true,
+                characters: ["陈默", "林雾"],
+                props: ["文件"],
+                assets: ["场景素材:楼顶"],
+                scriptText: "陈默逼近林雾。",
+                textToImagePrompt: "楼顶近景",
+                imageToVideoPrompt: "15秒缓推",
+              },
+            ],
+          },
+        ],
+      }, null, 2),
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/director-plan");
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      plan: {
+        visualStatement: string;
+        directorIntent: string;
+        visualRules: string[];
+        episodePlans: Array<{ title: string; storyGoal: string; lensLanguage: string }>;
+      };
+    };
+    expect(payload.plan.visualStatement).toContain("电影感夜景");
+    expect(payload.plan.directorIntent).toContain("缓慢推镜");
+    expect(payload.plan.visualRules.length).toBeGreaterThan(0);
+    expect(payload.plan.episodePlans[0]).toMatchObject({
+      title: "第1集",
+    });
+    expect(payload.plan.episodePlans[0]?.storyGoal).toContain("楼顶夜色下的心理交锋");
+  });
+
+  it("stores director plan history, returns diffs, and supports rollback", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const saveResponse = await app.request("http://localhost/api/v1/books/demo-book/director-plan", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        plan: {
+          bookId: "demo-book",
+          updatedAt: "2026-06-10T05:00:00.000Z",
+          sourceProductionUpdatedAt: "2026-06-10T04:00:00.000Z",
+          sourceConfig: {
+            visualStyle: "电影感夜景",
+            directorMethod: "固定机位",
+            aiTool: "即梦Ai",
+            aiModel: "turbo",
+            episodeDurationSec: 45,
+            segmentDurationSec: 15,
+            segmentDurationMinSec: 10,
+            segmentDurationMaxSec: 15,
+            scriptPrompts: {
+              script: "生成导演规划",
+              image: "生成图片",
+              video: "生成视频",
+            },
+          },
+          visualStatement: "版本一视觉声明",
+          directorIntent: "版本一导演意图",
+          visualRules: ["统一夜景", "强调边缘光"],
+          cameraRules: ["稳定轴线"],
+          colorScript: ["第1集：冷蓝色"],
+          episodePlans: [
+            {
+              episodeNumber: 1,
+              title: "第1集",
+              storyGoal: "版本一故事目标",
+              emotionalBeat: "压迫感建立",
+              pacing: "45 秒稳定推进",
+              lensLanguage: "固定镜头",
+              blockingNotes: "双人对峙",
+              lightingNotes: "低照度冷边缘光",
+              soundNotes: "风声与对白",
+              continuityNotes: "文件道具持续在画面内",
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(saveResponse.status).toBe(200);
+
+    const generateResponse = await app.request("http://localhost/api/v1/books/demo-book/director-plan", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        plan: {
+          bookId: "demo-book",
+          updatedAt: "2026-06-10T05:10:00.000Z",
+          sourceProductionUpdatedAt: "2026-06-10T05:05:00.000Z",
+          sourceConfig: {
+            visualStyle: "赛博霓虹",
+            directorMethod: "短促推镜",
+            aiTool: "即梦Ai",
+            aiModel: "pro",
+            episodeDurationSec: 60,
+            segmentDurationSec: 12,
+            segmentDurationMinSec: 10,
+            segmentDurationMaxSec: 15,
+            scriptPrompts: {
+              script: "生成导演规划二",
+              image: "生成图片二",
+              video: "生成视频二",
+            },
+          },
+          visualStatement: "版本二视觉声明",
+          directorIntent: "版本二导演意图",
+          visualRules: ["霓虹反差", "角色轮廓高亮"],
+          cameraRules: ["推镜优先"],
+          colorScript: ["第1集：霓虹紫蓝"],
+          episodePlans: [
+            {
+              episodeNumber: 1,
+              title: "第1集",
+              storyGoal: "版本二故事目标",
+              emotionalBeat: "冲突升级",
+              pacing: "60 秒更紧凑",
+              lensLanguage: "推镜为主",
+              blockingNotes: "角色快速逼近",
+              lightingNotes: "霓虹反差高亮",
+              soundNotes: "节奏化环境音",
+              continuityNotes: "服化道延续",
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(generateResponse.status).toBe(200);
+
+    const historyResponse = await app.request("http://localhost/api/v1/books/demo-book/director-plan/history");
+    expect(historyResponse.status).toBe(200);
+    const historyPayload = await historyResponse.json() as {
+      history: Array<{ version: number; action: string; plan: { visualStatement: string } }>;
+    };
+    expect(historyPayload.history.map((entry) => [entry.version, entry.action])).toEqual([
+      [1, "save"],
+      [2, "save"],
+    ]);
+    expect(historyPayload.history[0]?.plan.visualStatement).toBe("版本一视觉声明");
+    expect(historyPayload.history[1]?.plan.visualStatement).toBe("版本二视觉声明");
+
+    const diffResponse = await app.request("http://localhost/api/v1/books/demo-book/director-plan/diff?fromVersion=1&toVersion=2");
+    expect(diffResponse.status).toBe(200);
+    const diffPayload = await diffResponse.json() as {
+      fromVersion: number;
+      toVersion: number;
+      changedFields: string[];
+      from: { visualStatement: string };
+      to: { visualStatement: string };
+    };
+    expect(diffPayload.fromVersion).toBe(1);
+    expect(diffPayload.toVersion).toBe(2);
+    expect(diffPayload.changedFields).toEqual(expect.arrayContaining(["sourceConfig", "visualStatement", "directorIntent", "episodePlans"]));
+    expect(diffPayload.from.visualStatement).toBe("版本一视觉声明");
+    expect(diffPayload.to.visualStatement).toBe("版本二视觉声明");
+
+    const rollbackResponse = await app.request("http://localhost/api/v1/books/demo-book/director-plan/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetVersion: 1 }),
+    });
+    expect(rollbackResponse.status).toBe(200);
+    const rollbackPayload = await rollbackResponse.json() as {
+      ok: boolean;
+      plan: { visualStatement: string; directorIntent: string };
+    };
+    expect(rollbackPayload.ok).toBe(true);
+    expect(rollbackPayload.plan.visualStatement).toBe("版本一视觉声明");
+    expect(rollbackPayload.plan.directorIntent).toBe("版本一导演意图");
+
+    const savedHistory = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "director-plan.history.json"), "utf-8"),
+    ) as {
+      entries: Array<{ version: number; action: string; plan: { visualStatement: string } }>;
+    };
+    expect(savedHistory.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ version: 1, action: "save", plan: expect.objectContaining({ visualStatement: "版本一视觉声明" }) }),
+      expect.objectContaining({ version: 2, action: "save", plan: expect.objectContaining({ visualStatement: "版本二视觉声明" }) }),
+      expect.objectContaining({ version: 3, action: "rollback", plan: expect.objectContaining({ visualStatement: "版本一视觉声明" }) }),
+    ]));
+  });
+
+  it("generates and persists asset library from production workspace", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/asset-library/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        productionWorkspace: {
+          bookId: "demo-book",
+          selectedChapterNumbers: [5],
+          updatedAt: "2026-06-10T04:00:00.000Z",
+          sourceScriptUpdatedAt: "2026-06-10T03:00:00.000Z",
+          sourceConfig: {
+            visualStyle: "废土写实",
+            directorMethod: "手持跟拍",
+            aiTool: "即梦Ai",
+            aiModel: "turbo",
+            episodeDurationSec: 60,
+            segmentDurationSec: 12,
+            segmentDurationMinSec: 10,
+            segmentDurationMaxSec: 15,
+            scriptPrompts: {
+              script: "突出追逐与危险感",
+              image: "强调废墟质感和尘土空气",
+              video: "强调手持抖动与呼吸感",
+            },
+          },
+          episodes: [
+            {
+              episodeNumber: 1,
+              chapterNumber: 5,
+              title: "第1集",
+              chapterTitle: "废墟追踪",
+              summary: "穿越废墟街道寻找出口",
+              durationSec: 60,
+              trackCount: 1,
+              shots: [
+                {
+                  id: "shot-1",
+                  episodeNumber: 1,
+                  chapterNumber: 5,
+                  segmentId: "seg-1",
+                  segmentOrder: 0,
+                  shotNumber: 1,
+                  track: "main",
+                  title: "穿街而过",
+                  scene: "废墟街道 / 黄昏",
+                  durationSec: 12,
+                  shotType: "全景",
+                  cameraMovement: "跟拍",
+                  dialogue: "",
+                  dialogueType: "none",
+                  mood: "不安失衡",
+                  lighting: "黄昏逆光，暖冷交错",
+                  shouldGenerateImage: true,
+                  characters: ["顾临"],
+                  props: ["背包"],
+                  assets: ["场景素材:废墟街道", "镜头类型:全景"],
+                  scriptText: "顾临背着背包穿过残破街道。",
+                  textToImagePrompt: "废墟街道，黄昏逆光，人物快速穿行，写实电影感",
+                  imageToVideoPrompt: "12秒，手持跟拍，人物穿越废墟，风沙扬起",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      library: {
+        items: Array<{
+          type: string;
+          name: string;
+          status: string;
+          referenceCount: number;
+          thumbnailPath: string;
+          filePath: string;
+          generation: { imageStatus: string; videoStatus: string; needsRegeneration: boolean };
+          tags: string[];
+        }>;
+      };
+    };
+    expect(payload.library.items.length).toBeGreaterThan(0);
+    expect(payload.library.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "character",
+        name: "顾临",
+        status: "draft",
+        referenceCount: 1,
+        thumbnailPath: "",
+        filePath: "",
+        generation: expect.objectContaining({ imageStatus: "pending", videoStatus: "pending", needsRegeneration: false }),
+      }),
+      expect.objectContaining({ type: "prop", name: "背包", referenceCount: 1 }),
+      expect.objectContaining({ type: "scene", name: "废墟街道 / 黄昏", referenceCount: 1 }),
+    ]));
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "asset-library.json"), "utf-8"),
+    ) as {
+      bookId: string;
+      items: Array<{
+        name: string;
+        prompt: string;
+        episodeNumbers: number[];
+        referenceCount: number;
+        generation: { imageStatus: string; videoStatus: string };
+      }>;
+    };
+    expect(saved.bookId).toBe("demo-book");
+    expect(saved.items.some((item) => item.name === "顾临")).toBe(true);
+    expect(saved.items.some((item) => item.prompt.includes("废土写实"))).toBe(true);
+    expect(saved.items[0]?.episodeNumbers[0]).toBe(1);
+    expect(saved.items[0]?.referenceCount).toBe(1);
+    expect(saved.items[0]?.generation.imageStatus).toBe("pending");
+  });
+
+  it("stores asset library history, returns diffs, and supports rollback", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const saveResponse = await app.request("http://localhost/api/v1/books/demo-book/asset-library", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        library: {
+          bookId: "demo-book",
+          updatedAt: "2026-06-10T06:00:00.000Z",
+          sourceProductionUpdatedAt: "2026-06-10T05:30:00.000Z",
+          items: [
+            {
+              id: "asset-1",
+              type: "character",
+              name: "陈默",
+              description: "版本一角色参考",
+              episodeNumbers: [1],
+              shotIds: ["shot-1"],
+              referenceCount: 1,
+              prompt: "版本一提示词",
+              status: "draft",
+              thumbnailPath: "",
+              filePath: "",
+              generation: {
+                imageStatus: "pending",
+                videoStatus: "pending",
+                needsRegeneration: false,
+                lastError: "",
+                notes: "",
+              },
+              tags: ["第1集"],
+            },
+          ],
+        },
+      }),
+    });
+    expect(saveResponse.status).toBe(200);
+
+    const secondSaveResponse = await app.request("http://localhost/api/v1/books/demo-book/asset-library", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        library: {
+          bookId: "demo-book",
+          updatedAt: "2026-06-10T06:10:00.000Z",
+          sourceProductionUpdatedAt: "2026-06-10T05:45:00.000Z",
+          items: [
+            {
+              id: "asset-1",
+              type: "character",
+              name: "陈默",
+              description: "版本二角色参考",
+              episodeNumbers: [1, 2],
+              shotIds: ["shot-1", "shot-2"],
+              referenceCount: 2,
+              prompt: "版本二提示词",
+              status: "image_ready",
+              thumbnailPath: "story/assets/asset-library/asset-1/thumb-demo.png",
+              filePath: "",
+              generation: {
+                imageStatus: "ready",
+                videoStatus: "pending",
+                needsRegeneration: false,
+                lastError: "",
+                notes: "已完成首轮出图",
+              },
+              tags: ["第1集", "第2集"],
+            },
+          ],
+        },
+      }),
+    });
+    expect(secondSaveResponse.status).toBe(200);
+
+    const historyResponse = await app.request("http://localhost/api/v1/books/demo-book/asset-library/history");
+    expect(historyResponse.status).toBe(200);
+    const historyPayload = await historyResponse.json() as {
+      history: Array<{ version: number; action: string; library: { items: Array<{ description: string }> } }>;
+    };
+    expect(historyPayload.history.map((entry) => [entry.version, entry.action])).toEqual([
+      [1, "save"],
+      [2, "save"],
+    ]);
+    expect(historyPayload.history[0]?.library.items[0]?.description).toBe("版本一角色参考");
+    expect(historyPayload.history[1]?.library.items[0]?.description).toBe("版本二角色参考");
+
+    const diffResponse = await app.request("http://localhost/api/v1/books/demo-book/asset-library/diff?fromVersion=1&toVersion=2");
+    expect(diffResponse.status).toBe(200);
+    const diffPayload = await diffResponse.json() as {
+      fromVersion: number;
+      toVersion: number;
+      changedFields: string[];
+      from: { items: Array<{ description: string }> };
+      to: { items: Array<{ description: string }> };
+    };
+    expect(diffPayload.fromVersion).toBe(1);
+    expect(diffPayload.toVersion).toBe(2);
+    expect(diffPayload.changedFields).toEqual(expect.arrayContaining(["sourceProductionUpdatedAt", "items"]));
+    expect(diffPayload.from.items[0]?.description).toBe("版本一角色参考");
+    expect(diffPayload.to.items[0]?.description).toBe("版本二角色参考");
+
+    const rollbackResponse = await app.request("http://localhost/api/v1/books/demo-book/asset-library/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetVersion: 1 }),
+    });
+    expect(rollbackResponse.status).toBe(200);
+    const rollbackPayload = await rollbackResponse.json() as {
+      ok: boolean;
+      library: { items: Array<{ description: string; referenceCount: number }> };
+    };
+    expect(rollbackPayload.ok).toBe(true);
+    expect(rollbackPayload.library.items[0]?.description).toBe("版本一角色参考");
+    expect(rollbackPayload.library.items[0]?.referenceCount).toBe(1);
+
+    const savedHistory = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "asset-library.history.json"), "utf-8"),
+    ) as {
+      entries: Array<{ version: number; action: string; library: { items: Array<{ description: string }> } }>;
+    };
+    expect(savedHistory.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ version: 1, action: "save" }),
+      expect.objectContaining({ version: 2, action: "save" }),
+      expect.objectContaining({ version: 3, action: "rollback" }),
+    ]));
+  });
+
+  it("uploads asset library thumbnail and source file, then serves preview content", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "state", "asset-library.json"),
+      JSON.stringify({
+        bookId: "demo-book",
+        updatedAt: "2026-06-10T07:00:00.000Z",
+        sourceProductionUpdatedAt: "2026-06-10T06:30:00.000Z",
+        items: [
+          {
+            id: "asset-1",
+            type: "character",
+            name: "陈默",
+            description: "待上传资产",
+            episodeNumbers: [1],
+            shotIds: ["shot-1"],
+            referenceCount: 1,
+            prompt: "角色提示词",
+            status: "prompt_ready",
+            thumbnailPath: "",
+            filePath: "",
+            generation: {
+              imageStatus: "pending",
+              videoStatus: "pending",
+              needsRegeneration: false,
+              lastError: "",
+              notes: "",
+            },
+            tags: ["第1集"],
+          },
+        ],
+      }, null, 2),
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const thumbnailUploadResponse = await app.request("http://localhost/api/v1/books/demo-book/asset-library/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        itemId: "asset-1",
+        kind: "thumbnail",
+        fileName: "thumb.png",
+        dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn8qWQAAAAASUVORK5CYII=",
+      }),
+    });
+    expect(thumbnailUploadResponse.status).toBe(200);
+    const thumbnailPayload = await thumbnailUploadResponse.json() as {
+      path: string;
+      url: string;
+      library: { items: Array<{ thumbnailPath: string }> };
+    };
+    expect(thumbnailPayload.path).toContain("thumb-thumb.png");
+    expect(thumbnailPayload.library.items[0]?.thumbnailPath).toBe(thumbnailPayload.path);
+
+    const fileUploadResponse = await app.request("http://localhost/api/v1/books/demo-book/asset-library/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        itemId: "asset-1",
+        kind: "file",
+        fileName: "notes.txt",
+        dataUrl: "data:text/plain;base64,SGVsbG8gQXNzZXQ=",
+      }),
+    });
+    expect(fileUploadResponse.status).toBe(200);
+    const filePayload = await fileUploadResponse.json() as {
+      path: string;
+      url: string;
+      library: { items: Array<{ filePath: string }> };
+    };
+    expect(filePayload.path).toContain("source-notes.txt");
+    expect(filePayload.library.items[0]?.filePath).toBe(filePayload.path);
+
+    const servedResponse = await app.request(`http://localhost${filePayload.url}`);
+    expect(servedResponse.status).toBe(200);
+    await expect(servedResponse.text()).resolves.toBe("Hello Asset");
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "asset-library.json"), "utf-8"),
+    ) as {
+      items: Array<{ thumbnailPath: string; filePath: string }>;
+    };
+    expect(saved.items[0]?.thumbnailPath).toContain("thumb-thumb.png");
+    expect(saved.items[0]?.filePath).toContain("source-notes.txt");
+  });
+
+  it("stores script workspace history and returns version diffs", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await writeFile(
+      join(bookDir, "chapters", "0003_Demo.md"),
+      "# 第3章 天台对峙\n\n夜里，陈默和林雾在楼顶对峙，风吹动衣角。",
+      "utf-8",
+    );
+    loadChapterIndexMock.mockResolvedValue([
+      {
+        number: 3,
+        title: "天台对峙",
+        status: "draft",
+        wordCount: 20,
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      },
+    ]);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const saveResponse = await app.request("http://localhost/api/v1/books/demo-book/script-workspace", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workspace: {
+          bookId: "demo-book",
+          selectedChapterNumbers: [3],
+          updatedAt: "2026-06-10T00:00:00.000Z",
+          config: {
+            visualStyle: "黑色电影风",
+            directorMethod: "固定镜头",
+            aiTool: "即梦Ai",
+            aiModel: "pro",
+            episodeDurationSec: 90,
+            segmentDurationSec: 15,
+            segmentDurationMinSec: 10,
+            segmentDurationMaxSec: 15,
+            scriptPrompts: {
+              script: "生成剧本",
+              image: "生成图片",
+              video: "生成视频",
+            },
+          },
+          scriptPrompt: "自定义剧本提示词",
+          extraction: { scenes: [], characters: [], props: [], assets: [] },
+          episodes: [],
+        },
+      }),
+    });
+
+    expect(saveResponse.status).toBe(200);
+
+    const generateResponse = await app.request("http://localhost/api/v1/books/demo-book/script-workspace/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        selectedChapterNumbers: [3],
+        config: {
+          visualStyle: "国风赛博",
+          directorMethod: "短促推镜",
+          aiTool: "即梦Ai",
+          aiModel: "turbo",
+          episodeDurationSec: 45,
+          segmentDurationSec: 15,
+          segmentDurationMinSec: 15,
+          segmentDurationMaxSec: 15,
+          scriptPrompts: {
+            script: "按短视频节奏生成剧本",
+            image: "突出霓虹夜色和人物张力",
+            video: "按镜头拆分动作与情绪变化",
+          },
+        },
+      }),
+    });
+
+    expect(generateResponse.status).toBe(200);
+
+    const historyResponse = await app.request("http://localhost/api/v1/books/demo-book/script-workspace/history");
+    expect(historyResponse.status).toBe(200);
+    const historyPayload = await historyResponse.json() as {
+      history: Array<{ version: number; action: string; workspace: { config: { visualStyle: string } } }>;
+    };
+    expect(historyPayload.history.map((entry) => [entry.version, entry.action])).toEqual([
+      [1, "save"],
+      [2, "generate"],
+    ]);
+    expect(historyPayload.history[0]?.workspace.config.visualStyle).toBe("黑色电影风");
+    expect(historyPayload.history[1]?.workspace.config.visualStyle).toBe("国风赛博");
+
+    const diffResponse = await app.request("http://localhost/api/v1/books/demo-book/script-workspace/diff?fromVersion=1&toVersion=2");
+    expect(diffResponse.status).toBe(200);
+    const diffPayload = await diffResponse.json() as {
+      fromVersion: number;
+      toVersion: number;
+      changedFields: string[];
+      from: { config: { visualStyle: string } };
+      to: { config: { visualStyle: string } };
+    };
+    expect(diffPayload.fromVersion).toBe(1);
+    expect(diffPayload.toVersion).toBe(2);
+    expect(diffPayload.changedFields).toEqual(expect.arrayContaining(["config", "episodes", "extraction", "scriptPrompt"]));
+    expect(diffPayload.from.config.visualStyle).toBe("黑色电影风");
+    expect(diffPayload.to.config.visualStyle).toBe("国风赛博");
+  });
+
+  it("rolls back script workspace to a previous version and appends rollback history", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(
+      join(bookDir, "story", "state", "script-workspace.history.json"),
+      JSON.stringify({
+        entries: [
+          {
+            bookId: "demo-book",
+            version: 1,
+            action: "save",
+            savedAt: "2026-06-10T00:00:00.000Z",
+            workspace: {
+              bookId: "demo-book",
+              selectedChapterNumbers: [3],
+              updatedAt: "2026-06-10T00:00:00.000Z",
+              config: {
+                visualStyle: "黑色电影风",
+                directorMethod: "固定镜头",
+                aiTool: "即梦Ai",
+                aiModel: "pro",
+                episodeDurationSec: 90,
+                segmentDurationSec: 15,
+                segmentDurationMinSec: 10,
+                segmentDurationMaxSec: 15,
+                scriptPrompts: {
+                  script: "生成剧本",
+                  image: "生成图片",
+                  video: "生成视频",
+                },
+              },
+              scriptPrompt: "版本一",
+              extraction: { scenes: [], characters: [], props: [], assets: [] },
+              episodes: [],
+            },
+          },
+          {
+            bookId: "demo-book",
+            version: 2,
+            action: "generate",
+            savedAt: "2026-06-10T00:10:00.000Z",
+            workspace: {
+              bookId: "demo-book",
+              selectedChapterNumbers: [3],
+              updatedAt: "2026-06-10T00:10:00.000Z",
+              config: {
+                visualStyle: "国风赛博",
+                directorMethod: "短促推镜",
+                aiTool: "即梦Ai",
+                aiModel: "turbo",
+                episodeDurationSec: 45,
+                segmentDurationSec: 15,
+                segmentDurationMinSec: 15,
+                segmentDurationMaxSec: 15,
+                scriptPrompts: {
+                  script: "按短视频节奏生成剧本",
+                  image: "突出霓虹夜色和人物张力",
+                  video: "按镜头拆分动作与情绪变化",
+                },
+              },
+              scriptPrompt: "版本二",
+              extraction: { scenes: [], characters: [], props: [], assets: [] },
+              episodes: [
+                {
+                  episodeNumber: 1,
+                  chapterNumber: 3,
+                  chapterTitle: "天台对峙",
+                  title: "第1集",
+                  summary: "楼顶对峙",
+                  durationSec: 45,
+                  segments: [],
+                },
+              ],
+            },
+          },
+        ],
+        updatedAt: "2026-06-10T00:10:00.000Z",
+      }, null, 2),
+      "utf-8",
+    );
+    await writeFile(
+      join(bookDir, "story", "state", "script-workspace.json"),
+      JSON.stringify({
+        bookId: "demo-book",
+        selectedChapterNumbers: [3],
+        updatedAt: "2026-06-10T00:10:00.000Z",
+        config: {
+          visualStyle: "国风赛博",
+          directorMethod: "短促推镜",
+          aiTool: "即梦Ai",
+          aiModel: "turbo",
+          episodeDurationSec: 45,
+          segmentDurationSec: 15,
+          segmentDurationMinSec: 15,
+          segmentDurationMaxSec: 15,
+          scriptPrompts: {
+            script: "按短视频节奏生成剧本",
+            image: "突出霓虹夜色和人物张力",
+            video: "按镜头拆分动作与情绪变化",
+          },
+        },
+        scriptPrompt: "版本二",
+        extraction: { scenes: [], characters: [], props: [], assets: [] },
+        episodes: [
+          {
+            episodeNumber: 1,
+            chapterNumber: 3,
+            chapterTitle: "天台对峙",
+            title: "第1集",
+            summary: "楼顶对峙",
+            durationSec: 45,
+            segments: [],
+          },
+        ],
+      }, null, 2),
+      "utf-8",
+    );
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const rollbackResponse = await app.request("http://localhost/api/v1/books/demo-book/script-workspace/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetVersion: 1 }),
+    });
+
+    expect(rollbackResponse.status).toBe(200);
+    const rollbackPayload = await rollbackResponse.json() as {
+      ok: boolean;
+      workspace: { config: { visualStyle: string }; scriptPrompt: string };
+    };
+    expect(rollbackPayload.ok).toBe(true);
+    expect(rollbackPayload.workspace.config.visualStyle).toBe("黑色电影风");
+    expect(rollbackPayload.workspace.scriptPrompt).toBe("版本一");
+
+    const saved = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "script-workspace.json"), "utf-8"),
+    ) as {
+      config: { visualStyle: string };
+      scriptPrompt: string;
+    };
+    expect(saved.config.visualStyle).toBe("黑色电影风");
+    expect(saved.scriptPrompt).toBe("版本一");
+
+    const history = JSON.parse(
+      await readFile(join(bookDir, "story", "state", "script-workspace.history.json"), "utf-8"),
+    ) as {
+      entries: Array<{ version: number; action: string; workspace: { scriptPrompt: string } }>;
+    };
+    expect(history.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ version: 3, action: "rollback", workspace: expect.objectContaining({ scriptPrompt: "版本一" }) }),
+    ]));
+  });
+
   it("routes export-save through the shared structured interaction runtime", async () => {
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -4824,6 +6905,33 @@ describe("createStudioServer daemon lifecycle", () => {
       ok: true,
       chapters: 2,
     });
+  });
+
+  it("opens exported files only from the project root", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const openPathWithSystemDefaultMock = vi.fn();
+    const app = createStudioServer(cloneProjectConfig() as never, root, {
+      openPath: openPathWithSystemDefaultMock,
+    });
+
+    const okResponse = await app.request("http://localhost/api/v1/books/demo-book/export-open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: join(root, "books", "demo-book", "demo-book.txt") }),
+    });
+
+    expect(okResponse.status).toBe(200);
+    expect(openPathWithSystemDefaultMock).toHaveBeenCalledWith(
+      join(root, "books", "demo-book", "demo-book.txt").replace(/\\/g, "/"),
+    );
+
+    const badResponse = await app.request("http://localhost/api/v1/books/demo-book/export-open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "C:\\Windows\\system32\\drivers\\etc\\hosts" }),
+    });
+
+    expect(badResponse.status).toBe(400);
   });
 
   it("creates a fresh book session on POST /api/v1/sessions", async () => {
@@ -4852,6 +6960,18 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(response.json()).resolves.toMatchObject({
       session: { sessionId: "fresh-session", bookId: "demo-book", title: null },
     });
+  });
+
+  it("returns session:null for missing GET /api/v1/sessions/:sessionId", async () => {
+    loadBookSessionMock.mockResolvedValueOnce(null);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/sessions/missing-session");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ session: null });
   });
 
   it("renames a session through PUT /api/v1/sessions/:sessionId", async () => {
@@ -5122,6 +7242,47 @@ describe("createStudioServer daemon lifecycle", () => {
       writeStageHeartbeatMs: 3000,
     });
     expect(writeNextChapterMock).toHaveBeenCalledTimes(1);
+    expect(runAgentSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("does not route wizard-step agent requests into chapter persistence repair even if the prompt mentions chapter missing text", async () => {
+    createInteractionToolsFromDepsMock.mockReturnValueOnce({
+      saveBookWizardStep: vi.fn(async () => ({
+        __interaction: {
+          responseText: "# 卷纲规划\n\n## 第一卷\n- 主线围绕普通女孩稳稳搞钱展开。\n\n提示：第1章正文与索引均不存在，请重新执行写第1章。",
+          details: {
+            creationDraft: {
+              concept: "普通女孩搞钱成长",
+              title: "稳稳搞钱",
+              outlineMarkdown: "# 卷纲规划\n\n## 第一卷\n- 主线围绕普通女孩稳稳搞钱展开。",
+              missingFields: [],
+              readyToCreate: false,
+            },
+            draftRaw: "# 卷纲规划\n\n## 第一卷\n- 主线围绕普通女孩稳稳搞钱展开。\n\n提示：第1章正文与索引均不存在，请重新执行写第1章。",
+          },
+        },
+      })),
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "请重新生成当前卷纲规划页正文，提示里可能会提到第1章索引不存在，但这只是大纲内容的一部分。",
+        activeBookId: "demo-book",
+        sessionId: "agent-session-1",
+        wizardStep: "outline",
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      response: expect.stringContaining("# 卷纲规划"),
+    });
+    expect(writeNextChapterMock).not.toHaveBeenCalled();
     expect(runAgentSessionMock).not.toHaveBeenCalled();
   });
 
@@ -5656,7 +7817,30 @@ describe("createStudioServer daemon lifecycle", () => {
     auditDraftMock
       .mockResolvedValueOnce(failedAudit)
       .mockResolvedValueOnce(failedAudit)
+      .mockResolvedValueOnce(failedAudit)
       .mockResolvedValueOnce(failedAudit);
+    reviseDraftMock
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 3120,
+        fixedIssues: ["- 重构关键道具来源铺垫"],
+        applied: true,
+        status: "audit-failed",
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 3150,
+        fixedIssues: ["- 补充时间锚点并压缩重复表达"],
+        applied: true,
+        status: "audit-failed",
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 12,
+        wordCount: 3180,
+        fixedIssues: ["- 结构性重排冲突段落"],
+        applied: true,
+        status: "audit-failed",
+      });
 
     const { createStudioServer } = await import("./server.js");
     const app = createStudioServer(cloneProjectConfig() as never, root);
@@ -5686,8 +7870,8 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(severePos).toBeGreaterThan(-1);
     expect(warnPos).toBeGreaterThan(severePos);
     expect(infoPos).toBeGreaterThan(warnPos);
-    expect(report).toContain("自动闭环：最多2轮修订，本次执行2轮。");
-    expect(report).toContain("二次修订后仍未通过，已自动中止");
+    expect(report).toContain("自动闭环：最多3轮修订，本次执行3轮。");
+    expect(report).toContain("3轮修订后仍未通过，已自动中止");
     expect(reviseDraftMock).toHaveBeenNthCalledWith(
       1,
       "demo-book",
@@ -5758,7 +7942,7 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     const report = String((payload as { response?: unknown }).response ?? "");
-    expect(report).toContain("自动闭环：最多2轮修订，本次执行1轮。");
+    expect(report).toContain("自动闭环：最多3轮修订，本次执行1轮。");
     expect(report).toContain("结果：已达标并结束自动闭环。");
     expect(reviseDraftMock).toHaveBeenCalledTimes(1);
     expect(reviseDraftMock).toHaveBeenNthCalledWith(
@@ -5883,7 +8067,7 @@ describe("createStudioServer daemon lifecycle", () => {
       runId,
       chapter: 12,
       round: 1,
-      maxRounds: 2,
+      maxRounds: 3,
       phase: "revise",
       mode: "spot-fix",
       autoTriggeredByAudit: true,
@@ -5893,7 +8077,7 @@ describe("createStudioServer daemon lifecycle", () => {
       runId,
       chapter: 12,
       round: 1,
-      maxRounds: 2,
+      maxRounds: 3,
       phase: "revise",
       mode: "spot-fix",
       autoTriggeredByAudit: true,
@@ -5976,7 +8160,7 @@ describe("createStudioServer daemon lifecycle", () => {
       runId,
       chapter: 12,
       round: 2,
-      maxRounds: 2,
+      maxRounds: 3,
       phase: "revise",
       mode: "rework",
       autoTriggeredByAudit: true,
@@ -6004,6 +8188,7 @@ describe("createStudioServer daemon lifecycle", () => {
       summary: "still failed",
     };
     auditDraftMock
+      .mockResolvedValueOnce(failedAudit)
       .mockResolvedValueOnce(failedAudit)
       .mockResolvedValueOnce(failedAudit)
       .mockResolvedValueOnce(failedAudit);
@@ -7286,7 +9471,7 @@ describe("createStudioServer daemon lifecycle", () => {
       entry: "rewrite",
       chapter: 3,
       round: 1,
-      maxRounds: 2,
+      maxRounds: 3,
       phase: "audit",
     });
     expect(auditComplete?.data).toMatchObject({
@@ -7294,7 +9479,7 @@ describe("createStudioServer daemon lifecycle", () => {
       entry: "rewrite",
       chapter: 3,
       round: 1,
-      maxRounds: 2,
+      maxRounds: 3,
       phase: "audit",
       autoReviewState: "retrying",
       autoReviewFinal: false,
@@ -7304,7 +9489,7 @@ describe("createStudioServer daemon lifecycle", () => {
       entry: "rewrite",
       chapter: 3,
       round: 1,
-      maxRounds: 2,
+      maxRounds: 3,
       phase: "revise",
       autoTriggeredByAudit: true,
     });
@@ -7313,7 +9498,7 @@ describe("createStudioServer daemon lifecycle", () => {
       entry: "rewrite",
       chapter: 3,
       round: 1,
-      maxRounds: 2,
+      maxRounds: 3,
       phase: "revise",
       autoTriggeredByAudit: true,
     });
@@ -8755,6 +10940,61 @@ describe("createStudioServer daemon lifecycle", () => {
     });
   });
 
+  it("routes wizard world-step agent requests to draft generation instead of summary chat", async () => {
+    createInteractionToolsFromDepsMock.mockReturnValueOnce({
+      saveBookWizardStep: vi.fn(async () => ({
+        __interaction: {
+          responseText: "# 世界观\n\n近未来港口城被灰产账本和旧债网络盘踞，公开秩序和地下清算并行存在。",
+          details: {
+            creationDraft: {
+              concept: "港城账本",
+              title: "夜港账本",
+              worldPremise: "近未来港口城被灰产账本和旧债网络盘踞，公开秩序和地下清算并行存在。",
+              missingFields: [],
+              readyToCreate: false,
+            },
+            draftRaw: "# 世界观\n\n近未来港口城被灰产账本和旧债网络盘踞，公开秩序和地下清算并行存在。",
+          },
+        },
+      })),
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const eventsResponse = await app.request("http://localhost/api/v1/events");
+    expect(eventsResponse.status).toBe(200);
+
+    const runId = "run-wizard-world-1";
+    const response = await app.request("http://localhost/api/v1/agent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instruction: "请自动生成当前世界观页正文，只写这一页。",
+        sessionId: "agent-session-1",
+        activeBookId: "demo-book",
+        wizardStep: "world",
+        runId,
+        forceStream: true,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      response: expect.stringContaining("近未来港口城被灰产账本和旧债网络盘踞"),
+      details: {
+        draftRaw: expect.stringContaining("# 世界观"),
+      },
+    });
+
+    const events = await collectSSEEvents(
+      eventsResponse,
+      ["thinking:start", "thinking:end", "draft:delta"],
+      { timeoutMs: 3_000, minCount: 3 },
+    );
+    expect(events.some((event) => event.event === "draft:delta" && String((event.data as any)?.text ?? "").includes("近未来港口城被灰产账本和旧债网络盘踞"))).toBe(true);
+  });
+
   it("returns AGENT_WRITE_NOT_EXECUTED when write intent does not call writer tool", async () => {
     loadChapterIndexMock
       .mockResolvedValueOnce([
@@ -10036,6 +12276,104 @@ describe("createStudioServer daemon lifecycle", () => {
         wizardStep: "intro",
       }),
     }));
+  });
+
+  it("returns wizard draftRaw details through the shared interaction session endpoint", async () => {
+    processProjectInteractionRequestMock.mockResolvedValueOnce({
+      request: { intent: "save_wizard_step" },
+      session: {
+        sessionId: "session-5",
+        projectRoot: root,
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          characterArc: "角色弧光字段摘要",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        creationWizard: {
+          currentStep: "arc",
+          completedSteps: ["intro", "world", "outline", "volume", "characters"],
+          stepNotes: {},
+        },
+        messages: [],
+        events: [],
+      },
+      responseText: "已保存 arc 页草案。",
+      details: {
+        draftRaw: "# 人物弧光\n\n## 林砚\n\n### 核心弧光\n- 从逃避者变成主动破局者。",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          characterArc: "角色弧光字段摘要",
+          missingFields: [],
+          readyToCreate: false,
+        },
+      },
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/interaction/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        request: {
+          intent: "save_wizard_step",
+          instruction: "重写人物弧光",
+          wizardStep: "arc",
+        },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      response: "已保存 arc 页草案。",
+      details: expect.objectContaining({
+        draftRaw: expect.stringContaining("# 人物弧光"),
+      }),
+      session: expect.objectContaining({
+        creationWizard: expect.objectContaining({
+          currentStep: "arc",
+        }),
+      }),
+    });
+  });
+
+  it("treats legacy books without wizard state as already completed", async () => {
+    loadBookConfigMock.mockResolvedValueOnce({
+      id: "demo-book",
+      title: "Legacy Book",
+      platform: "qidian",
+      genre: "xuanhuan",
+      status: "active",
+      targetChapters: 100,
+      chapterWordCount: 3000,
+      createdAt: "2026-04-12T00:00:00.000Z",
+      updatedAt: "2026-04-12T00:00:00.000Z",
+    });
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book");
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      book: expect.objectContaining({
+        id: "demo-book",
+        title: "Legacy Book",
+      }),
+      creation: {
+        shellCreated: false,
+        wizardCompleted: true,
+        currentStep: "relation",
+        resumeStep: "relation",
+        completedSteps: ["intro", "world", "outline", "volume", "characters", "arc", "relation"],
+        completedCount: 7,
+        totalSteps: 7,
+      },
+    });
   });
 
   it("posts retreat wizard requests through the shared interaction session endpoint without streaming", async () => {

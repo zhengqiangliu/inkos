@@ -25,6 +25,7 @@ export const BookConfigSchema = z.object({
   platform: PlatformSchema,
   genre: GenreSchema,
   status: BookStatusSchema,
+  creationState: z.enum(["wizard", "ready"]).optional(),
   targetChapters: z.number().int().min(1).default(200),
   chapterWordCount: z.number().int().min(1000).default(3000),
   language: z.enum(["zh", "en"]).optional(),

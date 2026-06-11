@@ -1,24 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
-import { deleteApi, patchApi, postApi, useApi } from "../hooks/use-api";
+import { deleteApi, fetchJson, patchApi, postApi, putApi, useApi } from "../hooks/use-api";
 import { useChatStore } from "../store/chat";
 import { useServiceStore } from "../store/service";
+import { usePersistedModelSelection } from "../hooks/use-persisted-model-selection";
 import type {
   BookDetail,
   BookSummary,
   BookTaskType,
   GlobalBookTaskItem,
   GlobalBookTaskListResponse,
+  TaskChecklistItem,
+  TaskChecklistResponse,
+  TaskChecklistTemplateSummary,
   RunLogEntry,
 } from "../shared/contracts";
-import { resolveModelSelection } from "./chat-page-state";
+import { resolveModelSelection, resolvePersistedModelSelection } from "./chat-page-state";
 import { AssistantOutputCard } from "../components/chat/AssistantOutputCard";
 import { TaskChapterProgress } from "../components/task/TaskChapterProgress";
 import { TaskInlineNote } from "../components/task/TaskInlineNote";
 import { TaskMetricsSummary } from "../components/task/TaskMetricsSummary";
 import { TaskPerformanceBreakdown } from "../components/task/TaskPerformanceBreakdown";
 import { TaskRuntimeControls } from "../components/task/TaskRuntimeControls";
+import { buildScriptWorkspaceChecklistTemplate } from "../utils/script-workspace-checklist";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   TaskStateLegend,
@@ -292,6 +297,7 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
   const requestedChaptersTouchedRef = useRef(false);
   const wordCountTouchedRef = useRef(false);
   const modelTouchedRef = useRef(false);
+  const { persistedSelection, ready: persistedSelectionReady } = usePersistedModelSelection();
   const [tasks, setTasks] = useState<ReadonlyArray<GlobalBookTaskItem>>([]);
   const [taskLogsByKey, setTaskLogsByKey] = useState<Record<string, ReadonlyArray<AnnotatedTaskLog>>>({});
   const [taskStageHistoryByKey, setTaskStageHistoryByKey] = useState<Record<string, ReadonlyArray<TaskStageSnapshot>>>({});
@@ -301,8 +307,14 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
   const [deleteConfirmTask, setDeleteConfirmTask] = useState<GlobalBookTaskItem | null>(null);
   const [bulkDeleteConfirmOpen, setBulkDeleteConfirmOpen] = useState(false);
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
-  const createTaskQuickModeHidden = createTaskType === "audit";
+const createTaskQuickModeHidden = createTaskType === "audit";
   const createTaskWordCountHidden = createTaskType === "audit";
+  const { data: checklistData, refetch: refetchChecklist } = useApi<TaskChecklistResponse>(createBookId ? `/books/${createBookId}/task-checklist` : "");
+  const [checklistItems, setChecklistItems] = useState<ReadonlyArray<TaskChecklistItem>>([]);
+  const [checklistTemplateId, setChecklistTemplateId] = useState("short-video");
+  const [checklistInput, setChecklistInput] = useState("");
+  const [checklistNote, setChecklistNote] = useState("");
+  const [checklistSaving, setChecklistSaving] = useState(false);
 
   const summary = useMemo(() => computeTaskSummary(tasks), [tasks]);
   const books = booksData?.books ?? [];
@@ -352,6 +364,11 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
     const key = taskKey(selectedTask);
     return buildTaskStageTimeline(taskStageHistoryByKey[key] ?? [], selectedTask, nowTick);
   }, [nowTick, selectedTask, taskStageHistoryByKey]);
+  const checklistProgress = useMemo(() => {
+    const total = checklistItems.length;
+    const done = checklistItems.filter((item) => item.done).length;
+    return { total, done };
+  }, [checklistItems]);
 
   useEffect(() => {
     setNowTick(Date.now());
@@ -502,12 +519,26 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
   }, [createBookId]);
 
   useEffect(() => {
+    setChecklistItems(checklistData?.checklist.items ?? []);
+    setChecklistTemplateId(checklistData?.checklist.templateId ?? "short-video");
+    setChecklistInput("");
+    setChecklistNote("");
+  }, [checklistData?.checklist.items, createBookId]);
+
+  useEffect(() => {
+    if (!persistedSelectionReady) return;
     if (modelTouchedRef.current) return;
+    const resolvedFromConfig = resolvePersistedModelSelection(groupedModels, persistedSelection);
+    if (resolvedFromConfig) {
+      setCreateModel(resolvedFromConfig.model);
+      setCreateService(resolvedFromConfig.service);
+      return;
+    }
     const resolved = resolveModelSelection(groupedModels, createModel, createService);
     if (!resolved) return;
     setCreateModel(resolved.model);
     setCreateService(resolved.service);
-  }, [createModel, createService, groupedModels]);
+  }, [createModel, createService, groupedModels, persistedSelection, persistedSelectionReady]);
 
   useEffect(() => {
     if (!createBookId) return;
@@ -649,6 +680,68 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
       await refetch();
     } finally {
       setUpdatingTaskKey((current) => (current === key ? null : current));
+    }
+  };
+
+  const makeChecklistItemId = () => `item-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const handleChecklistAdd = async () => {
+    const text = checklistInput.trim();
+    if (!text || !createBookId) return;
+    const nextItems = [
+      ...checklistItems,
+      {
+        id: makeChecklistItemId(),
+        text,
+        done: false,
+        order: checklistItems.length,
+        ...(checklistNote.trim() ? { note: checklistNote.trim() } : {}),
+      },
+    ] satisfies ReadonlyArray<TaskChecklistItem>;
+    setChecklistItems(nextItems);
+    setChecklistInput("");
+    setChecklistNote("");
+    await putApi(`/books/${createBookId}/task-checklist`, { templateId: checklistTemplateId, items: nextItems });
+    await refetchChecklist();
+  };
+
+  const handleChecklistToggle = async (itemId: string, done: boolean) => {
+    if (!createBookId) return;
+    const nextItems = checklistItems.map((item) => (item.id === itemId ? { ...item, done } : item));
+    setChecklistItems(nextItems);
+    await putApi(`/books/${createBookId}/task-checklist`, { templateId: checklistTemplateId, items: nextItems });
+    await refetchChecklist();
+  };
+
+  const handleChecklistRemove = async (itemId: string) => {
+    if (!createBookId) return;
+    const nextItems = checklistItems.filter((item) => item.id !== itemId).map((item, index) => ({ ...item, order: index }));
+    setChecklistItems(nextItems);
+    await putApi(`/books/${createBookId}/task-checklist`, { templateId: checklistTemplateId, items: nextItems });
+    await refetchChecklist();
+  };
+
+  const handleChecklistGenerate = async () => {
+    if (!createBookId) return;
+    const baseItems = buildScriptWorkspaceChecklistTemplate(checklistTemplateId);
+    setChecklistItems(baseItems);
+    await putApi(`/books/${createBookId}/task-checklist`, { templateId: checklistTemplateId, items: baseItems });
+    await refetchChecklist();
+  };
+
+  const handleChecklistSave = async () => {
+    if (!createBookId) return;
+    setChecklistSaving(true);
+    try {
+      const response = await putApi<TaskChecklistResponse>(
+        `/books/${createBookId}/task-checklist`,
+        { templateId: checklistTemplateId, items: checklistItems },
+      );
+      setChecklistItems(response.checklist.items);
+      setChecklistTemplateId(response.checklist.templateId ?? checklistTemplateId);
+      await refetchChecklist();
+    } finally {
+      setChecklistSaving(false);
     }
   };
 
@@ -838,6 +931,124 @@ export function TaskCenterPage({ nav, sse }: { nav: Nav; theme: Theme; t: TFunct
                 {creating ? "创建中..." : "创建任务"}
               </button>
               {createError && <div className="text-xs text-destructive">{createError}</div>}
+            </div>
+          </div>
+        </div>
+      </AssistantOutputCard>
+
+      <AssistantOutputCard heading="任务清单" className="overflow-hidden">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-border/40 bg-background/35 px-4 py-3 text-sm">
+              <div className="text-muted-foreground">
+                {selectedBook ? `当前书籍：${selectedBook.title}` : "请选择书籍"}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                进度 {checklistProgress.done}/{checklistProgress.total}
+              </div>
+            </div>
+            <div className="space-y-2">
+              {checklistItems.map((item) => (
+                <div key={item.id} className="rounded-xl border border-border/40 bg-card/50 p-3">
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={item.done}
+                      onChange={(event) => {
+                        void handleChecklistToggle(item.id, event.target.checked);
+                      }}
+                      className="mt-1 h-4 w-4 rounded border-border/60 text-primary"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className={cn("text-sm font-medium", item.done && "text-muted-foreground line-through")}>{item.text}</div>
+                      {item.note ? <div className="mt-1 text-xs text-muted-foreground">{item.note}</div> : null}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleChecklistRemove(item.id)}
+                      className="text-xs text-destructive hover:underline"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {checklistItems.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border/50 px-4 py-8 text-center text-sm text-muted-foreground">
+                  还没有任务条目，先生成模板或手动添加。
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <div className="rounded-xl border border-border/40 bg-background/40 p-4 space-y-3">
+              <div className="grid gap-2">
+                <label className="block">
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">模板</div>
+                  <select
+                    value={checklistTemplateId}
+                    onChange={(event) => setChecklistTemplateId(event.target.value)}
+                    className="w-full rounded-lg border border-border/60 bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                  >
+                    {(checklistData?.templates ?? [] as ReadonlyArray<TaskChecklistTemplateSummary>).map((template) => (
+                      <option key={template.id} value={template.id}>{template.label}</option>
+                    ))}
+                  </select>
+                  {checklistData?.templates?.find((template) => template.id === checklistTemplateId)?.description ? (
+                    <div className="mt-1 text-[11px] text-muted-foreground">
+                      {checklistData.templates?.find((template) => template.id === checklistTemplateId)?.description}
+                    </div>
+                  ) : null}
+                </label>
+                <label className="block">
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">新增任务</div>
+                  <input
+                    value={checklistInput}
+                    onChange={(event) => setChecklistInput(event.target.value)}
+                    placeholder="例如：提取角色与场景"
+                    className="w-full rounded-lg border border-border/60 bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                  />
+                </label>
+                <label className="block">
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">备注</div>
+                  <input
+                    value={checklistNote}
+                    onChange={(event) => setChecklistNote(event.target.value)}
+                    placeholder="可选备注"
+                    className="w-full rounded-lg border border-border/60 bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleChecklistAdd()}
+                  disabled={!createBookId || !checklistInput.trim()}
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                >
+                  添加条目
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleChecklistGenerate()}
+                  disabled={!createBookId}
+                  className="rounded-lg border border-border/60 bg-secondary/50 px-4 py-2 text-sm"
+                >
+                  生成基础模板
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleChecklistSave()}
+                  disabled={!createBookId || checklistSaving}
+                  className="rounded-lg border border-border/60 bg-card px-4 py-2 text-sm"
+                >
+                  {checklistSaving ? "保存中..." : "保存清单"}
+                </button>
+              </div>
+            </div>
+            <div className="rounded-xl border border-border/40 bg-background/40 p-4 text-sm text-muted-foreground">
+              支持逐项勾选、重排后保存。清单会保存在当前书籍下，刷新后自动恢复。
             </div>
           </div>
         </div>

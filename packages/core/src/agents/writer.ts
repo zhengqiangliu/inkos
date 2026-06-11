@@ -23,6 +23,7 @@ import type { RuntimeStateDelta } from "../models/runtime-state.js";
 import { buildLengthSpec, countChapterLength } from "../utils/length-metrics.js";
 import { filterHooks, filterSummaries, filterSubplots, filterEmotionalArcs, filterCharacterMatrix } from "../utils/context-filter.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
+import { readCharacterArc, readRelationshipMap, readStoryFrame, readVolumeMap } from "../utils/outline-paths.js";
 import { normalizeDialogueQuotesByPolicy, resolveDialogueQuotePolicy as resolveBookDialogueQuotePolicy, type ResolvedDialogueQuotePolicy } from "../utils/dialogue-quote-policy.js";
 import { buildHookDebtHardConstraintBlock, deriveHookDebtBudget } from "../utils/hook-agenda.js";
 import {
@@ -178,11 +179,11 @@ export class WriterAgent extends BaseAgent {
     const [
       storyBible, volumeOutline, styleGuide, currentState, ledger, hooks,
       chapterSummaries, subplotBoard, emotionalArcs, characterMatrix, styleProfileRaw,
-      parentCanon, fanficCanonRaw,
+      parentCanon, fanficCanonRaw, characterArc, relationshipMap,
       foundationBrief,
     ] = await Promise.all([
-        this.readFileOrDefault(join(bookDir, "story/story_bible.md")),
-        this.readFileOrDefault(join(bookDir, "story/volume_outline.md")),
+        readStoryFrame(bookDir, ""),
+        readVolumeMap(bookDir, ""),
         this.readFileOrDefault(join(bookDir, "story/style_guide.md")),
         this.readFileOrDefault(join(bookDir, "story/current_state.md")),
         this.readFileOrDefault(join(bookDir, "story/particle_ledger.md")),
@@ -194,6 +195,8 @@ export class WriterAgent extends BaseAgent {
         this.readFileOrDefault(join(bookDir, "story/style_profile.json")),
         this.readFileOrDefault(join(bookDir, "story/parent_canon.md")),
         this.readFileOrDefault(join(bookDir, "story/fanfic_canon.md")),
+        readCharacterArc(bookDir, ""),
+        readRelationshipMap(bookDir, ""),
         readBrief(join(bookDir, "story")),
       ]);
 
@@ -289,6 +292,8 @@ export class WriterAgent extends BaseAgent {
         foundationBrief,
         externalContext: input.externalContext,
         auditGatePreview,
+        subplotBoard: filterSubplots(subplotBoard),
+        emotionalArcs: filterEmotionalArcs(emotionalArcs, chapterNumber),
       })
       : (() => {
           // Smart context filtering: inject only relevant parts of truth files
@@ -322,6 +327,8 @@ export class WriterAgent extends BaseAgent {
             subplotBoard: filteredSubplots,
             emotionalArcs: filteredArcs,
             characterMatrix: povFilteredMatrix,
+            characterArc,
+            relationshipMap,
             dialogueFingerprints,
             relevantSummaries,
             parentCanon: hasParentCanon ? parentCanon : undefined,
@@ -332,6 +339,7 @@ export class WriterAgent extends BaseAgent {
             maxNewHooks: input.chapterPlan?.maxNewHooks,
             requiredRecoverHooks: input.chapterPlan?.requiredRecoverHooks,
             auditGatePreview,
+            endingHookRequired: !input.chapterPlan,
           });
         })();
 
@@ -690,7 +698,7 @@ export class WriterAgent extends BaseAgent {
       this.readFileOrDefault(join(input.bookDir, "story/subplot_board.md")),
       this.readFileOrDefault(join(input.bookDir, "story/emotional_arcs.md")),
       this.readFileOrDefault(join(input.bookDir, "story/character_matrix.md")),
-      this.readFileOrDefault(join(input.bookDir, "story/volume_outline.md")),
+      readVolumeMap(input.bookDir, ""),
     ]);
 
     const { profile: genreProfile } = await readGenreProfile(this.ctx.projectRoot, input.book.genre);
@@ -979,6 +987,8 @@ export class WriterAgent extends BaseAgent {
     readonly subplotBoard: string;
     readonly emotionalArcs: string;
     readonly characterMatrix: string;
+    readonly characterArc: string;
+    readonly relationshipMap: string;
     readonly dialogueFingerprints?: string;
     readonly relevantSummaries?: string;
     readonly parentCanon?: string;
@@ -989,6 +999,7 @@ export class WriterAgent extends BaseAgent {
     readonly maxNewHooks?: number;
     readonly requiredRecoverHooks?: ReadonlyArray<string>;
     readonly auditGatePreview?: string;
+    readonly endingHookRequired?: boolean;
   }): string {
     const contextBlock = params.externalContext
       ? `\n## 外部指令\n以下是来自外部系统的创作指令，请在本章中融入：\n\n${params.externalContext}\n`
@@ -1017,6 +1028,18 @@ export class WriterAgent extends BaseAgent {
 
     const matrixBlock = params.characterMatrix !== "(文件尚未创建)"
       ? `\n## 角色交互矩阵\n${params.characterMatrix}\n`
+      : "";
+
+    const characterArcBlock = params.characterArc !== "(文件尚未创建)" && params.characterArc.trim()
+      ? (params.language === "en"
+        ? `\n## Character Arc\n${params.characterArc}\n`
+        : `\n## 人物弧光\n${params.characterArc}\n`)
+      : "";
+
+    const relationshipMapBlock = params.relationshipMap !== "(文件尚未创建)" && params.relationshipMap.trim()
+      ? (params.language === "en"
+        ? `\n## Relationship Map\n${params.relationshipMap}\n`
+        : `\n## 人物关系\n${params.relationshipMap}\n`)
       : "";
 
     const fingerprintBlock = params.dialogueFingerprints
@@ -1073,6 +1096,12 @@ ${params.parentCanon}\n`
       ? `\n${params.auditGatePreview}\n`
       : "";
 
+    const endingHookBlock = params.endingHookRequired
+      ? (params.language === "en"
+        ? `\n## Ending Hook (Hard Constraint)\nThis chapter MUST end with an explicit hook: choose one of — new risk / new mystery / new goal. Do not end with a resolved scene or flat conclusion.\n`
+        : `\n## 章尾钩子（硬约束）\n本章结尾必须设置明确的悬念钩子，三选一：新风险 / 新疑点 / 新目标。严禁以剧情收尾或平铺直叙结束本章。\n`)
+      : "";
+
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
 ${contextBlock}
@@ -1085,7 +1114,7 @@ ${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
 ## Plot Threads
 ${params.hooks}
-${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
+${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${characterArcBlock}${relationshipMapBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## Recent Chapters
 ${params.recentChapters || "(This is the first chapter, no previous text)"}
 
@@ -1100,10 +1129,12 @@ ${params.volumeOutline}
 - If the outline specifies an event for chapter N, do not resolve it early.
 - Pacing must match the outline's chapter span: if 5 chapters are planned for an arc, do not compress into 1-2.
 - PRE_WRITE_CHECK must identify which outline node this chapter covers.
+- Character actions, hesitation, escalation, alliance shifts, betrayals, and reconciliation must stay consistent with the provided Character Arc and Relationship Map.
+- When the Relationship Map exposes alliance, rivalry, hidden ties, or latent conflict, convert at least part of that pressure into on-page scene action instead of abstract summary.
 ${dialogueQuoteBlock}
 
 ${lengthRequirementBlock}
-${auditGateBlock}
+${endingHookBlock}${auditGateBlock}
 - Output PRE_WRITE_CHECK first, then the chapter
 - Output only PRE_WRITE_CHECK, CHAPTER_TITLE, and CHAPTER_CONTENT blocks`;
     }
@@ -1119,7 +1150,7 @@ ${foundationBriefBlock}${params.currentState}
 ${ledgerBlock}
 ## 伏笔池
 ${params.hooks}
-${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
+${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${characterArcBlock}${relationshipMapBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}
 
@@ -1134,10 +1165,12 @@ ${params.volumeOutline}
 - 如果卷纲指定了某个事件/转折发生在第N章，不得提前到本章完成
 - 剧情推进速度必须与卷纲规划的章节跨度匹配：如果卷纲规划某段剧情跨5章，不得在1-2章内讲完
 - PRE_WRITE_CHECK中必须明确标注本章对应的卷纲节点
+- 人物行为、犹疑、升级、结盟、背叛、和解，必须服从提供的人物弧光与人物关系，不能无铺垫跳变。
+- 如果人物关系里已经给出联盟、对立、隐藏联系、潜在冲突，正文必须把其中至少一部分转成场景动作、对话阻力或关系升级，不能只做概念复述。
 ${dialogueQuoteBlock}
 
 ${lengthRequirementBlock}
-${auditGateBlock}
+${endingHookBlock}${auditGateBlock}
 - 先输出写作自检表，再写正文
       - 只需输出 PRE_WRITE_CHECK、CHAPTER_TITLE、CHAPTER_CONTENT 三个区块`;
   }
@@ -1156,6 +1189,8 @@ ${auditGateBlock}
     readonly foundationBrief: string;
     readonly externalContext?: string;
     readonly auditGatePreview?: string;
+    readonly subplotBoard?: string;
+    readonly emotionalArcs?: string;
   }): string {
     const contextSections = params.contextPackage.selectedContext
       .map((entry) => [
@@ -1219,6 +1254,16 @@ ${auditGateBlock}
     const auditGateBlock = params.auditGatePreview
       ? `\n${params.auditGatePreview}\n`
       : "";
+    const subplotBlock = params.subplotBoard && params.subplotBoard !== "(文件尚未创建)"
+      ? params.language === "en"
+        ? `\n## Subplot Board\n${params.subplotBoard}\n`
+        : `\n## 支线进度板\n${params.subplotBoard}\n`
+      : "";
+    const emotionalArcsBlock = params.emotionalArcs && params.emotionalArcs !== "(文件尚未创建)"
+      ? params.language === "en"
+        ? `\n## Emotional Arcs\n${params.emotionalArcs}\n`
+        : `\n## 情感弧线\n${params.emotionalArcs}\n`
+      : "";
 
     if (params.language === "en") {
       return `Write chapter ${params.chapterNumber}.
@@ -1230,6 +1275,8 @@ ${foundationBriefBlock}
 ${externalContextBlock}
 ## Selected Context
 ${contextSections || "(none)"}
+${subplotBlock}
+${emotionalArcsBlock}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
 ${hookLedgerBlock}
@@ -1261,6 +1308,8 @@ ${foundationBriefBlock}
 ${externalContextBlock}
 ## 已选上下文
 ${contextSections || "(无)"}
+${subplotBlock}
+${emotionalArcsBlock}
 ${selectedEvidenceBlock}
 ${hookAgendaBlock}
 ${hookLedgerBlock}

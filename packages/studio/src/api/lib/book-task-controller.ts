@@ -1,6 +1,6 @@
 import type { AuditIssue, OnStreamProgress, PipelineConfig, ProjectConfig, StateManager } from "@actalk/inkos-core";
 import type { ReviseMode } from "@actalk/inkos-core";
-import { countAuditIssueClasses, resolvePrimaryIssueClass } from "@actalk/inkos-core";
+import { countAuditIssueClasses, isStructuralAuditIssue, resolvePrimaryIssueClass } from "@actalk/inkos-core";
 import { ApiError } from "../errors.js";
 import { persistChapterAuditSummary } from "./chapter-audit-index.js";
 import type { BookTask, BookTaskCreatePayload, BookTaskPatchPayload, BookTaskStatus, BookTaskType, RunLogEntry } from "../../shared/contracts.js";
@@ -58,6 +58,17 @@ interface ReviseDraftOptions {
     readonly score?: number;
     readonly passScoreThreshold?: number;
     readonly scoreShortfall?: number;
+    readonly previousRevisionWasNoop?: boolean;
+    readonly structureOverload?: {
+      enabled: boolean;
+      reason: string;
+      signals: ReadonlyArray<{
+        code: string;
+        severity: "warning" | "info";
+        message: string;
+        suggestion: string;
+      }>;
+    };
     readonly unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
     readonly mustFixFirstIssueIds?: ReadonlyArray<string>;
     readonly issueClassCounts?: Readonly<{
@@ -95,7 +106,7 @@ function nowIso(): string {
 
 const MIN_AUDIT_PASS_SCORE = 80;
 const TASK_CENTER_AUDIT_MIN_PASS_SCORE = AUDIT_PASS_SCORE_THRESHOLD;
-const TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS = 2;
+const TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS = 3;
 
 function normalizeChapterCount(value: unknown, fallback: number): number {
   const numeric = typeof value === "number" ? value : Number(value);
@@ -460,6 +471,8 @@ function clipText(value: string, maxLength: number): string {
 
 function buildTaskCenterRevisionBrief(args: {
   readonly chapterNumber: number;
+  readonly reviseRound: number;
+  readonly maxReviseRounds: number;
   readonly score: number | null;
   readonly threshold: number;
   readonly summary?: string | null;
@@ -498,6 +511,7 @@ function buildTaskCenterRevisionBrief(args: {
   return [
     "## 任务中心自动修订约束",
     `- 章节：第${args.chapterNumber}章`,
+    `- 修订轮次：第 ${args.reviseRound}/${args.maxReviseRounds} 轮`,
     `- 审计结论：未通过`,
     `- 当前评分：${scoreLine}`,
     `- 通过阈值：${args.threshold}/100`,
@@ -510,6 +524,9 @@ function buildTaskCenterRevisionBrief(args: {
     "- 只围绕上述问题收敛修改，优先清理 critical/warning。",
     "- 不要扩写无关情节，不要改变主线结论。",
     "- 如果需要较大改动，优先重组问题段落而不是整章推翻。",
+    ...(args.reviseRound >= args.maxReviseRounds ? [
+      "- 本轮是最后一次自动修订，必须执行结构级重构，不允许继续做局部措辞微调。",
+    ] : []),
     reportBlock,
   ]
     .filter((line) => typeof line === "string" && line.length > 0)
@@ -536,6 +553,17 @@ function buildFullReviseContext(args: {
   readonly score: number;
   readonly unresolvedIssueIdsFromPrevRound?: ReadonlyArray<string>;
   readonly dimensionChecks?: ReadonlyArray<{ readonly dimension: string; readonly status: "pass" | "warning" | "failed"; readonly evidence?: string }>;
+  readonly previousRevisionWasNoop?: boolean;
+  readonly structureOverload?: {
+    enabled: boolean;
+    reason: string;
+    signals: ReadonlyArray<{
+      code: string;
+      severity: "warning" | "info";
+      message: string;
+      suggestion: string;
+    }>;
+  };
 }): NonNullable<ReviseDraftOptions["reviseContext"]> {
   const criticalWarningIssues = args.issues.filter(
     (i) => i.severity === "critical" || i.severity === "warning",
@@ -560,6 +588,8 @@ function buildFullReviseContext(args: {
     primaryIssueClass,
     dimensionChecks: args.dimensionChecks?.slice(0, 15),
     unresolvedIssueIdsFromPrevRound: args.unresolvedIssueIdsFromPrevRound,
+    previousRevisionWasNoop: args.previousRevisionWasNoop,
+    ...(args.structureOverload ? { structureOverload: args.structureOverload } : {}),
   };
 }
 
@@ -568,6 +598,9 @@ function selectReviseMode(
   round: number,
   primaryIssueClass: "none" | "structural" | "textual" | "mixed",
 ): "polish" | "rewrite" | "rework" {
+  if (round >= TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS) {
+    return "rework";
+  }
   if (severityCounts.critical === 0 && severityCounts.warning <= 2) {
     return "polish";
   }
@@ -1508,9 +1541,33 @@ export class BookTaskController {
           unresolvedIssueIdsFromPrevRound: auditUnresolvedIssueIds.length > 0
             ? auditUnresolvedIssueIds
             : undefined,
+          previousRevisionWasNoop: auditRepairRound > 1 && auditUnresolvedIssueIds.length > 0,
+          ...(auditRepairRound >= TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS
+            ? {
+                structureOverload: {
+                  enabled: true,
+                  reason: `第 ${auditRepairRound}/${TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS} 轮仍未通过，已切换为结构级重构模式。`,
+                  signals: result.issues
+                    .filter((issue) => issue.severity === "critical" || issue.severity === "warning")
+                    .slice(0, 5)
+                    .map((issue, index) => ({
+                      code: `ISSUE-${String(index + 1).padStart(2, "0")}`,
+                      severity: isStructuralAuditIssue({
+                        category: issue.category ?? "",
+                        dimensionId: issue.dimensionId,
+                        description: issue.description,
+                      }) ? "warning" : "info",
+                      message: `${issue.category ?? "未分类"}：${issue.description ?? "未提供描述"}`,
+                      suggestion: issue.suggestion ?? "先重构段落骨架，再处理局部措辞。",
+                    })),
+                },
+              }
+            : {}),
         });
         const revisionBrief = buildTaskCenterRevisionBrief({
           chapterNumber,
+          reviseRound: auditRepairRound,
+          maxReviseRounds: TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS,
           score: reviseScore,
           threshold: MIN_AUDIT_PASS_SCORE,
           summary: result.summary ?? null,

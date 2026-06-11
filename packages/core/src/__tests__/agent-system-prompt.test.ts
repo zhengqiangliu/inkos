@@ -40,6 +40,8 @@ describe("buildAgentSystemPrompt", () => {
       const prompt = buildAgentSystemPrompt(null, "zh");
       expect(prompt).not.toMatch(/\bread\b.*读取/);
       expect(prompt).not.toContain("edit");
+      expect(prompt).toContain("禁止读取、引用或对比任何已有书籍内容");
+      expect(prompt).toContain("不要主动去项目里找其他书的 story_bible");
     });
   });
 

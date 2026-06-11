@@ -1,24 +1,9 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../hooks/use-api";
 import type { SSEMessage } from "../hooks/use-sse";
 import { shouldRefetchBookCollections, shouldRefetchDaemonStatus } from "../hooks/use-book-activity";
 import type { TFunction } from "../hooks/use-i18n";
 import { useChatStore } from "../store/chat";
-import { ConfirmDialog } from "./ConfirmDialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "./ui/dropdown-menu";
 import {
   Tooltip,
   TooltipContent,
@@ -37,26 +22,30 @@ import {
   Stethoscope,
   ListTodo,
   ChevronRight,
-  Loader2,
-  MoreHorizontal,
-  Pencil,
-  Trash2,
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
+import { isWizardIncompleteBook, resolveBookPrimaryNavigation, resolveWizardProgressLabel } from "../utils/book-creation-routing";
 
 interface BookSummary {
   readonly id: string;
   readonly title: string;
   readonly genre: string;
   readonly status: string;
+  readonly creationState?: "wizard" | "ready";
   readonly chaptersWritten: number;
+  readonly creation?: {
+    readonly wizardCompleted: boolean;
+    readonly resumeStep: string;
+    readonly completedCount: number;
+    readonly totalSteps: number;
+  };
 }
 
 interface Nav {
   toDashboard: () => void;
   toBook: (id: string) => void;
-  toBookCreate: () => void;
+  toBookCreate: (bookId?: string) => void;
   toBookDraft?: (draftSessionId: string) => void;
   toServices: () => void;
   toDaemon: () => void;
@@ -92,42 +81,11 @@ export function getBookBadgeInitial(title: string): string {
   return /[a-z]/i.test(fallback) ? fallback.toUpperCase() : fallback;
 }
 
-export function selectSidebarDraftSessions<T extends { readonly sessionId: string }>(
-  sessionIdsByBook: Record<string, ReadonlyArray<string> | undefined>,
-  sessions: Record<string, (T & { readonly title?: string | null; readonly messages?: ReadonlyArray<unknown> }) | undefined>,
-): ReadonlyArray<T> {
-  const seen = new Set<string>();
-  return (sessionIdsByBook.__null__ ?? [])
-    .filter((sessionId) => {
-      if (seen.has(sessionId)) return false;
-      seen.add(sessionId);
-      return true;
-    })
-    .map((sessionId) => sessions[sessionId])
-    .filter((session): session is T & { readonly title?: string | null; readonly messages?: ReadonlyArray<unknown> } => Boolean(session))
-    .filter((session) => Boolean(
-      (session as { readonly hasWizardStepMessage?: boolean }).hasWizardStepMessage
-      || session.messages?.some((message) => Boolean(message && typeof message === "object" && typeof (message as { wizardStep?: unknown }).wizardStep === "string")),
-    ));
-}
-
 export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCollapsed }: SidebarProps) {
   const { data, refetch: refetchBooks } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { data: daemon, refetch: refetchDaemon } = useApi<{ running: boolean }>("/daemon");
-  const sessions = useChatStore((s) => s.sessions);
-  const sessionIdsByBook = useChatStore((s) => s.sessionIdsByBook);
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
   const bookDataVersion = useChatStore((s) => s.bookDataVersion);
   const loadSessionList = useChatStore((s) => s.loadSessionList);
-  const loadSessionDetail = useChatStore((s) => s.loadSessionDetail);
-  const activateSession = useChatStore((s) => s.activateSession);
-  const renameSession = useChatStore((s) => s.renameSession);
-  const deleteSession = useChatStore((s) => s.deleteSession);
-  const [renameTarget, setRenameTarget] = useState<{ sessionId: string; currentTitle: string } | null>(null);
-  const [renameValue, setRenameValue] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<{ sessionId: string; title: string } | null>(null);
-  const [clearDraftsConfirmOpen, setClearDraftsConfirmOpen] = useState(false);
-  const [expandedBooks, setExpandedBooks] = useState<Set<string>>(new Set());
 
   const books = data?.books ?? [];
 
@@ -139,85 +97,16 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
   }, [refetchBooks, refetchDaemon, sse.messages]);
 
   useEffect(() => {
-    for (const bookId of expandedBooks) void loadSessionList(bookId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookDataVersion, loadSessionList]);
-
-  useEffect(() => {
     void loadSessionList(null);
   }, [bookDataVersion, loadSessionList]);
 
-  const toggleBook = (bookId: string) => {
-    setExpandedBooks((prev) => {
-      const next = new Set(prev);
-      if (next.has(bookId)) {
-        next.delete(bookId);
-      } else {
-        next.add(bookId);
-        if (sessionIdsByBook[bookId] === undefined) {
-          void loadSessionList(bookId);
-        }
-      }
-      return next;
-    });
-  };
-
-  const sessionsByBook = useMemo(
-    () =>
-      Object.fromEntries(
-        books.map((book) => [
-          book.id,
-          (sessionIdsByBook[book.id] ?? [])
-            .map((sessionId) => sessions[sessionId])
-            .filter(Boolean),
-        ]),
-      ) as Record<string, Array<(typeof sessions)[string]>>,
-    [books, sessionIdsByBook, sessions],
-  );
-
-  const draftSessions = useMemo(
-    () => selectSidebarDraftSessions(sessionIdsByBook, sessions),
-    [sessionIdsByBook, sessions],
-  );
-
-  const openSession = (bookId: string, sessionId: string) => {
-    activateSession(sessionId);
-    nav.toBook(bookId);
-    void loadSessionDetail(sessionId);
-  };
-
-  const handleCreateSession = (bookId: string) => {
-    setExpandedBooks((prev) => new Set(prev).add(bookId));
-    nav.toBookCreate();
-  };
-
-  const openDraftSession = (sessionId: string) => {
-    activateSession(sessionId);
-    nav.toBookDraft?.(sessionId);
-    void loadSessionDetail(sessionId);
-  };
-
-  const handleRenameConfirm = async () => {
-    if (!renameTarget) return;
-    const nextTitle = renameValue.trim();
-    if (!nextTitle) return;
-    await renameSession(renameTarget.sessionId, nextTitle);
-    setRenameTarget(null);
-    setRenameValue("");
-  };
-
-  const handleDeleteConfirm = async () => {
-    if (!deleteTarget) return;
-    await deleteSession(deleteTarget.sessionId);
-    setDeleteTarget(null);
-  };
-
-  const handleClearDraftsConfirm = async () => {
-    const draftIds = [...new Set(sessionIdsByBook.__null__ ?? [])];
-    setClearDraftsConfirmOpen(false);
-    for (const sessionId of draftIds) {
-      await deleteSession(sessionId);
+  const openBook = (book: BookSummary) => {
+    if (resolveBookPrimaryNavigation(book) === "book-create") {
+      nav.toBookCreate(book.id);
+      return;
     }
+    void loadSessionList(book.id);
+    nav.toBook(book.id);
   };
 
   return (
@@ -267,79 +156,10 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
         <div className={`flex-1 overflow-y-auto ${collapsed ? "px-2 py-2" : "px-4 py-2"} space-y-6`}>
           <div>
             {!collapsed && (
-              <div className="px-3 mb-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] uppercase tracking-widest text-muted-foreground font-bold">草稿文件夹</span>
-                  <button
-                    type="button"
-                    onClick={() => setClearDraftsConfirmOpen(true)}
-                    disabled={draftSessions.length === 0}
-                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[10px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 disabled:opacity-30 disabled:hover:bg-transparent"
-                    title="清空所有草稿"
-                    aria-label="清空所有草稿"
-                  >
-                    <Trash2 size={11} />
-                    <span>{draftSessions.length}</span>
-                  </button>
-                </div>
-              </div>
-            )}
-            {!collapsed && (
-              <div className="mb-4 space-y-0.5">
-                {draftSessions.map((session) => {
-                  const isActiveDraft = activeSessionId === session.sessionId;
-                  const label = getSessionLabel(session);
-                  return (
-                    <div
-                      key={session.sessionId}
-                      className={`group/session flex items-center rounded-md ${isActiveDraft ? "bg-secondary/50" : "hover:bg-secondary/30"}`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => openDraftSession(session.sessionId)}
-                        className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left text-[13px] transition-colors"
-                      >
-                        <span
-                          className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px] font-semibold leading-none ${
-                            isActiveDraft
-                              ? "border-primary/30 bg-primary/10 text-primary"
-                              : "border-border/60 bg-secondary/40 text-muted-foreground"
-                          }`}
-                        >
-                          D
-                        </span>
-                        <span className={`truncate flex-1 ${isActiveDraft ? "text-foreground" : "text-muted-foreground group-hover/session:text-foreground"}`}>
-                          {label}
-                        </span>
-                        {session.isStreaming ? (
-                          <Loader2 size={12} className="shrink-0 animate-spin text-primary" />
-                        ) : (
-                          <span className="shrink-0 text-[11px] text-muted-foreground/40">{formatRelativeTime(session.sessionId)}</span>
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => openDraftSession(session.sessionId)}
-                        className="mr-2 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
-                      >
-                        继续创建
-                      </button>
-                    </div>
-                  );
-                })}
-                {draftSessions.length === 0 && (
-                  <div className="px-3 py-2 text-xs text-muted-foreground/50">
-                    暂无草稿
-                  </div>
-                )}
-              </div>
-            )}
-
-            {!collapsed && (
               <div className="px-3 mb-3 flex items-center justify-between">
                 <span className="text-[11px] uppercase tracking-widest text-muted-foreground font-bold">{t("nav.books")}</span>
                 <button
-                  onClick={nav.toBookCreate}
+                  onClick={() => nav.toBookCreate()}
                   className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
                 >
                   <Plus size={12} />
@@ -355,7 +175,7 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                     render={(
                       <button
                         type="button"
-                        onClick={nav.toBookCreate}
+                        onClick={() => nav.toBookCreate()}
                         className="grid h-10 w-10 place-items-center rounded-lg border border-transparent text-muted-foreground transition-colors hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
                         aria-label="新建书籍"
                       >
@@ -370,10 +190,15 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
 
             <div className="space-y-0.5">
               {books.map((book) => {
-                const bookSessions = sessionsByBook[book.id] ?? [];
                 const isActiveBook = activePage === `book:${book.id}`;
-                const isExpanded = expandedBooks.has(book.id);
                 const initial = getBookBadgeInitial(book.title);
+                const isDrafting = isWizardIncompleteBook(book);
+                const progressLabel = resolveWizardProgressLabel(book);
+                const badgeClass = isDrafting
+                  ? "border-amber-400/50 bg-amber-500/10 text-amber-700"
+                  : isActiveBook
+                    ? "border-primary/30 bg-primary/10 text-primary"
+                    : "border-border/60 bg-secondary/40 text-muted-foreground";
 
                 return (
                   <div key={book.id}>
@@ -383,17 +208,19 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                           render={(
                             <button
                               type="button"
-                              onClick={() => nav.toBook(book.id)}
+                              onClick={() => openBook(book)}
                               className={`grid h-10 w-10 place-items-center rounded-full border transition-colors ${
-                                isActiveBook ? "border-primary bg-primary/10 text-primary" : "border-transparent text-muted-foreground hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
+                                isDrafting ? "border-amber-400/30 bg-amber-500/10 text-amber-700" : isActiveBook ? "border-primary bg-primary/10 text-primary" : "border-transparent text-muted-foreground hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
                               }`}
                               aria-label={book.title}
                             >
                               <span
                                 className={`grid h-7 w-7 place-items-center rounded-full text-[11px] font-semibold leading-none ${
-                                  isActiveBook
-                                    ? "bg-primary/10 text-primary"
-                                    : "bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60 group-hover:text-foreground"
+                                  isDrafting
+                                    ? "bg-amber-50 text-amber-700 ring-1 ring-amber-400/40"
+                                    : isActiveBook
+                                      ? "bg-primary/10 text-primary"
+                                      : "bg-background/80 text-muted-foreground shadow-sm ring-1 ring-border/60 group-hover:text-foreground"
                                 }`}
                               >
                                 {initial}
@@ -404,93 +231,29 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                         <TooltipContent side="right">{book.title}</TooltipContent>
                       </Tooltip>
                     ) : (
-                      <>
-                        <div className="group/book flex items-center">
-                          <button
-                            type="button"
-                            onClick={() => toggleBook(book.id)}
-                            className={`flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 rounded-md text-sm transition-colors ${
-                              isActiveBook ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/30"
-                            }`}
-                          >
-                            <ChevronRight
-                              size={12}
-                              className={`shrink-0 text-muted-foreground/60 transition-transform ${isExpanded ? "rotate-90" : ""}`}
-                            />
-                            <span
-                              className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px] font-semibold leading-none ${
-                                isActiveBook
-                                  ? "border-primary/30 bg-primary/10 text-primary"
-                                  : "border-border/60 bg-secondary/40 text-muted-foreground"
-                              }`}
-                            >
-                              {initial}
+                      <div className="group/book flex items-center">
+                        <button
+                          type="button"
+                          onClick={() => openBook(book)}
+                          className={`flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 rounded-md text-sm transition-colors ${
+                            isActiveBook ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/30"
+                          }`}
+                        >
+                          <ChevronRight
+                            size={12}
+                            className="shrink-0 text-muted-foreground/60"
+                          />
+                          <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px] font-semibold leading-none ${badgeClass}`}>
+                            {initial}
+                          </span>
+                          <span className="truncate flex-1 text-left">{book.title}</span>
+                          {progressLabel ? (
+                            <span className="shrink-0 text-[10px] font-medium text-amber-700">
+                              {progressLabel}
                             </span>
-                            <span className="truncate flex-1 text-left">{book.title}</span>
-                          </button>
-                        </div>
-
-                        {isExpanded && (
-                          <div className="mt-0.5">
-                            {bookSessions.map((session) => {
-                              const isActiveSession = isActiveBook && activeSessionId === session.sessionId;
-                              const label = getSessionLabel(session);
-
-                              return (
-                                <div
-                                  key={session.sessionId}
-                                  className={`group/session flex items-center rounded-md ${isActiveSession ? "bg-secondary/50" : "hover:bg-secondary/30"}`}
-                                >
-                                  <button
-                                    type="button"
-                                    onClick={() => openSession(book.id, session.sessionId)}
-                                    className="flex min-w-0 flex-1 items-center gap-2 pl-9 pr-2 py-1 text-left text-[13px] transition-colors"
-                                  >
-                                    <span className={`truncate flex-1 ${isActiveSession ? "text-foreground" : "text-muted-foreground group-hover/session:text-foreground"}`}>
-                                      {label}
-                                    </span>
-                                    {session.isStreaming ? (
-                                      <Loader2 size={12} className="shrink-0 animate-spin text-primary" />
-                                    ) : (
-                                      <span className="shrink-0 text-[11px] text-muted-foreground/40">{formatRelativeTime(session.sessionId)}</span>
-                                    )}
-                                  </button>
-
-                                  <DropdownMenu>
-                                    <DropdownMenuTrigger className="flex h-6 w-6 shrink-0 items-center justify-center rounded opacity-0 group-hover/session:opacity-100 text-muted-foreground hover:text-foreground transition-opacity">
-                                      <MoreHorizontal size={14} />
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent side="right" align="start" className="w-36">
-                                      <DropdownMenuItem
-                                        onClick={() => {
-                                          setRenameTarget({ sessionId: session.sessionId, currentTitle: label });
-                                          setRenameValue(session.title ?? "");
-                                        }}
-                                      >
-                                        <Pencil size={14} />
-                                        <span>改名</span>
-                                      </DropdownMenuItem>
-                                      <DropdownMenuSeparator />
-                                      <DropdownMenuItem variant="destructive" onClick={() => setDeleteTarget({ sessionId: session.sessionId, title: label })}>
-                                        <Trash2 size={14} />
-                                        <span>删除</span>
-                                      </DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                  </DropdownMenu>
-                                </div>
-                              );
-                            })}
-                            <button
-                              type="button"
-                              onClick={() => void handleCreateSession(book.id)}
-                              className="w-full flex items-center gap-2 pl-9 pr-2 py-1 text-xs text-muted-foreground/50 hover:text-foreground transition-colors"
-                            >
-                              <Plus size={12} />
-                              <span>新建会话</span>
-                            </button>
-                          </div>
-                        )}
-                      </>
+                          ) : null}
+                        </button>
+                      </div>
                     )}
                   </div>
                 );
@@ -539,101 +302,9 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
             </div>
           </div>
         )}
-
-        <Dialog
-          open={renameTarget !== null}
-          onOpenChange={(open) => {
-            if (!open) {
-              setRenameTarget(null);
-              setRenameValue("");
-            }
-          }}
-        >
-          <DialogContent showCloseButton={false} className="sm:max-w-[360px] p-4 gap-3">
-            <DialogHeader className="space-y-0 gap-0">
-              <DialogTitle className="font-sans text-sm font-medium">重命名会话</DialogTitle>
-            </DialogHeader>
-            <input
-              id="session-rename-input"
-              autoFocus
-              value={renameValue}
-              onChange={(event) => setRenameValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void handleRenameConfirm();
-                }
-              }}
-              placeholder="输入新标题"
-              className="w-full rounded-md border border-border/60 bg-background px-3 py-1.5 text-sm outline-none focus:border-border"
-            />
-            <DialogFooter className="gap-1 sm:gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setRenameTarget(null);
-                  setRenameValue("");
-                }}
-                className="px-3 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleRenameConfirm()}
-                disabled={!renameValue.trim()}
-                className="px-3 py-1 text-xs font-medium rounded-md bg-foreground text-background hover:opacity-90 transition-opacity disabled:opacity-30"
-              >
-                保存
-              </button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-
-        <ConfirmDialog
-          open={deleteTarget !== null}
-          title="删除会话"
-          message={`确认删除“${deleteTarget?.title ?? ""}”吗？该操作只删除这条会话，不影响书籍内容。`}
-          confirmLabel="删除"
-          cancelLabel="取消"
-          variant="danger"
-          onConfirm={() => void handleDeleteConfirm()}
-          onCancel={() => setDeleteTarget(null)}
-        />
-
-        <ConfirmDialog
-          open={clearDraftsConfirmOpen}
-          title="清空草稿"
-          message="确认清空全部草稿吗？该操作会删除草稿文件夹中的所有会话，无法撤销。"
-          confirmLabel="清空"
-          cancelLabel="取消"
-          variant="danger"
-          onConfirm={() => void handleClearDraftsConfirm()}
-          onCancel={() => setClearDraftsConfirmOpen(false)}
-        />
       </aside>
     </TooltipProvider>
   );
-}
-
-function getSessionLabel(session: { sessionId: string; title: string | null; messages: ReadonlyArray<{ role: string; content: string }> }): string {
-  if (session.title) return session.title;
-  return "未命名草稿";
-}
-
-function formatRelativeTime(sessionId: string): string {
-  const rawTs = Number(sessionId.split("-")[0]);
-  if (!Number.isFinite(rawTs)) return "";
-  const diff = Date.now() - rawTs;
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} 天`;
-  const months = Math.floor(days / 30);
-  return `${months} 个月`;
 }
 
 function SidebarItem({
@@ -676,20 +347,11 @@ function SidebarItem({
   );
 
   const control = href ? (
-    <a
-      href={href}
-      className={commonClassName}
-      aria-label={label}
-    >
+    <a href={href} className={commonClassName} aria-label={label}>
       {content}
     </a>
   ) : (
-    <button
-      type="button"
-      onClick={onClick}
-      className={commonClassName}
-      aria-label={label}
-    >
+    <button type="button" onClick={onClick} className={commonClassName} aria-label={label}>
       {content}
     </button>
   );
@@ -702,3 +364,4 @@ function SidebarItem({
     </Tooltip>
   );
 }
+

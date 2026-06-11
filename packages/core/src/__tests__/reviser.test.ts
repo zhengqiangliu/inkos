@@ -53,6 +53,16 @@ describe("ReviserAgent", () => {
       "# Foundation Brief\n\nThe mentor debt and harbor ledger drive the story.\n",
       "utf-8",
     );
+    await writeFile(
+      join(bookDir, "story", "character_arc.md"),
+      "# Character Arc\n\n- Mara must shift from passive pursuit to active counterplay.\n",
+      "utf-8",
+    );
+    await writeFile(
+      join(bookDir, "story", "relationship_map.md"),
+      "# Relationship Map\n\n- Mara and the guildmaster remain tactical rivals beneath formal civility.\n",
+      "utf-8",
+    );
 
     const agent = new ReviserAgent({
       client: {
@@ -100,6 +110,10 @@ describe("ReviserAgent", () => {
       expect(systemPrompt).toContain("written entirely in English");
       expect(userPrompt).toContain("Foundation Brief");
       expect(userPrompt).toContain("mentor debt and harbor ledger");
+      expect(userPrompt).toContain("Character Arc");
+      expect(userPrompt).toContain("passive pursuit to active counterplay");
+      expect(userPrompt).toContain("Relationship Map");
+      expect(userPrompt).toContain("tactical rivals");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

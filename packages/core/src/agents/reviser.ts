@@ -8,6 +8,7 @@ import { isStructuralAuditIssue } from "../utils/audit-issue-classification.js";
 import { extractChapterTail } from "../utils/chapter-tail.js";
 import { readGenreProfile, readBookLanguage, readBookRules } from "./rules-reader.js";
 import { readBrief } from "./planner-context.js";
+import { readStoryFrame, readVolumeMap } from "../utils/outline-paths.js";
 import { countChapterLength } from "../utils/length-metrics.js";
 import { buildGovernedMemoryEvidenceBlocks } from "../utils/governed-context.js";
 import { filterSummaries } from "../utils/context-filter.js";
@@ -23,6 +24,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parsePendingHooksMarkdown } from "../utils/story-markdown.js";
 import { buildHookDebtHardConstraintBlock } from "../utils/hook-agenda.js";
+import { readCharacterArc, readRelationshipMap } from "../utils/outline-paths.js";
 
 export type ReviseMode = "polish" | "rewrite" | "rework" | "anti-detect" | "spot-fix";
 
@@ -153,17 +155,19 @@ export class ReviserAgent extends BaseAgent {
       chapterPlan?: ChapterPlan;
     },
   ): Promise<ReviseOutput> {
-    const [currentState, ledger, hooks, styleGuideRaw, volumeOutline, storyBible, characterMatrix, chapterSummaries, parentCanon, fanficCanon] = await Promise.all([
+    const [currentState, ledger, hooks, styleGuideRaw, volumeOutline, storyBible, characterMatrix, chapterSummaries, parentCanon, fanficCanon, characterArc, relationshipMap] = await Promise.all([
       this.readFileSafe(join(bookDir, "story/current_state.md")),
       this.readFileSafe(join(bookDir, "story/particle_ledger.md")),
       this.readFileSafe(join(bookDir, "story/pending_hooks.md")),
       this.readFileSafe(join(bookDir, "story/style_guide.md")),
-      this.readFileSafe(join(bookDir, "story/volume_outline.md")),
-      this.readFileSafe(join(bookDir, "story/story_bible.md")),
+      readVolumeMap(bookDir, ""),
+      readStoryFrame(bookDir, ""),
       this.readFileSafe(join(bookDir, "story/character_matrix.md")),
       this.readFileSafe(join(bookDir, "story/chapter_summaries.md")),
       this.readFileSafe(join(bookDir, "story/parent_canon.md")),
       this.readFileSafe(join(bookDir, "story/fanfic_canon.md")),
+      readCharacterArc(bookDir, ""),
+      readRelationshipMap(bookDir, ""),
     ]);
     const foundationBrief = await readBrief(join(bookDir, "story"));
 
@@ -304,9 +308,11 @@ export class ReviserAgent extends BaseAgent {
       : "";
     const minFixPathBlock = failureGate === "score" && typeof scoreShortfall === "number" && scoreShortfall > 0
       ? (() => {
-          const warningsNeeded = Math.ceil(scoreShortfall / 12);
-          const currentWarnings = issues.filter((i) => i.severity === "warning").length;
-          return `\n- 最小修复路径：需消除至少 ${warningsNeeded} 个 warning（当前共 ${currentWarnings} 个 warning，每个扣12分）。优先修复影响最大的 warning，不要平均用力。`;
+          const structuralWarnings = issues.filter((i) => i.severity === "warning" && isStructuralAuditIssue(i));
+          const textualWarnings = issues.filter((i) => i.severity === "warning" && !isStructuralAuditIssue(i));
+          const deductionPerStructural = 12;
+          const deductionPerTextual = 6;
+          return `\n- 最小修复路径：当前得分距通过阈值还差 ${scoreShortfall} 分（结构性warning共 ${structuralWarnings.length} 个各扣${deductionPerStructural}分，文本性warning共 ${textualWarnings.length} 个各扣${deductionPerTextual}分）。优先消除结构性warning，再处理文本性warning。`;
         })()
       : "";
     const auditGateBlock = failureGate || Number.isFinite(Number(reviseContext?.score)) || Number.isFinite(Number(reviseContext?.passScoreThreshold)) || mustFixFirstBlock.length > 0 || revisionStagnationBlock.length > 0
@@ -417,6 +423,16 @@ ${outputFormat}${structuralIssueRequiredBlock ? `\n=== STRUCTURAL_TRUTH_ACTIONS 
     const matrixBlock = characterMatrixWorkingSet !== "(文件不存在)"
       ? `\n## 角色交互矩阵\n${characterMatrixWorkingSet}\n`
       : "";
+    const characterArcBlock = characterArc !== "(文件不存在)" && characterArc.trim()
+      ? (isEnglish
+        ? `\n## Character Arc\n${characterArc}\n`
+        : `\n## 人物弧光\n${characterArc}\n`)
+      : "";
+    const relationshipMapBlock = relationshipMap !== "(文件不存在)" && relationshipMap.trim()
+      ? (isEnglish
+        ? `\n## Relationship Map\n${relationshipMap}\n`
+        : `\n## 人物关系\n${relationshipMap}\n`)
+      : "";
     const foundationBriefBlock = foundationBrief.trim()
       ? isEnglish
         ? `\n## Foundation Brief\n${foundationBrief}\n`
@@ -502,7 +518,7 @@ ${userBriefBlock}
 ## 当前状态卡
 ${foundationBriefBlock}${currentState}
 ${ledgerBlock}
-${hookDebtBlock}${hookDebtHardConstraintBlock}${hooksBlock}${volumeSummariesBlock}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}
+${hookDebtBlock}${hookDebtHardConstraintBlock}${hooksBlock}${volumeSummariesBlock}${reducedControlBlock || outlineBlock}${bibleBlock}${matrixBlock}${characterArcBlock}${relationshipMapBlock}${summariesBlock}${canonBlock}${fanficCanonBlock}${styleGuideBlock}${lengthGuidanceBlock}
 ${auditGateBlock}${failedDimensionsBlock}
 ${previousChapterTailBlock}
 

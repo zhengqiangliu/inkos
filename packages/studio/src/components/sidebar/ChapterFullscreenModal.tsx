@@ -796,7 +796,7 @@ export function ChapterFullscreenModal({
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto rounded-3xl border border-border/30 bg-card/90 px-8 py-8 shadow-[0_20px_60px_rgba(0,0,0,0.12)]">
                 <div className="mx-auto w-full max-w-[780px]" style={contentTypographyStyle}>
-                  <Streamdown plugins={streamdownPlugins} mode="static">
+                  <Streamdown className="w-full min-w-0 max-w-none break-words [&_*]:min-w-0" plugins={streamdownPlugins} mode="static">
                     {fallbackContent}
                   </Streamdown>
                 </div>
@@ -852,7 +852,7 @@ export function ChapterFullscreenModal({
                                 style={contentTypographyStyle}
                               >
                                 {page ? (
-                                  <Streamdown plugins={streamdownPlugins} mode="static">
+                                  <Streamdown className="w-full min-w-0 max-w-none break-words [&_*]:min-w-0" plugins={streamdownPlugins} mode="static">
                                     {page}
                                   </Streamdown>
                                 ) : (
@@ -895,7 +895,7 @@ export function ChapterFullscreenModal({
                     className="overflow-visible text-foreground"
                     style={contentTypographyStyle}
                   >
-                    <Streamdown plugins={streamdownPlugins} mode="static">
+                    <Streamdown className="w-full min-w-0 max-w-none break-words [&_*]:min-w-0" plugins={streamdownPlugins} mode="static">
                       {probeSample.markdown}
                     </Streamdown>
                   </div>

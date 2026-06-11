@@ -21,6 +21,11 @@ type PanelColors = {
   readonly btnPrimary: string;
 };
 
+type GenreBindingInfo = {
+  readonly label: string;
+  readonly source?: string;
+};
+
 function BookCreateModelPicker(props: {
   readonly selectedModel: string | null;
   readonly selectedService: string | null;
@@ -92,16 +97,19 @@ function IntroSectionShell(props: {
 
 function IntroBasicsSection(props: {
   readonly c: PanelColors;
-  readonly genres: ReadonlyArray<{ id: string; name: string }>;
+  readonly genres: ReadonlyArray<{ id: string; name: string; language?: string; source?: string }>;
   readonly selectedGenreId: string;
   readonly selectedGenreLabel: string;
+  readonly genreBindingLabel: string;
   readonly bookTitle: string;
   readonly bookLanguage: "zh" | "en";
   readonly bookPlatform: string;
   readonly bookTargetChapters: string;
   readonly bookChapterWords: string;
+  readonly titleReady: boolean;
   readonly setSelectedGenreId: (value: string) => void;
   readonly setBookTitle: (value: string) => void;
+  readonly commitBookTitle?: (value: string) => void | Promise<void>;
   readonly setBookLanguage: (value: "zh" | "en") => void;
   readonly setBookPlatform: (value: string) => void;
   readonly setBookTargetChapters: (value: string) => void;
@@ -112,13 +120,16 @@ function IntroBasicsSection(props: {
     genres,
     selectedGenreId,
     selectedGenreLabel,
+    genreBindingLabel,
     bookTitle,
     bookLanguage,
     bookPlatform,
     bookTargetChapters,
     bookChapterWords,
+    titleReady,
     setSelectedGenreId,
     setBookTitle,
+    commitBookTitle,
     setBookLanguage,
     setBookPlatform,
     setBookTargetChapters,
@@ -129,8 +140,8 @@ function IntroBasicsSection(props: {
   return (
     <IntroSectionShell
       title="题材 / 基本参数"
-      description="这一页只处理题材、书名、平台、字数和简介候选。"
-      rightHint={selectedGenreLabel || "未选择"}
+      description="题材列表直接关联基础题材数据，选择结果会同步回草稿。"
+      rightHint={genreBindingLabel || selectedGenreLabel || "未选择"}
     >
       <div className="space-y-4">
         <div className="space-y-2">
@@ -153,14 +164,32 @@ function IntroBasicsSection(props: {
               );
             })}
           </div>
-          {genres.length > visibleGenres.length ? (
-            <div className="text-[10px] text-muted-foreground">还有 {genres.length - visibleGenres.length} 个题材未显示。</div>
-          ) : null}
+          {genres.length > visibleGenres.length ? <div className="text-[10px] text-muted-foreground">还有 {genres.length - visibleGenres.length} 个题材未显示。</div> : null}
+        </div>
+        <div className="rounded-xl border border-border/50 bg-muted/20 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+          当前绑定：<span className="text-foreground">{genreBindingLabel || "未选择"}</span>
+          {selectedGenreLabel ? <span className="ml-2">基础数据：{selectedGenreLabel}</span> : null}
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5 sm:col-span-2">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">书名</div>
-            <input value={bookTitle} onChange={(e) => setBookTitle(e.target.value)} className={`w-full rounded-xl ${c.input} px-3 py-2 text-sm outline-none`} placeholder="输入书名" />
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">书名</div>
+              <div className={`text-[10px] ${titleReady ? "text-emerald-600" : "text-amber-700"}`}>
+                {titleReady ? "已生成，可手工修改" : "未生成，需先补齐"}
+              </div>
+            </div>
+            <input
+              value={bookTitle}
+              onChange={(e) => setBookTitle(e.target.value)}
+              onBlur={() => { void commitBookTitle?.(bookTitle); }}
+              className={`w-full rounded-xl ${c.input} px-3 py-2 text-sm outline-none`}
+              placeholder="等待系统生成，或手工输入书名"
+            />
+            {!titleReady ? (
+              <div className="text-[11px] leading-5 text-amber-700">
+                当前不能进入下一步。请先生成书名，或在此手工录入后失焦保存。
+              </div>
+            ) : null}
           </div>
           <div className="space-y-1.5">
             <div className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">语言</div>
@@ -233,7 +262,7 @@ function IntroSeedSection(props: {
   return (
     <IntroSectionShell
       title="简介 / 故事背景"
-      description="只在当前页处理简介候选，不展示世界观与后续页内容。"
+      description="手工模式直接根据输入生成正文，自动模式先生成候选池。"
       rightHint={loadingDraft ? "读取中..." : undefined}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -243,7 +272,8 @@ function IntroSeedSection(props: {
       </div>
       {introMode === "manual" ? (
         <div className="rounded-2xl border border-border/40 bg-background/40 p-4 space-y-3">
-          <textarea value={introSeedText} onChange={(e) => setIntroSeedText(e.target.value)} rows={5} className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 outline-none`} placeholder="简介/卖点：..." />
+          <textarea value={introSeedText} onChange={(e) => setIntroSeedText(e.target.value)} rows={5} className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 outline-none`} placeholder="输入主题、卖点或故事背景，支持多行..." />
+          <div className="text-xs leading-6 text-muted-foreground">推荐写法：直接写主题或一句话卖点，再补故事背景。点击后会直接生成正文并回填当前页，不会在工作台里追问确认。</div>
           <div className="flex flex-wrap gap-2">
             <button onClick={() => void handleGenerateIntroBody()} disabled={loading || creating || !introSeedText.trim()} className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}>生成正文</button>
           </div>
@@ -252,7 +282,7 @@ function IntroSeedSection(props: {
         <div className="rounded-2xl border border-border/40 bg-background/40 p-4 space-y-3">
           <textarea value={introTheme} onChange={(e) => setIntroTheme(e.target.value)} rows={2} className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 outline-none`} placeholder="输入主题，生成候选池" />
           <div className="grid gap-3 md:grid-cols-[1fr_160px]">
-            <div className="rounded-xl border border-border/50 bg-background/70 p-3 text-xs leading-6 text-muted-foreground">先生成候选池，再选中候选并切到正文页确认。这里不会直接进入右侧确认流程。</div>
+            <div className="rounded-xl border border-border/50 bg-background/70 p-3 text-xs leading-6 text-muted-foreground">先生成候选池，再点候选卡片上的「生成正文」直接产出正文并回填当前页，无需在右侧工作台再次确认。</div>
             <input value={introCandidateCount} onChange={(e) => setIntroCandidateCount(e.target.value)} className={`w-full rounded-xl ${c.input} px-4 py-3 text-sm outline-none`} placeholder="3" inputMode="numeric" />
           </div>
           <div className="flex flex-wrap gap-2">
@@ -270,8 +300,9 @@ function IntroCandidatePoolSection(props: {
   readonly selectedIntroCandidate: IntroCandidateLike | null;
   readonly introMode: "manual" | "auto";
   readonly handleSelectCandidate: (candidate: IntroCandidateLike, index: number) => void;
+  readonly handleGenerateCandidateBody: (candidate: IntroCandidateLike, index: number) => void;
 }) {
-  const { introCandidates, selectedIntroCandidateIndex, selectedIntroCandidate, introMode, handleSelectCandidate } = props;
+  const { introCandidates, selectedIntroCandidateIndex, selectedIntroCandidate, introMode, handleSelectCandidate, handleGenerateCandidateBody } = props;
   if (introCandidates.length === 0) return null;
 
   return (
@@ -304,6 +335,19 @@ function IntroCandidatePoolSection(props: {
                 <div><span className="font-medium text-foreground">卖点：</span>{candidate.blurb}</div>
                 <div><span className="font-medium text-foreground">背景：</span>{candidate.storyBackground}</div>
               </div>
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <span className="rounded-full border border-border/60 px-2 py-1 text-[10px] text-muted-foreground">点击卡片选中</span>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleGenerateCandidateBody(candidate, index);
+                  }}
+                  className="rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-[10px] text-primary hover:bg-primary/10"
+                >
+                  生成正文
+                </button>
+              </div>
             </button>
           );
         })}
@@ -311,7 +355,7 @@ function IntroCandidatePoolSection(props: {
       {selectedIntroCandidate ? (
         <div className="rounded-xl border border-primary/20 bg-primary/5 p-3 text-sm">
           <div className="font-medium">当前选中：{selectedIntroCandidate.title}</div>
-          <div className="mt-1 text-xs text-muted-foreground">当前状态：{introMode === "manual" ? "手工模式，已回填可继续编辑" : "自动模式，继续生成候选"}</div>
+          <div className="mt-1 text-xs text-muted-foreground">当前状态：{introMode === "manual" ? "手工模式，已回填正文，可继续编辑" : "自动模式，继续生成候选"}</div>
         </div>
       ) : null}
     </div>
@@ -338,9 +382,10 @@ export function IntroPanel(props: {
   c: PanelColors;
   introBodySpec: StepMarkdownSpec;
   introPanelTab: "generate" | "body";
-  genres: ReadonlyArray<{ id: string; name: string }>;
+  genres: ReadonlyArray<{ id: string; name: string; language?: string; source?: string }>;
   selectedGenreId: string;
   selectedGenreLabel: string;
+  genreBindingLabel: string;
   introMode: "manual" | "auto";
   introSeedText: string;
   introBodyDraft: string;
@@ -355,11 +400,13 @@ export function IntroPanel(props: {
   introCandidateLoading: boolean;
   autoGenerateAllowed: boolean;
   introBodyEditing: boolean;
+  introBodySaving?: boolean;
   bookTitle: string;
   bookLanguage: "zh" | "en";
   bookPlatform: string;
   bookTargetChapters: string;
   bookChapterWords: string;
+  titleReady: boolean;
   hardParams: ReadonlyArray<{ key: string; label: string; value: string }>;
   setSelectedGenreId: (value: string) => void;
   setIntroPanelTab: (value: "generate" | "body") => void;
@@ -370,6 +417,7 @@ export function IntroPanel(props: {
   setIntroCandidateCount: (value: string) => void;
   setIntroBodyEditing: (value: boolean) => void;
   setBookTitle: (value: string) => void;
+  commitBookTitle?: (value: string) => void | Promise<void>;
   setBookLanguage: (value: "zh" | "en") => void;
   setBookPlatform: (value: string) => void;
   setBookTargetChapters: (value: string) => void;
@@ -379,6 +427,9 @@ export function IntroPanel(props: {
   handleGenerateIntroBody: () => void;
   handleGenerateCandidates: () => void;
   handleSelectCandidate: (candidate: IntroCandidateLike, index: number) => void;
+  handleGenerateCandidateBody: (candidate: IntroCandidateLike, index: number) => void;
+  handleIntroAiModify?: (note: string, mode: "revise" | "polish") => void;
+  handleSaveIntroBody?: () => void | Promise<boolean | void>;
 }) {
   const {
     c,
@@ -387,6 +438,7 @@ export function IntroPanel(props: {
     genres,
     selectedGenreId,
     selectedGenreLabel,
+    genreBindingLabel,
     introMode,
     introSeedText,
     introBodyDraft,
@@ -401,11 +453,13 @@ export function IntroPanel(props: {
     introCandidateLoading,
     autoGenerateAllowed,
     introBodyEditing,
+    introBodySaving,
     bookTitle,
     bookLanguage,
     bookPlatform,
     bookTargetChapters,
     bookChapterWords,
+    titleReady,
     hardParams,
     setSelectedGenreId,
     setIntroPanelTab,
@@ -416,6 +470,7 @@ export function IntroPanel(props: {
     setIntroCandidateCount,
     setIntroBodyEditing,
     setBookTitle,
+    commitBookTitle,
     setBookLanguage,
     setBookPlatform,
     setBookTargetChapters,
@@ -425,6 +480,9 @@ export function IntroPanel(props: {
     handleGenerateIntroBody,
     handleGenerateCandidates,
     handleSelectCandidate,
+    handleGenerateCandidateBody,
+    handleIntroAiModify,
+    handleSaveIntroBody,
   } = props;
 
   const updateBookTargetChapters = (value: string): void => {
@@ -438,31 +496,37 @@ export function IntroPanel(props: {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="flex min-h-0 flex-1 flex-col gap-5">
       <IntroBasicsSection
         c={c}
         genres={genres}
         selectedGenreId={selectedGenreId}
         selectedGenreLabel={selectedGenreLabel}
+        genreBindingLabel={genreBindingLabel}
         bookTitle={bookTitle}
         bookLanguage={bookLanguage}
         bookPlatform={bookPlatform}
         bookTargetChapters={bookTargetChapters}
         bookChapterWords={bookChapterWords}
+        titleReady={titleReady}
         setSelectedGenreId={setSelectedGenreId}
         setBookTitle={setBookTitle}
+        commitBookTitle={commitBookTitle}
         setBookLanguage={setBookLanguage}
         setBookPlatform={setBookPlatform}
         setBookTargetChapters={updateBookTargetChapters}
         setBookChapterWords={updateBookChapterWords}
       />
-      <div className="rounded-2xl border border-border/60 bg-background/50 p-4 space-y-4">
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={() => setIntroPanelTab("generate")} className={`rounded-full border px-4 py-2 text-sm ${introPanelTab === "generate" ? "border-primary bg-primary/10 text-primary" : "border-border/50 bg-background/70 text-muted-foreground"}`}>生成</button>
-          <button type="button" onClick={() => setIntroPanelTab("body")} className={`rounded-full border px-4 py-2 text-sm ${introPanelTab === "body" ? "border-primary bg-primary/10 text-primary" : "border-border/50 bg-background/70 text-muted-foreground"}`}>正文</button>
+      <div className="flex min-h-0 flex-1 flex-col rounded-2xl border border-border/60 bg-background/50 p-4">
+        <div className="shrink-0 space-y-4">
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => setIntroPanelTab("generate")} className={`rounded-full border px-4 py-2 text-sm ${introPanelTab === "generate" ? "border-primary bg-primary/10 text-primary" : "border-border/50 bg-background/70 text-muted-foreground"}`}>生成</button>
+            <button type="button" onClick={() => setIntroPanelTab("body")} className={`rounded-full border px-4 py-2 text-sm ${introPanelTab === "body" ? "border-primary bg-primary/10 text-primary" : "border-border/50 bg-background/70 text-muted-foreground"}`}>正文</button>
+          </div>
         </div>
+        <div className="flex min-h-0 flex-1 flex-col pt-4">
         {introPanelTab === "generate" ? (
-          <div className="space-y-5">
+          <div className="flex min-h-0 flex-1 flex-col gap-5">
             <IntroSeedSection
               c={c}
               loadingDraft={loadingDraft}
@@ -489,18 +553,24 @@ export function IntroPanel(props: {
               selectedIntroCandidate={selectedIntroCandidate}
               introMode={introMode}
               handleSelectCandidate={handleSelectCandidate}
+              handleGenerateCandidateBody={handleGenerateCandidateBody}
             />
           </div>
         ) : (
-          <StepMarkdownEditor
-            spec={introBodySpec}
-            value={introBodyDraft}
-            editing={introBodyEditing}
-            onToggleEditing={() => setIntroBodyEditing(!introBodyEditing)}
-            onValueChange={setIntroBodyDraft}
-            showAiActions={false}
-          />
+          <div className="flex min-h-0 flex-1">
+            <StepMarkdownEditor
+              spec={introBodySpec}
+              value={introBodyDraft}
+              editing={introBodyEditing}
+              onToggleEditing={() => setIntroBodyEditing(!introBodyEditing)}
+              onSave={handleSaveIntroBody}
+              onValueChange={setIntroBodyDraft}
+              onAiModify={handleIntroAiModify}
+              saving={introBodySaving}
+            />
+          </div>
         )}
+        </div>
       </div>
       <IntroDraftParamsSection hardParams={hardParams} />
     </div>
@@ -674,8 +744,9 @@ export function ReviewPanel(props: {
   creationReviewChecklist: ReadonlyArray<ReviewChecklistItem>;
   canCreate: boolean;
   onJumpToStep: (step: BookCreationWizardStep) => void;
+  navigationLocked?: boolean;
 }) {
-  const { creationReviewChecklist, canCreate, onJumpToStep } = props;
+  const { creationReviewChecklist, canCreate, onJumpToStep, navigationLocked } = props;
   return (
     <div className="space-y-5">
       <div className="rounded-2xl border border-border/60 bg-background/50 p-4 space-y-3">
@@ -702,15 +773,18 @@ export function ReviewPanel(props: {
               </div>
               <div className={`mt-1 whitespace-pre-wrap ${item.done ? "text-muted-foreground" : "text-amber-700"}`}>{item.value || "待补齐"}</div>
               {!item.done ? (
-                <button
+              <button
                   type="button"
                   onClick={() => {
+                    if (navigationLocked) return;
                     if (item.target.kind === "basic") {
                       window.scrollTo({ top: 0, behavior: "smooth" });
                       return;
                     }
                     onJumpToStep(item.target.step);
                   }}
+                  disabled={navigationLocked}
+                  title={navigationLocked ? "当前页正在生成，请先完成后再切换" : undefined}
                   className="mt-2 text-[10px] font-medium uppercase tracking-[0.18em] text-amber-700/80 hover:text-amber-800"
                 >
                   {item.target.kind === "basic" ? "去补基本参数" : "去补这一页"}
@@ -780,8 +854,9 @@ export function WizardHeader(props: {
     readonly status: "current" | "done" | "todo";
   }>;
   onJumpToStep: (step: BookCreationWizardStep) => void;
+  navigationLocked?: boolean;
 }) {
-  const { wizardIndex, onJumpToStep } = props;
+  const { wizardIndex, onJumpToStep, navigationLocked } = props;
 
   return (
     <div className="rounded-2xl border border-border/60 bg-card/60 p-3">
@@ -789,14 +864,14 @@ export function WizardHeader(props: {
         {wizardIndex.map((item, index) => {
           const active = item.status === "current";
           const done = item.status === "done";
-          const canEnter = active || done;
+          const canEnter = !navigationLocked && (active || done);
           return (
             <button
               key={item.id}
               type="button"
               onClick={canEnter ? () => onJumpToStep(item.id) : undefined}
               disabled={!canEnter}
-              title={!canEnter ? "先完成前序步骤后再进入" : undefined}
+              title={!canEnter ? (navigationLocked ? "当前页正在生成，请先完成后再切换" : "先完成前序步骤后再进入") : undefined}
               className={`shrink-0 rounded-full border px-3 py-2 text-xs transition-colors ${active ? "border-primary bg-primary/10 text-primary" : done ? "border-border/60 bg-background/70 text-foreground" : "border-border/40 bg-background/50 text-muted-foreground opacity-70"} disabled:cursor-not-allowed disabled:hover:text-muted-foreground`}
             >
               {index + 1}. {item.title}
@@ -814,13 +889,14 @@ export function WizardActions(props: {
   creating: boolean;
   isAdvancing: boolean;
   isAutoCompleting: boolean;
+  isRegenerating: boolean;
   currentStep: BookCreationWizardStep;
-  isReview: boolean;
   canCreate: boolean;
   showAutoComplete: boolean;
   handleDiscard: () => void;
   handleBack: () => void;
   handleAdvance: () => void;
+  handleRegenerate: () => void;
   handleCreate: () => void;
   handleAutoComplete: () => void;
 }) {
@@ -830,13 +906,14 @@ export function WizardActions(props: {
     creating,
     isAdvancing,
     isAutoCompleting,
+    isRegenerating,
     currentStep,
-    isReview,
     canCreate,
     showAutoComplete,
     handleDiscard,
     handleBack,
     handleAdvance,
+    handleRegenerate,
     handleCreate,
     handleAutoComplete,
   } = props;
@@ -845,9 +922,10 @@ export function WizardActions(props: {
     <div className="flex flex-wrap gap-2 pt-1">
       <button onClick={handleDiscard} disabled={creating || isAdvancing || isAutoCompleting} className="rounded-md border border-border px-4 py-3 text-sm font-medium text-muted-foreground disabled:opacity-50">丢弃草案</button>
       <button onClick={handleBack} disabled={!canGoBack || creating || isAdvancing || isAutoCompleting} className="rounded-md border border-border px-4 py-3 text-sm font-medium text-muted-foreground disabled:opacity-50">上一步</button>
-      {!isReview ? <button onClick={handleAdvance} disabled={creating || isAdvancing || isAutoCompleting || !canAdvance} className="rounded-md px-4 py-3 text-sm font-medium bg-primary text-primary-foreground disabled:opacity-50">{isAdvancing ? "生成中..." : "下一步"}</button> : null}
-      {!isReview && showAutoComplete ? <button onClick={handleAutoComplete} disabled={creating || isAdvancing || isAutoCompleting || !canAdvance} className="rounded-md border border-primary/40 bg-primary/5 px-4 py-3 text-sm font-medium text-primary disabled:opacity-50">{isAutoCompleting ? "全自动生成中..." : "一键全自动完成"}</button> : null}
-      {isReview ? <button onClick={handleCreate} disabled={!canCreate || creating} title={!canCreate ? "请先完成分项向导并补齐书名、题材、章数、字数" : undefined} className="rounded-md border border-border bg-secondary px-4 py-3 text-sm font-medium text-secondary-foreground disabled:opacity-50">{creating ? "创建中..." : "完成创建"}</button> : null}
+      <button onClick={handleRegenerate} disabled={creating || isAdvancing || isAutoCompleting || isRegenerating} className="rounded-md border border-primary/40 bg-primary/5 px-4 py-3 text-sm font-medium text-primary disabled:opacity-50">{isRegenerating ? "重生成中..." : "重生成"}</button>
+      {currentStep !== "relation" ? <button onClick={handleAdvance} disabled={creating || isAdvancing || isAutoCompleting || !canAdvance} className="rounded-md px-4 py-3 text-sm font-medium bg-primary text-primary-foreground disabled:opacity-50">{isAdvancing ? "生成中..." : "下一步"}</button> : null}
+      {currentStep !== "relation" && showAutoComplete ? <button onClick={handleAutoComplete} disabled={creating || isAdvancing || isAutoCompleting || !canAdvance} className="rounded-md border border-primary/40 bg-primary/5 px-4 py-3 text-sm font-medium text-primary disabled:opacity-50">{isAutoCompleting ? "全自动生成中..." : "一键全自动完成"}</button> : null}
+      {currentStep === "relation" ? <button onClick={handleCreate} disabled={!canCreate || creating} title={!canCreate ? "请先补齐书名、题材、平台、章数、字数" : undefined} className="rounded-md border border-border bg-secondary px-4 py-3 text-sm font-medium text-secondary-foreground disabled:opacity-50">{creating ? "创建中..." : "完成创建"}</button> : null}
     </div>
   );
 }

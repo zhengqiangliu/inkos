@@ -22,7 +22,7 @@ import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
 import { resolveDialogueQuotePolicy as resolveBookDialogueQuotePolicy } from "../utils/dialogue-quote-policy.js";
 import { StateManager } from "../state/manager.js";
-import { MemoryDB, type Fact } from "../state/memory-db.js";
+import { MemoryDB, type Fact, type StoredHook } from "../state/memory-db.js";
 import { dispatchNotification, dispatchWebhookEvent } from "../notify/dispatcher.js";
 import type { WebhookEvent } from "../notify/webhook.js";
 import type { AgentContext } from "../agents/base.js";
@@ -32,6 +32,7 @@ import type { LengthSpec, LengthTelemetry } from "../models/length-governance.js
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import { buildLengthSpec, countChapterLength, formatLengthCount, isOutsideHardRange, isOutsideSoftRange, resolveLengthCountingMode, type LengthLanguage } from "../utils/length-metrics.js";
 import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
+import { readStoryFrame, readVolumeMap } from "../utils/outline-paths.js";
 import { loadNarrativeMemorySeed, loadRuntimeStateSnapshot, loadSnapshotCurrentStateFacts, type NarrativeMemorySeed } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
 import { classifyAuditIssueClass, countAuditIssueClasses, isStructuralAuditIssue } from "../utils/audit-issue-classification.js";
@@ -48,8 +49,8 @@ import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir } from "./persisted-governed-plan.js";
 import { ChapterPlanSchema, type ChapterPlan } from "../models/chapter-plan.js";
 import { parsePendingHooksMarkdown } from "../utils/story-markdown.js";
-import { filterActiveHooks, resolveStoryPhase } from "../utils/hook-agenda.js";
-import { HOOK_POOL_PHASE_LIMITS, HOOK_STALE_THRESHOLDS } from "../utils/hook-policy.js";
+import { deriveHookDebtBudget, filterActiveHooks, resolveStoryPhase } from "../utils/hook-agenda.js";
+import { HOOK_POOL_PHASE_LIMITS } from "../utils/hook-policy.js";
 
 const SEQUENCE_LEVEL_CATEGORIES = new Set([
   "Pacing Monotony", "节奏单调",
@@ -1312,7 +1313,6 @@ export class PipelineRunner {
   }
 
   async initBook(book: BookConfig, options: InitBookOptions = {}): Promise<void> {
-    const architect = new ArchitectAgent(this.agentCtxFor("architect", book.id));
     const bookDir = this.state.bookDir(book.id);
     const stagingBookDir = join(
       this.state.booksDir,
@@ -1320,32 +1320,10 @@ export class PipelineRunner {
     );
     const stageLanguage = await this.resolveBookLanguage(book);
 
-    this.logStage(stageLanguage, { zh: "生成基础设定", en: "generating foundation" });
     const { profile: gp } = await this.loadGenreProfile(book.genre);
-    const reviewer = new FoundationReviewerAgent(this.agentCtxFor("foundation-reviewer", book.id));
-    const resolvedLanguage = (book.language ?? gp.language) === "en" ? "en" as const : "zh" as const;
-    const foundation = await this.generateAndReviewFoundation({
-      generate: (reviewFeedback) => architect.generateFoundation(
-        book,
-        options.externalContext ?? this.config.externalContext,
-        reviewFeedback,
-      ),
-      reviewer,
-      mode: "original",
-      language: resolvedLanguage,
-      stageLanguage,
-    });
     try {
       this.logStage(stageLanguage, { zh: "保存书籍配置", en: "saving book config" });
       await this.state.saveBookConfigAt(stagingBookDir, book);
-
-      this.logStage(stageLanguage, { zh: "写入基础设定文件", en: "writing foundation files" });
-      await architect.writeFoundationFiles(
-        stagingBookDir,
-        foundation,
-        gp.numericalSystem,
-        book.language ?? gp.language,
-      );
 
       this.logStage(stageLanguage, { zh: "初始化控制文档", en: "initializing control documents" });
       await this.state.ensureControlDocumentsAt(
@@ -2326,8 +2304,8 @@ export class PipelineRunner {
         readSafe(join(storyDir, "current_state.md")),
         readSafe(join(storyDir, "particle_ledger.md")),
         readSafe(join(storyDir, "pending_hooks.md")),
-        readSafe(join(storyDir, "story_bible.md")),
-        readSafe(join(storyDir, "volume_outline.md")),
+        readStoryFrame(bookDir, "(文件不存在)"),
+        readVolumeMap(bookDir, "(文件不存在)"),
         readSafe(join(storyDir, "book_rules.md")),
       ]);
 
@@ -3906,8 +3884,8 @@ ${matrix}`,
     chapterNumber: number,
     language: string | undefined,
   ): Promise<void> {
-    const outlinePath = join(bookDir, "story", "volume_outline.md");
-    const outline = await readFile(outlinePath, "utf-8").catch(() => "");
+    const outlinePath = join(bookDir, "story", "outline", "volume_map.md");
+    const outline = await readVolumeMap(bookDir, "");
     if (!outline) return;
 
     const isZh = !language || language.startsWith("zh");
@@ -3943,7 +3921,9 @@ ${matrix}`,
 
     const suffix = outline.endsWith("\n") ? "" : "\n";
     const entry = isZh ? `\n## 第${chapterNumber}章` : `\n## Chapter ${chapterNumber}`;
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
     await writeFile(outlinePath, outline + suffix + entry + "\n", "utf-8");
+    await writeFile(join(bookDir, "story", "volume_outline.md"), outline + suffix + entry + "\n", "utf-8").catch(() => undefined);
   }
 
   private mergeExternalContext(
@@ -5000,7 +4980,7 @@ ${matrix}`,
   }): Promise<ReviewPreflightResult> {
     const storyDir = join(params.bookDir, "story");
     const [volumeOutline, currentState, pendingHooks, ledger, syncProgressRaw] = await Promise.all([
-      readFile(join(storyDir, "volume_outline.md"), "utf-8").catch(() => ""),
+      readVolumeMap(params.bookDir, ""),
       readFile(join(storyDir, "current_state.md"), "utf-8").catch(() => ""),
       readFile(join(storyDir, "pending_hooks.md"), "utf-8").catch(() => ""),
       readFile(join(storyDir, "particle_ledger.md"), "utf-8").catch(() => ""),
@@ -5050,32 +5030,33 @@ ${matrix}`,
       });
     }
 
-    const hookRows = pendingHooks
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.startsWith("|") && !line.includes("---"));
-    // Use phase-aware stale threshold: mid-arc (6 chapters) as the default since
-    // the markdown table doesn't carry per-hook payoffTiming.
-    const storyPhase = resolveStoryPhase(params.chapterNumber, params.targetChapters);
-    const phaseLimit = HOOK_POOL_PHASE_LIMITS[storyPhase] ?? HOOK_POOL_PHASE_LIMITS.middle;
-    const staleAgeThreshold = HOOK_STALE_THRESHOLDS["mid-arc"]; // conservative default: 6 chapters
-    const staleHooks = hookRows.filter((line) => {
-      const normalized = line.toLowerCase();
-      if (normalized.includes("| closed |") || normalized.includes("| 回收 |")) return false;
-      const cells = line.split("|").map((cell) => cell.trim()).filter((cell) => cell.length > 0);
-      const chapterCell = cells.find((cell) => /^\d+$/.test(cell));
-      if (!chapterCell) return false;
-      const start = Number.parseInt(chapterCell, 10);
-      return Number.isFinite(start) && params.chapterNumber - start >= staleAgeThreshold;
-    });
-    // Trigger when stale count reaches the phase's active-pool limit (instead of hardcoded 3).
-    if (staleHooks.length >= phaseLimit.maxActive) {
+    const hookDebt = await (async () => {
+      try {
+        const db = new MemoryDB(params.bookDir);
+        try {
+          const storedHooks = db.getActiveHooks();
+          return deriveHookDebtBudget({
+            hooks: storedHooks as StoredHook[],
+            chapterNumber: params.chapterNumber,
+            targetChapters: params.targetChapters,
+          });
+        } finally {
+          db.close();
+        }
+      } catch {
+        return null;
+      }
+    })();
+    if (hookDebt?.highPressureMode) {
+      const staleCount = hookDebt.staleDebt.length;
+      const overdueCount = hookDebt.requiredRecoverHooks.length;
+      const pressureCount = Math.max(staleCount, overdueCount);
       signals.push({
         code: "hook_debt_pressure",
         severity: "warning",
         message: params.language === "en"
-          ? `${staleHooks.length} long-standing open hooks detected; hook debt pressure is high.`
-          : `检测到 ${staleHooks.length} 条长期未回收伏笔，伏笔债务压力偏高。`,
+          ? `${pressureCount} long-standing open hooks detected; hook debt pressure is high.`
+          : `检测到 ${pressureCount} 条长期未回收伏笔，伏笔债务压力偏高。`,
         suggestion: params.language === "en"
           ? "Address at least one high-pressure hook in this chapter and reflect it in truth files."
           : "本章至少推进或回收一条高压力伏笔，并同步到真相文件。",

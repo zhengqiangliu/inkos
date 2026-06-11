@@ -180,4 +180,22 @@ describe("runAgentSession cache — bookId switch", () => {
 
     expect(agentInstances).toHaveLength(1);
   });
+
+  it("omits file access tools in new-book mode", async () => {
+    const model = { provider: "x", id: "y", api: "anthropic-messages" } as any;
+    const pipeline = {} as any;
+
+    await runAgentSession(
+      { sessionId: "s-new", bookId: null, language: "zh", pipeline, projectRoot, model },
+      "hi",
+    );
+
+    const toolNames = agentInstances.at(-1)?.state.tools?.map((tool: any) => tool.name) ?? [];
+    expect(toolNames).toContain("sub_agent");
+    expect(toolNames).not.toContain("read");
+    expect(toolNames).not.toContain("edit");
+    expect(toolNames).not.toContain("write");
+    expect(toolNames).not.toContain("grep");
+    expect(toolNames).not.toContain("ls");
+  });
 });

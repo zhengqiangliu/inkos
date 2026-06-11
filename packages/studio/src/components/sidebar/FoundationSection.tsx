@@ -7,7 +7,7 @@ import { getArtifactLabel } from "../../utils/book-artifacts";
 
 const FOUNDATION_FILES: ReadonlyArray<{ file: string; label: string }> = [
   { file: "story_bible.md", label: getArtifactLabel("story_bible.md").title },
-  { file: "volume_outline.md", label: getArtifactLabel("volume_outline.md").title },
+  { file: "story/outline/volume_map.md", label: getArtifactLabel("story/outline/volume_map.md").title },
   { file: "book_rules.md", label: getArtifactLabel("book_rules.md").title },
   { file: "current_state.md", label: getArtifactLabel("current_state.md").title },
   { file: "pending_hooks.md", label: getArtifactLabel("pending_hooks.md").title },

@@ -4,6 +4,7 @@ import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
 import { chatSelectors, useChatStore } from "../../store/chat";
 import { useServiceStore } from "../../store/service";
+import { usePersistedModelSelection } from "../../hooks/use-persisted-model-selection";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "../ui/dropdown-menu";
 import { ChatMessage } from "./ChatMessage";
 import { AssistantOutputCard } from "./AssistantOutputCard";
@@ -12,7 +13,10 @@ import { BookTaskPanel } from "./BookTaskPanel";
 import { BotMessageSquare, ArrowUp, Square, ChevronDown, Check, Sparkles, Zap, Search, RefreshCcw } from "lucide-react";
 import { Shimmer } from "../ai-elements/shimmer";
 import { Message } from "../ai-elements/message";
-import { resolveModelSelection } from "../../pages/chat-page-state";
+import {
+  resolveModelSelection,
+  resolvePersistedModelSelection,
+} from "../../pages/chat-page-state";
 import { ExecutionPanel } from "./ExecutionPanel";
 import { pickLatestAssistantToolExecutions } from "../../pages/chat-execution-panel";
 import { dispatchWriteNextInstruction, readBookDetailSessionId, resolveBookDetailSessionId } from "../../utils/write-next";
@@ -76,6 +80,7 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
   const modelsByService = useServiceStore((s) => s.modelsByService);
   const fetchServices = useServiceStore((s) => s.fetchServices);
   const fetchModels = useServiceStore((s) => s.fetchModels);
+  const { persistedSelection, ready: persistedSelectionReady } = usePersistedModelSelection();
 
   const [executionCollapsed, setExecutionCollapsed] = useState(false);
   const [panelMode, setPanelMode] = useState<"chat" | "tasks">("chat");
@@ -102,12 +107,18 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
   const canShowQuickMenu = quickActionsAvailable && !canStop;
 
   useEffect(() => {
+    if (!persistedSelectionReady) return;
+    const resolvedFromConfig = resolvePersistedModelSelection(groupedModels, persistedSelection);
+    if (resolvedFromConfig && (resolvedFromConfig.model !== selectedModel || resolvedFromConfig.service !== selectedService)) {
+      setSelectedModel(resolvedFromConfig.model, resolvedFromConfig.service, { persist: false });
+      return;
+    }
     const resolved = resolveModelSelection(groupedModels, selectedModel, selectedService);
     if (!resolved) return;
     if (resolved.model !== selectedModel || resolved.service !== selectedService) {
-      setSelectedModel(resolved.model, resolved.service);
+      setSelectedModel(resolved.model, resolved.service, { persist: false });
     }
-  }, [groupedModels, selectedModel, selectedService, setSelectedModel]);
+  }, [groupedModels, persistedSelection, persistedSelectionReady, selectedModel, selectedService, setSelectedModel]);
 
   useEffect(() => {
     let cancelled = false;
@@ -553,5 +564,3 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
     </aside>
   );
 }
-
-

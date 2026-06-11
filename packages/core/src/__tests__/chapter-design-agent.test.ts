@@ -21,6 +21,7 @@ describe("ChapterDesignAgent backfill prompt", () => {
   let root: string;
   let bookDir: string;
   let storyDir: string;
+  let wizardDir: string;
   let outlineDir: string;
   let volumeOutlineText: string;
 
@@ -28,9 +29,11 @@ describe("ChapterDesignAgent backfill prompt", () => {
     root = await mkdtemp(join(tmpdir(), "inkos-chapter-design-agent-"));
     bookDir = join(root, "books", "demo-book");
     storyDir = join(bookDir, "story");
+    wizardDir = join(bookDir, "wizard");
     outlineDir = join(storyDir, "outline");
     volumeOutlineText = "# 卷纲\n\n### 第一卷：风起（1-3章）\n\n第1章到第3章围绕主线冲突推进。";
     await mkdir(storyDir, { recursive: true });
+    await mkdir(wizardDir, { recursive: true });
     await mkdir(outlineDir, { recursive: true });
     await writeFile(join(outlineDir, "volume_map.md"), volumeOutlineText, "utf-8");
     await writeFile(join(outlineDir, "story_frame.md"), "# Story Frame\n\n新的世界框架：灵能三层结构。", "utf-8");
@@ -39,6 +42,8 @@ describe("ChapterDesignAgent backfill prompt", () => {
     await writeFile(join(storyDir, "story_bible.md"), "# Legacy Story Bible\n\n旧世界观。", "utf-8");
     await writeFile(join(storyDir, "emotional_arcs.md"), "# 感情线\n\n主角与搭档信任破裂后修复。", "utf-8");
     await writeFile(join(storyDir, "pending_hooks.md"), "# 伏笔池\n\nH-07 身份反转伏笔。", "utf-8");
+    await writeFile(join(wizardDir, "character_arc.md"), "# 人物弧光\n\n## 主角\n\n### 核心弧光\n- 从被动求生转向主动设局。", "utf-8");
+    await writeFile(join(wizardDir, "relationship_map.md"), "# 人物关系\n\n## 对立关系\n- 主角 → 搭档：互相利用，随时可能翻脸。", "utf-8");
     await writeFile(
       join(storyDir, "chapter_summaries.md"),
       [
@@ -114,6 +119,10 @@ describe("ChapterDesignAgent backfill prompt", () => {
     expect(userMessage).toContain("关键冲突在此发生");
     expect(userMessage).toContain("## 世界观设定（参考）");
     expect(userMessage).toContain("新的世界框架：灵能三层结构");
+    expect(userMessage).toContain("## 人物弧光（Character Arc）");
+    expect(userMessage).toContain("从被动求生转向主动设局");
+    expect(userMessage).toContain("## 人物关系（Relationship Map）");
+    expect(userMessage).toContain("互相利用，随时可能翻脸");
     expect(userMessage).toContain("## 感情线（参考）");
     expect(userMessage).toContain("## 伏笔池（参考）");
     expect(userMessage).toContain("## 前章摘要（Previous Chapter Summaries）");

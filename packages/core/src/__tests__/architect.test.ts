@@ -517,6 +517,64 @@ describe("ArchitectAgent", () => {
     await expect(agent.generateFoundation(book)).rejects.toThrow(/book_rules/i);
   });
 
+  it("falls back to a generated current_state when the model omits that section", async () => {
+    const agent = new ArchitectAgent({
+      client: {
+        provider: "openai",
+        apiFormat: "chat",
+        stream: false,
+        defaults: {
+          temperature: 0.7,
+          maxTokens: 4096,
+          thinkingBudget: 0, maxTokensCap: null,
+          extra: {},
+        },
+      },
+      model: "test-model",
+      projectRoot: process.cwd(),
+    });
+
+    const book: BookConfig = {
+      id: "missing-current-state-book",
+      title: "Missing Current State Book",
+      platform: "other",
+      genre: "other",
+      status: "active",
+      targetChapters: 20,
+      chapterWordCount: 2200,
+      language: "zh",
+      createdAt: "2026-03-29T00:00:00.000Z",
+      updatedAt: "2026-03-29T00:00:00.000Z",
+    };
+
+    vi.spyOn(agent as unknown as { chat: (...args: unknown[]) => Promise<unknown> }, "chat")
+      .mockResolvedValue({
+        content: [
+          "=== SECTION: story_bible ===",
+          "# 故事圣经",
+          "",
+          "=== SECTION: volume_outline ===",
+          "# 卷纲",
+          "",
+          "=== SECTION: book_rules ===",
+          "---",
+          "version: \"1.0\"",
+          "---",
+          "",
+          "=== SECTION: pending_hooks ===",
+          "| hook_id | 起始章节 | 类型 | 状态 | 最近推进 | 预期回收 | 备注 |",
+          "| --- | --- | --- | --- | --- | --- | --- |",
+          "| H01 | 1 | mystery | open | 0 | 10章 | 初始钩子 |",
+        ].join("\n"),
+        usage: ZERO_USAGE,
+      });
+
+    const result = await agent.generateFoundation(book);
+
+    expect(result.currentState).toContain("| 当前章节 | 0 |");
+    expect(result.currentState).toContain("| 当前位置 | (起始地点) |");
+  });
+
   it("passes maxTokens 16384 when generating foundation", async () => {
     const agent = new ArchitectAgent({
       client: {

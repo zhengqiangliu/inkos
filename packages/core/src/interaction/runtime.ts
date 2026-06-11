@@ -2,15 +2,13 @@
 import { routeInteractionRequest } from "./request-router.js";
 import type { InteractionRequest } from "./intents.js";
 import type { ExecutionState, InteractionEvent } from "./events.js";
-import type { PendingDecision, InteractionSession, DraftRound } from "./session.js";
+import type { PendingDecision, InteractionSession, DraftRound, BookCreationWizardStep } from "./session.js";
 import {
   appendInteractionMessage,
   appendInteractionEvent,
   bindActiveBook,
-  advanceCreationWizardState,
   clearCreationDraft,
   clearPendingDecision,
-  inferCreationWizardState,
   retreatCreationWizardState,
   validateCreationDraftConsistency,
   updateCreationDraft,
@@ -40,7 +38,7 @@ export interface InteractionRuntimeTools {
   readonly developBookDraft?: (
     input: string,
     existingDraft?: InteractionSession["creationDraft"],
-    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review",
+    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation",
     themeGenre?: string,
   ) => Promise<unknown>;
     readonly reviseBookIntro?: (
@@ -52,12 +50,13 @@ export interface InteractionRuntimeTools {
   readonly saveBookWizardStep?: (
     input: string,
     existingDraft?: InteractionSession["creationDraft"],
-    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review",
+    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation",
   ) => Promise<unknown>;
   readonly advanceBookWizard?: (
     input: string,
     existingDraft?: InteractionSession["creationDraft"],
-    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review",
+    wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation",
+    nextStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation",
   ) => Promise<unknown>;
   readonly createBook?: (input: {
     readonly title: string;
@@ -200,7 +199,6 @@ function renderCreationDraft(
         draft.conflictCore ? `- Core Conflict: ${draft.conflictCore}` : undefined,
         draft.volumeOutline ? `- Volume Direction: ${draft.volumeOutline}` : undefined,
         draft.blurb ? `- Blurb: ${draft.blurb}` : undefined,
-        draft.nextQuestion ? `- Next: ${draft.nextQuestion}` : undefined,
       ]
     : [
         "# 当前创作草案",
@@ -222,7 +220,6 @@ function renderCreationDraft(
         draft.conflictCore ? `- 核心冲突：${draft.conflictCore}` : undefined,
         draft.volumeOutline ? `- 卷纲方向：${draft.volumeOutline}` : undefined,
         draft.blurb ? `- 简介：${draft.blurb}` : undefined,
-        draft.nextQuestion ? `- 下一步：${draft.nextQuestion}` : undefined,
       ];
   return lines.filter(Boolean).join("\n");
 }
@@ -276,6 +273,16 @@ function buildBookDraftWithParams(
   };
 }
 
+function hasDirectCreateBookParams(request: InteractionRequest): boolean {
+  return Boolean(
+    request.title?.trim()
+    && request.genre?.trim()
+    && request.platform?.trim()
+    && request.targetChapters !== undefined
+    && request.chapterWordCount !== undefined,
+  );
+}
+
 function collectDraftFieldSnapshot(draft: NonNullable<InteractionSession["creationDraft"]>): Record<string, string> {
   const snapshot: Record<string, string> = {
     ...(draft.draftFields ?? {}),
@@ -307,7 +314,6 @@ function collectDraftFieldSnapshot(draft: NonNullable<InteractionSession["creati
     ["constraints", draft.constraints],
     ["authorIntent", draft.authorIntent],
     ["currentFocus", draft.currentFocus],
-    ["nextQuestion", draft.nextQuestion],
   ];
 
   for (const [key, value] of fields) {
@@ -352,6 +358,8 @@ function normalizeCreationDraft(
   draft: NonNullable<InteractionSession["creationDraft"]>,
   extras: {
     readonly confirmedFields?: ReadonlyArray<string>;
+    readonly forceReadyToCreate?: boolean;
+    readonly keepNextQuestion?: boolean;
   } = {},
 ): NonNullable<InteractionSession["creationDraft"]> {
   const draftFields = collectDraftFieldSnapshot(draft);
@@ -365,8 +373,61 @@ function normalizeCreationDraft(
     draftFields,
     confirmedFields,
     missingFields: [...(draft.missingFields ?? [])],
-    readyToCreate: Boolean(draft.readyToCreate),
+    readyToCreate: extras.forceReadyToCreate ?? Boolean(draft.readyToCreate),
   };
+}
+
+function scoreIntroMarkdownBody(content: string): number {
+  const trimmed = content.trim();
+  if (!trimmed) return Number.NEGATIVE_INFINITY;
+  if (/^(已|好的|我来|我先|正在|开始|生成|修改|润色|总结|汇报|说明)/.test(trimmed)) return Number.NEGATIVE_INFINITY;
+  if (!/(^|\n)\s*#\s+/.test(trimmed) && !/(^|\n)\s*##\s+(一句话卖点|故事概述|故事走向|主要人物成长路径|核心冲突|核心价值观)/.test(trimmed)) {
+    return Number.NEGATIVE_INFINITY;
+  }
+  const requiredSections = [
+    "一句话卖点",
+    "故事概述",
+    "故事走向",
+    "主要人物成长路径",
+    "核心冲突",
+    "核心价值观",
+  ];
+  const sectionCount = requiredSections.filter((section) => trimmed.includes(section)).length;
+  const concreteLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) =>
+      line
+      && !/^#/.test(line)
+      && !/^-+\s*$/.test(line)
+      && line !== "-"
+      && line !== "—"
+      && line !== "…"
+      && line !== "..."
+      && !/^(题材|平台|主题)[:：]/.test(line),
+    );
+  const substantiveCount = concreteLines.filter((line) => line.length >= 8).length;
+  const placeholderCount = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line === "-" || line === "—" || line === "…" || line === "..." || /^-\s*$/.test(line))
+    .length;
+  return sectionCount * 100 + substantiveCount * 12 + Math.min(500, trimmed.length / 2) - placeholderCount * 40;
+}
+
+function chooseIntroMarkdownCandidate(candidates: ReadonlyArray<string | null | undefined>): string {
+  let best = "";
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim() ?? "";
+    if (!trimmed) continue;
+    const score = scoreIntroMarkdownBody(trimmed);
+    if (score > bestScore) {
+      best = trimmed;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 function buildTaskStartedState(
@@ -644,7 +705,6 @@ async function handleDraftLifecycleRequest(params: {
             constraints: session.creationDraft?.constraints,
             authorIntent: session.creationDraft?.authorIntent,
             currentFocus: session.creationDraft?.currentFocus,
-            nextQuestion: session.creationDraft?.nextQuestion,
             draftFields: session.creationDraft?.draftFields,
             confirmedFields: session.creationDraft?.confirmedFields,
             missingFields: session.creationDraft?.missingFields ?? [],
@@ -680,10 +740,20 @@ async function handleDraftLifecycleRequest(params: {
       };
       const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
         confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+        forceReadyToCreate: false,
       }));
-      const wizard = inferCreationWizardState(draft, session.creationWizard);
       const withRounds = {
-        ...updateCreationWizard(withDraft, wizard ?? { currentStep: "intro", completedSteps: [], stepNotes: {}, updatedAt: Date.now() }),
+        ...updateCreationWizard(withDraft, {
+          currentStep: "intro",
+          completedSteps: session.creationWizard?.completedSteps?.includes("intro")
+            ? [...session.creationWizard.completedSteps]
+            : [...(session.creationWizard?.completedSteps ?? []), "intro"],
+          stepNotes: {
+            ...(session.creationWizard?.stepNotes ?? {}),
+            intro: session.creationWizard?.stepNotes?.intro ?? "",
+          },
+          updatedAt: Date.now(),
+        }),
         draftRounds: [...(withDraft.draftRounds ?? []), newRound],
       };
       const nextSession = appendToolEvents(withRounds, metadata.events);
@@ -744,7 +814,6 @@ async function handleDraftLifecycleRequest(params: {
             constraints: session.creationDraft?.constraints,
             authorIntent: session.creationDraft?.authorIntent,
             currentFocus: session.creationDraft?.currentFocus,
-            nextQuestion: session.creationDraft?.nextQuestion,
             draftFields: session.creationDraft?.draftFields,
             confirmedFields: session.creationDraft?.confirmedFields,
             missingFields: session.creationDraft?.missingFields ?? [],
@@ -770,6 +839,37 @@ async function handleDraftLifecycleRequest(params: {
           en: "Intro revision tool did not return draft data.",
         }));
       }
+      const chosenIntroMarkdown = chooseIntroMarkdownCandidate([
+        typeof metadata.details?.draftRaw === "string" ? metadata.details.draftRaw : undefined,
+        typeof metadata.responseText === "string" ? metadata.responseText : undefined,
+        draft?.draftFields?.introMarkdown,
+      ]);
+      const introDraft = normalizeCreationDraft({
+        ...draft,
+        worldPremise: session.creationDraft?.worldPremise,
+        settingNotes: session.creationDraft?.settingNotes,
+        novelOutline: session.creationDraft?.novelOutline,
+        protagonist: session.creationDraft?.protagonist,
+        supportingCast: session.creationDraft?.supportingCast,
+        characterMatrix: session.creationDraft?.characterMatrix,
+        characterArc: session.creationDraft?.characterArc,
+        relationshipMap: session.creationDraft?.relationshipMap,
+        conflictCore: session.creationDraft?.conflictCore,
+        volumeOutline: session.creationDraft?.volumeOutline,
+        constraints: session.creationDraft?.constraints,
+        authorIntent: session.creationDraft?.authorIntent,
+        currentFocus: session.creationDraft?.currentFocus,
+        readyToCreate: false,
+      }, {
+        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+        forceReadyToCreate: false,
+      });
+      if (chosenIntroMarkdown) {
+        introDraft.draftFields = {
+          ...(introDraft.draftFields ?? {}),
+          introMarkdown: chosenIntroMarkdown,
+        };
+      }
       const newRound: DraftRound = {
         roundId: (session.draftRounds?.length ?? 0) + 1,
         userMessage: request.instruction ?? "",
@@ -778,12 +878,19 @@ async function handleDraftLifecycleRequest(params: {
         summary: metadata.details?.draftSummary as string ?? "",
         timestamp: Date.now(),
       };
-      const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
-        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
-      }));
-      const wizard = inferCreationWizardState(draft, session.creationWizard);
+      const withDraft = updateCreationDraft(session, introDraft);
       const withRounds = {
-        ...updateCreationWizard(withDraft, wizard ?? { currentStep: "intro", completedSteps: [], stepNotes: {}, updatedAt: Date.now() }),
+        ...updateCreationWizard(withDraft, {
+          currentStep: "intro",
+          completedSteps: session.creationWizard?.completedSteps?.includes("intro")
+            ? [...session.creationWizard.completedSteps]
+            : [...(session.creationWizard?.completedSteps ?? []), "intro"],
+          stepNotes: {
+            ...(session.creationWizard?.stepNotes ?? {}),
+            intro: session.creationWizard?.stepNotes?.intro ?? "",
+          },
+          updatedAt: Date.now(),
+        }),
         draftRounds: [...(withDraft.draftRounds ?? []), newRound],
       };
       const nextSession = appendToolEvents(withRounds, metadata.events);
@@ -838,7 +945,6 @@ async function handleDraftLifecycleRequest(params: {
         constraints: session.creationDraft?.constraints,
         authorIntent: session.creationDraft?.authorIntent,
         currentFocus: session.creationDraft?.currentFocus,
-        nextQuestion: session.creationDraft?.nextQuestion,
         draftFields: session.creationDraft?.draftFields,
         confirmedFields: session.creationDraft?.confirmedFields,
         missingFields: session.creationDraft?.missingFields ?? [],
@@ -901,21 +1007,16 @@ async function handleDraftLifecycleRequest(params: {
         genreAlias: request.genreAlias?.trim() || session.creationDraft?.genreAlias,
         genreSource: request.genreSource ?? session.creationDraft?.genreSource ?? "builtin",
         mappedGenreId: request.genre.trim(),
-        nextQuestion: session.creationDraft?.nextQuestion ?? localize(language, {
-          zh: "请继续输入一句话卖点或故事概述。",
-          en: "Please continue with a one-line pitch or story outline.",
-        }),
         missingFields: session.creationDraft?.missingFields ?? [],
         readyToCreate: false,
       }, {
         confirmedFields: ["genre", "genreAlias", "genreSource", "mappedGenreId"],
       });
       const withDraft = updateCreationDraft(session, nextDraft);
-      const wizard = inferCreationWizardState(nextDraft, session.creationWizard);
-      const withWizard = updateCreationWizard(withDraft, wizard ?? {
-        currentStep: "intro",
-        completedSteps: [],
-        stepNotes: {},
+      const withWizard = updateCreationWizard(withDraft, {
+        currentStep: session.creationWizard?.currentStep ?? "intro",
+        completedSteps: session.creationWizard?.completedSteps ?? [],
+        stepNotes: session.creationWizard?.stepNotes ?? {},
         updatedAt: Date.now(),
       });
       const completed = {
@@ -942,8 +1043,12 @@ async function handleDraftLifecycleRequest(params: {
         confirmedFields: ["title", "platform", "language", "targetChapters", "chapterWordCount"],
       });
       const withDraft = updateCreationDraft(session, nextDraft);
-      const wizard = inferCreationWizardState(nextDraft, session.creationWizard);
-      const withWizard = wizard ? updateCreationWizard(withDraft, wizard) : withDraft;
+      const withWizard = updateCreationWizard(withDraft, {
+        currentStep: session.creationWizard?.currentStep ?? "intro",
+        completedSteps: session.creationWizard?.completedSteps ?? [],
+        stepNotes: session.creationWizard?.stepNotes ?? {},
+        updatedAt: Date.now(),
+      });
       const completed = {
         ...markCompleted(withWizard),
         currentExecution: markCompleted(withWizard).currentExecution,
@@ -1010,6 +1115,7 @@ async function handleDraftLifecycleRequest(params: {
       };
       const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
         confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+        forceReadyToCreate: false,
       }));
       const nextSession = appendToolEvents({
         ...updateCreationWizard(withDraft, {
@@ -1056,17 +1162,21 @@ async function handleDraftLifecycleRequest(params: {
         }));
       }
       const currentStep = session.creationWizard?.currentStep ?? "intro";
-      const targetStep = request.wizardStep ?? currentStep;
-      if (targetStep !== currentStep) {
+      const targetStep = request.nextStep ?? request.wizardStep ?? currentStep;
+      const saveStep = request.wizardStep ?? currentStep;
+      if (saveStep !== currentStep) {
         blocked(language, "WIZARD_STEP_CHANGED", "当前页已变化，请重新点击保存并进入。", "The current step changed. Please click save and continue again.", {
+          currentStep,
+          targetStep: saveStep,
+        });
+      }
+      if (targetStep === currentStep) {
+        blocked(language, "WIZARD_STEP_ALREADY_ACTIVE", "当前已经在这一页。", "This step is already active.", {
           currentStep,
           targetStep,
         });
       }
-      const wizardOrder = ["intro", "world", "outline", "volume", "characters", "arc", "relation", "review"] as const;
-      const currentIndex = wizardOrder.indexOf(currentStep as typeof wizardOrder[number]);
-      const nextStep = wizardOrder[Math.min(currentIndex + 1, wizardOrder.length - 1)] ?? "review";
-      const toolResult = await generateWizardStep(request.instruction ?? "", session.creationDraft, targetStep);
+      const toolResult = await generateWizardStep(request.instruction ?? "", session.creationDraft, saveStep, targetStep);
       const metadata = extractToolMetadata(toolResult);
       const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
       if (!draft) {
@@ -1085,9 +1195,15 @@ async function handleDraftLifecycleRequest(params: {
       };
       const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
         confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
+        forceReadyToCreate: false,
       }));
       const nextSession = appendToolEvents({
-        ...updateCreationWizard(withDraft, advanceCreationWizardState(withDraft, targetStep)),
+        ...updateCreationWizard(withDraft, {
+          currentStep: targetStep,
+          completedSteps: [...new Set([...(session.creationWizard?.completedSteps ?? []), targetStep])] as BookCreationWizardStep[],
+          stepNotes: session.creationWizard?.stepNotes ?? {},
+          updatedAt: Date.now(),
+        }),
         draftRounds: [...(withDraft.draftRounds ?? []), newRound],
       }, metadata.events);
       const completed = {
@@ -1097,22 +1213,22 @@ async function handleDraftLifecycleRequest(params: {
       return {
         session: appendInteractionMessage(
           addEvent(completed, "task.completed", "completed", localize(language, {
-            zh: `已生成 ${targetStep} 页草案并进入 ${nextStep}。`,
-            en: `Generated ${targetStep} draft and moved to ${nextStep}.`,
+            zh: `已生成 ${targetStep} 页草案。`,
+            en: `Generated ${targetStep} draft.`,
           })),
           {
             role: "assistant",
             content: metadata.responseText ?? localize(language, {
-              zh: `已生成 ${targetStep} 页草案并进入 ${nextStep}。`,
-              en: `Generated ${targetStep} draft and moved to ${nextStep}.`,
+              zh: `已生成 ${targetStep} 页草案。`,
+              en: `Generated ${targetStep} draft.`,
             }),
-            wizardStep: nextStep,
+            wizardStep: targetStep,
             timestamp: Date.now(),
           },
         ),
         responseText: metadata.responseText ?? localize(language, {
-          zh: `已生成 ${targetStep} 页草案并进入 ${nextStep}。`,
-          en: `Generated ${targetStep} draft and moved to ${nextStep}.`,
+          zh: `已生成 ${targetStep} 页草案。`,
+          en: `Generated ${targetStep} draft.`,
         }),
         details: metadata.details,
       };
@@ -1126,66 +1242,30 @@ async function handleDraftLifecycleRequest(params: {
           targetStep,
         });
       }
-      if (!tools.advanceBookWizard && !tools.saveBookWizardStep) {
-        throw new Error(localize(language, {
-          zh: "建书向导切页暂未实现。",
-          en: "Book wizard navigation is not implemented yet.",
-        }));
-      }
-      const toolResult = await (tools.advanceBookWizard ?? tools.saveBookWizardStep!)(request.instruction ?? "", session.creationDraft, targetStep);
-      const metadata = extractToolMetadata(toolResult);
-      const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
-      if (!draft) {
-        throw new Error(localize(language, {
-          zh: "向导工具没有返回草案数据。",
-          en: "Wizard tool did not return draft data.",
-        }));
-      }
-      const newRound: DraftRound = {
-        roundId: (session.draftRounds?.length ?? 0) + 1,
-        userMessage: request.instruction ?? "",
-        assistantRaw: metadata.details?.draftRaw as string ?? "",
-        fieldsUpdated: (metadata.details?.fieldsUpdated as string[]) ?? [],
-        summary: metadata.details?.draftSummary as string ?? "",
-        timestamp: Date.now(),
+      const currentWizard = session.creationWizard ?? {
+        currentStep: "intro",
+        completedSteps: [],
+        stepNotes: {},
       };
-      const withDraft = updateCreationDraft(session, normalizeCreationDraft(draft, {
-        confirmedFields: metadata.details?.fieldsUpdated as string[] | undefined,
-      }));
-      const nextSession = appendToolEvents({
-        ...updateCreationWizard(withDraft, {
-          currentStep: targetStep,
-          completedSteps: session.creationWizard?.completedSteps ?? [],
-          stepNotes: session.creationWizard?.stepNotes ?? {},
-          updatedAt: Date.now(),
-        }),
-        draftRounds: [...(withDraft.draftRounds ?? []), newRound],
-      }, metadata.events);
       const completed = {
-        ...markCompleted(nextSession),
-        currentExecution: metadata.currentExecution ?? markCompleted(nextSession).currentExecution,
+        ...markCompleted(updateCreationWizard(session, {
+          ...currentWizard,
+          currentStep: targetStep,
+          completedSteps: [...new Set([...(currentWizard.completedSteps ?? []), targetStep])] as BookCreationWizardStep[],
+          stepNotes: currentWizard.stepNotes ?? {},
+          updatedAt: Date.now(),
+        })),
+        currentExecution: markCompleted(session).currentExecution,
       };
       return {
-        session: appendInteractionMessage(
-          addEvent(completed, "task.completed", "completed", localize(language, {
-            zh: `已切换到 ${targetStep} 页。`,
-            en: `Moved to ${targetStep}.`,
-          })),
-          {
-            role: "assistant",
-            content: metadata.responseText ?? localize(language, {
-              zh: `已切换到 ${targetStep} 页。`,
-              en: `Moved to ${targetStep}.`,
-            }),
-            wizardStep: targetStep,
-            timestamp: Date.now(),
-          },
-        ),
-        responseText: metadata.responseText ?? localize(language, {
+        session: addEvent(completed, "task.completed", "completed", localize(language, {
+          zh: `已切换到 ${targetStep} 页。`,
+          en: `Moved to ${targetStep}.`,
+        })),
+        responseText: localize(language, {
           zh: `已切换到 ${targetStep} 页。`,
           en: `Moved to ${targetStep}.`,
         }),
-        details: metadata.details,
       };
     }
     case "retreat_book_wizard": {
@@ -1221,9 +1301,8 @@ async function handleDraftLifecycleRequest(params: {
           }),
         };
       }
-      const wizard = inferCreationWizardState(session.creationDraft, session.creationWizard);
       return {
-        session: markCompleted(wizard ? updateCreationWizard(session, wizard) : session),
+        session: markCompleted(session),
         responseText: renderCreationDraft(session.creationDraft, language),
       };
     }
@@ -1235,15 +1314,13 @@ async function handleDraftLifecycleRequest(params: {
         }));
       }
       const effectiveDraft = session.creationDraft;
-      const shouldValidateFoundation = request.wizardStep === "review";
-      if (shouldValidateFoundation) {
-        const consistency = validateCreationDraftConsistency(effectiveDraft);
-        if (!consistency.readyToCreate) {
-          throw new Error(localize(language, {
-            zh: `基础资料尚未完成：${consistency.missingFields.join("、")}`,
-            en: `Foundation data is incomplete: ${consistency.missingFields.join(", ")}`,
-          }));
-        }
+      const canCreateFromRequest = hasDirectCreateBookParams(request);
+      const consistency = validateCreationDraftConsistency(effectiveDraft);
+      if (!canCreateFromRequest && !consistency.readyToCreate) {
+        throw new Error(localize(language, {
+          zh: `基础资料尚未完成：${consistency.missingFields.join("、")}`,
+          en: `Foundation data is incomplete: ${consistency.missingFields.join(", ")}`,
+        }));
       }
       const title = request.title ?? effectiveDraft?.title;
       if (!title) {
@@ -1252,29 +1329,62 @@ async function handleDraftLifecycleRequest(params: {
           en: "Book creation requires a title.",
         }));
       }
-      const toolResult = await tools.createBook({
+      const toolInput = {
         title,
-        genre: request.genre ?? effectiveDraft?.genre,
-        platform: request.platform ?? effectiveDraft?.platform,
-        language: request.language ?? effectiveDraft?.language,
-        chapterWordCount: request.chapterWordCount ?? effectiveDraft?.chapterWordCount,
-        targetChapters: request.targetChapters ?? effectiveDraft?.targetChapters,
-        blurb: request.blurb ?? effectiveDraft?.blurb,
-        storyBackground: request.storyBackground ?? effectiveDraft?.storyBackground,
-        worldPremise: request.worldPremise ?? effectiveDraft?.worldPremise,
-        settingNotes: request.settingNotes ?? effectiveDraft?.settingNotes,
-        novelOutline: request.novelOutline ?? effectiveDraft?.novelOutline,
-        protagonist: request.protagonist ?? effectiveDraft?.protagonist,
-        supportingCast: request.supportingCast ?? effectiveDraft?.supportingCast,
-        characterMatrix: request.characterMatrix ?? effectiveDraft?.characterMatrix,
-        characterArc: request.characterArc ?? effectiveDraft?.characterArc,
-        relationshipMap: request.relationshipMap ?? effectiveDraft?.relationshipMap,
-        conflictCore: request.conflictCore ?? effectiveDraft?.conflictCore,
-        volumeOutline: request.volumeOutline ?? effectiveDraft?.volumeOutline,
-        constraints: request.constraints ?? effectiveDraft?.constraints,
-        authorIntent: request.authorIntent ?? effectiveDraft?.authorIntent,
-        currentFocus: request.currentFocus ?? effectiveDraft?.currentFocus,
-      });
+        ...(request.genre ?? effectiveDraft?.genre ? { genre: request.genre ?? effectiveDraft?.genre } : {}),
+        ...(request.platform ?? effectiveDraft?.platform ? { platform: request.platform ?? effectiveDraft?.platform } : {}),
+        ...(request.language ?? effectiveDraft?.language ? { language: request.language ?? effectiveDraft?.language } : {}),
+        ...(request.chapterWordCount ?? effectiveDraft?.chapterWordCount
+          ? { chapterWordCount: request.chapterWordCount ?? effectiveDraft?.chapterWordCount }
+          : {}),
+        ...(request.targetChapters ?? effectiveDraft?.targetChapters
+          ? { targetChapters: request.targetChapters ?? effectiveDraft?.targetChapters }
+          : {}),
+        ...(request.blurb ?? effectiveDraft?.blurb ? { blurb: request.blurb ?? effectiveDraft?.blurb } : {}),
+        ...(request.storyBackground ?? effectiveDraft?.storyBackground
+          ? { storyBackground: request.storyBackground ?? effectiveDraft?.storyBackground }
+          : {}),
+        ...(request.worldPremise ?? effectiveDraft?.worldPremise
+          ? { worldPremise: request.worldPremise ?? effectiveDraft?.worldPremise }
+          : {}),
+        ...(request.settingNotes ?? effectiveDraft?.settingNotes
+          ? { settingNotes: request.settingNotes ?? effectiveDraft?.settingNotes }
+          : {}),
+        ...(request.novelOutline ?? effectiveDraft?.novelOutline
+          ? { novelOutline: request.novelOutline ?? effectiveDraft?.novelOutline }
+          : {}),
+        ...(request.protagonist ?? effectiveDraft?.protagonist
+          ? { protagonist: request.protagonist ?? effectiveDraft?.protagonist }
+          : {}),
+        ...(request.supportingCast ?? effectiveDraft?.supportingCast
+          ? { supportingCast: request.supportingCast ?? effectiveDraft?.supportingCast }
+          : {}),
+        ...(request.characterMatrix ?? effectiveDraft?.characterMatrix
+          ? { characterMatrix: request.characterMatrix ?? effectiveDraft?.characterMatrix }
+          : {}),
+        ...(request.characterArc ?? effectiveDraft?.characterArc
+          ? { characterArc: request.characterArc ?? effectiveDraft?.characterArc }
+          : {}),
+        ...(request.relationshipMap ?? effectiveDraft?.relationshipMap
+          ? { relationshipMap: request.relationshipMap ?? effectiveDraft?.relationshipMap }
+          : {}),
+        ...(request.conflictCore ?? effectiveDraft?.conflictCore
+          ? { conflictCore: request.conflictCore ?? effectiveDraft?.conflictCore }
+          : {}),
+        ...(request.volumeOutline ?? effectiveDraft?.volumeOutline
+          ? { volumeOutline: request.volumeOutline ?? effectiveDraft?.volumeOutline }
+          : {}),
+        ...(request.constraints ?? effectiveDraft?.constraints
+          ? { constraints: request.constraints ?? effectiveDraft?.constraints }
+          : {}),
+        ...(request.authorIntent ?? effectiveDraft?.authorIntent
+          ? { authorIntent: request.authorIntent ?? effectiveDraft?.authorIntent }
+          : {}),
+        ...(request.currentFocus ?? effectiveDraft?.currentFocus
+          ? { currentFocus: request.currentFocus ?? effectiveDraft?.currentFocus }
+          : {}),
+      };
+      const toolResult = await tools.createBook(toolInput);
       const metadata = extractToolMetadata(toolResult);
       const createdBookId = typeof toolResult === "object" && toolResult !== null && "bookId" in toolResult
         && typeof (toolResult as { bookId?: unknown }).bookId === "string"

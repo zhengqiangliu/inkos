@@ -79,6 +79,7 @@ function buildBookConfig(input: {
     platform: normalizePlatform(input.platform),
     genre: input.genre ?? "other",
     status: "outlining",
+    creationState: "ready",
     targetChapters: input.targetChapters ?? 200,
     chapterWordCount: input.chapterWordCount ?? 3000,
     ...(input.language ? { language: input.language } : {}),
@@ -90,36 +91,10 @@ function buildBookConfig(input: {
 function buildCreationExternalContext(input: {
   readonly blurb?: string;
   readonly storyBackground?: string;
-  readonly worldPremise?: string;
-  readonly settingNotes?: string;
-  readonly novelOutline?: string;
-  readonly protagonist?: string;
-  readonly supportingCast?: string;
-  readonly characterMatrix?: string;
-  readonly characterArc?: string;
-  readonly relationshipMap?: string;
-  readonly conflictCore?: string;
-  readonly volumeOutline?: string;
-  readonly constraints?: string;
-  readonly authorIntent?: string;
-  readonly currentFocus?: string;
 }): string | undefined {
   const sections = [
     input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
-    input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
-    input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
-    input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
-    input.protagonist ? `## 主角设定\n${input.protagonist}` : undefined,
-    input.supportingCast ? `## 关键角色与势力\n${input.supportingCast}` : undefined,
-    input.characterMatrix ? `## 角色矩阵\n${input.characterMatrix}` : undefined,
-    input.characterArc ? `## 人物弧光\n${input.characterArc}` : undefined,
-    input.relationshipMap ? `## 人物关系\n${input.relationshipMap}` : undefined,
-    input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
-    input.volumeOutline ? `## 卷纲方向\n${input.volumeOutline}` : undefined,
     input.blurb ? `## 简介卖点\n${input.blurb}` : undefined,
-    input.constraints ? `## 创作约束\n${input.constraints}` : undefined,
-    input.authorIntent ? `## 作者意图\n${input.authorIntent}` : undefined,
-    input.currentFocus ? `## 当前聚焦\n${input.currentFocus}` : undefined,
   ].filter((section): section is string => Boolean(section?.trim()));
 
   if (sections.length === 0) {
@@ -181,6 +156,348 @@ function parseIntroMarkdownDraft(input: string): { readonly blurb: string; reado
   return { blurb: blurb.trim(), storyBackground: storyBackground.trim() };
 }
 
+function extractIntroTitleFromMarkdown(input: string): string | undefined {
+  const lines = input.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    const heading = line.match(/^#\s*(.+)$/);
+    if (heading?.[1]?.trim()) return heading[1].trim();
+    const titleLine = line.match(/^(?:title|书名)[:=：]\s*(.+)$/i);
+    if (titleLine?.[1]?.trim()) return titleLine[1].trim();
+  }
+  return undefined;
+}
+
+function parseIntroRevisionOutput(input: string): {
+  readonly title?: string;
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly body: string;
+} {
+  const lines = input.split(/\r?\n/);
+  const bodyLines: string[] = [];
+  let title: string | undefined;
+  let blurb: string | undefined;
+  let storyBackground: string | undefined;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      bodyLines.push(line);
+      continue;
+    }
+
+    const match = trimmed.match(/^(title|blurb|storyBackground|introMarkdown)\s*[:：]\s*(.*)$/i);
+    if (match) {
+      const key = match[1]!.toLowerCase();
+      const value = match[2]?.trim() ?? "";
+      if (key === "title" && value) title = value;
+      if (key === "blurb" && value) blurb = value;
+      if (key === "storybackground" && value) storyBackground = value;
+      if (key === "intromarkdown" && value) bodyLines.push(value);
+      continue;
+    }
+
+    bodyLines.push(line);
+  }
+
+  return {
+    ...(title ? { title } : {}),
+    ...(blurb ? { blurb } : {}),
+    ...(storyBackground ? { storyBackground } : {}),
+    body: bodyLines.join("\n").trim(),
+  };
+}
+
+function findIntroBodyStartIndex(input: string): number {
+  const lines = input.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]?.trim() ?? "";
+    if (!line) continue;
+    const remaining = lines.slice(i).join("\n").trim();
+    if (looksLikeIntroBodyMarkdown(remaining)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function extractIntroMarkdownBody(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return "";
+  if (looksLikeIntroBodyMarkdown(trimmed)) {
+    return trimmed;
+  }
+  const startIndex = findIntroBodyStartIndex(trimmed);
+  if (startIndex < 0) {
+    return "";
+  }
+  return trimmed.split(/\r?\n/).slice(startIndex).join("\n").trim();
+}
+
+export function normalizeIntroRevisionOutput(input: string): string {
+  const parsed = parseIntroRevisionOutput(input);
+  const body = extractIntroMarkdownBody(parsed.body);
+  if (body && looksLikeIntroBodyMarkdown(body)) {
+    return body;
+  }
+  const extractedFromRaw = extractIntroMarkdownBody(input);
+  if (extractedFromRaw && looksLikeIntroBodyMarkdown(extractedFromRaw)) {
+    return extractedFromRaw;
+  }
+  if (parsed.title || parsed.blurb || parsed.storyBackground) {
+    return buildFallbackIntroRevisionOutput({
+      title: parsed.title,
+      blurb: parsed.blurb,
+      storyBackground: parsed.storyBackground,
+    });
+  }
+  return "";
+}
+
+function looksLikeIntroBodyMarkdown(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  if (/^(已|好的|我来|我先|正在|开始|生成|修改|润色|总结|汇报|说明)/.test(trimmed)) return false;
+  return /(^|\n)\s*#\s+/.test(trimmed)
+    || /(^|\n)\s*##\s+(一句话卖点|故事概述|故事走向|主要人物成长路径|核心冲突|核心价值观)/.test(trimmed);
+}
+
+function hasMeaningfulIntroMarkdown(content: string): boolean {
+  const trimmed = content.trim();
+  if (!looksLikeIntroBodyMarkdown(trimmed)) return false;
+  const requiredSections = [
+    "一句话卖点",
+    "故事概述",
+    "故事走向",
+    "主要人物成长路径",
+    "核心冲突",
+    "核心价值观",
+  ];
+  const sectionCount = requiredSections.filter((section) => trimmed.includes(section)).length;
+  const meaningfulBodyLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) =>
+      line
+      && !/^#/.test(line)
+      && !/^-+\s*$/.test(line)
+      && line !== "-"
+      && line !== "—"
+      && line !== "…"
+      && line !== "..."
+      && !/^(题材|平台|主题)[:：]/.test(line),
+    );
+  const substantiveLines = meaningfulBodyLines.filter((line) => line.length >= 8);
+  return sectionCount >= 4 && substantiveLines.length >= 4;
+}
+
+function scoreIntroMarkdownCandidate(content: string): number {
+  const trimmed = content.trim();
+  if (!looksLikeIntroBodyMarkdown(trimmed)) return Number.NEGATIVE_INFINITY;
+  const requiredSections = [
+    "一句话卖点",
+    "故事概述",
+    "故事走向",
+    "主要人物成长路径",
+    "核心冲突",
+    "核心价值观",
+  ];
+  const sectionCount = requiredSections.filter((section) => trimmed.includes(section)).length;
+  const concreteLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) =>
+      line
+      && !/^#/.test(line)
+      && !/^-+\s*$/.test(line)
+      && line !== "-"
+      && line !== "—"
+      && line !== "…"
+      && line !== "..."
+      && !/^(题材|平台|主题)[:：]/.test(line),
+    );
+  const substantiveCount = concreteLines.filter((line) => line.length >= 8).length;
+  const placeholderCount = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line === "-" || line === "—" || line === "…" || line === "..." || /^-\s*$/.test(line))
+    .length;
+  return sectionCount * 100 + substantiveCount * 12 + Math.min(500, trimmed.length / 2) - placeholderCount * 40;
+}
+
+function normalizeIntroMarkdownCandidate(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return "";
+  if (looksLikeIntroBodyMarkdown(trimmed)) return trimmed;
+  const startIndex = findIntroBodyStartIndex(trimmed);
+  if (startIndex < 0) return "";
+  return trimmed.split(/\r?\n/).slice(startIndex).join("\n").trim();
+}
+
+export function pickBestIntroMarkdownCandidate(candidates: ReadonlyArray<string | null | undefined>): string {
+  let best = "";
+  let bestScore = Number.NEGATIVE_INFINITY;
+  for (const candidate of candidates) {
+    const normalized = normalizeIntroMarkdownCandidate(candidate?.trim() ?? "");
+    if (!normalized) continue;
+    const score = scoreIntroMarkdownCandidate(normalized);
+    if (score > bestScore) {
+      best = normalized;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+export function buildFallbackIntroRevisionOutput(parsed: {
+  readonly title?: string;
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+}): string {
+  return buildIntroBodyMarkdown({
+    title: parsed.title,
+    blurb: parsed.blurb,
+    storyBackground: parsed.storyBackground,
+  });
+}
+
+function createIntroRevisionStreamNormalizer(): (chunk: string) => string {
+  let carry = "";
+  return (chunk: string): string => {
+    if (!chunk) return "";
+    const combined = carry + chunk;
+    const lines = combined.split(/\r?\n/);
+    carry = lines.pop() ?? "";
+    const output: string[] = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        output.push(line);
+        continue;
+      }
+      const match = trimmed.match(/^(title|blurb|storyBackground|introMarkdown)\s*[:：]\s*(.*)$/i);
+      if (match) {
+        const key = match[1]!.toLowerCase();
+        const value = match[2]?.trim() ?? "";
+        if (key === "intromarkdown" && value) {
+          output.push(value);
+        }
+        continue;
+      }
+      output.push(line);
+    }
+    return output.join("\n");
+  };
+}
+
+function buildIntroBodyMarkdown(params: {
+  readonly title?: string;
+  readonly genre?: string;
+  readonly platform?: string;
+  readonly theme?: string;
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly plotDirection?: string;
+  readonly characterGrowth?: string;
+  readonly coreConflict?: string;
+  readonly coreValue?: string;
+}): string {
+  const sections = [
+    "# 简介正文",
+    params.genre?.trim() ? `- 题材：${params.genre.trim()}` : undefined,
+    params.platform?.trim() ? `- 平台：${params.platform.trim()}` : undefined,
+    params.theme?.trim() ? `- 主题：${params.theme.trim()}` : undefined,
+    "",
+    `## 一句话卖点\n${params.blurb?.trim() || "-"}`,
+    `## 故事概述\n${params.storyBackground?.trim() || "-"}`,
+    `## 故事走向\n${params.plotDirection?.trim() || "-"}`,
+    `## 主要人物成长路径\n${params.characterGrowth?.trim() || "-"}`,
+    `## 核心冲突\n${params.coreConflict?.trim() || "-"}`,
+    `## 核心价值观\n${params.coreValue?.trim() || "-"}`,
+  ].filter((line): line is string => Boolean(line));
+  return sections.join("\n\n");
+}
+
+function stripLeadingBookTitleHeading(markdown: string, title?: string): string {
+  const trimmed = markdown.trim();
+  if (!trimmed) return trimmed;
+  const normalizedTitle = title?.trim();
+  if (!normalizedTitle) return trimmed;
+  const lines = trimmed.split(/\r?\n/);
+  const firstLine = lines[0]?.trim() ?? "";
+  if (firstLine === `# ${normalizedTitle}` || firstLine === `## ${normalizedTitle}`) {
+    return lines.slice(1).join("\n").replace(/^\s*\r?\n/, "").trim();
+  }
+  return trimmed;
+}
+
+function normalizeWizardMarkdownOutput(
+  step: BookCreationWizardStep,
+  markdown: string,
+  existingDraft?: BookCreationDraft,
+): string {
+  const trimmed = markdown.trim();
+  if (!trimmed) return trimmed;
+  if (step === "intro" || step === "world" || step === "outline") {
+    return stripLeadingBookTitleHeading(trimmed, existingDraft?.title);
+  }
+  return trimmed;
+}
+
+function looksLikeWizardStepMarkdown(
+  step: Exclude<BookCreationWizardStep, "intro">,
+  content: string,
+): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+
+  switch (step) {
+    case "world":
+      return /(^|\n)\s*(#|##|###|[-*])?\s*(世界观|补充设定|World premise|Setting notes)/m.test(trimmed) || trimmed.length >= 40;
+    case "outline":
+      return /(^|\n)\s*(#|##|###|[-*])?\s*(大纲|核心冲突|小说大纲|Outline|Conflict)/m.test(trimmed) || trimmed.length >= 40;
+    case "volume":
+      return /(^|\n)\s*(#|##|###|[-*])?\s*(卷纲|Volume)/m.test(trimmed) || trimmed.length >= 40;
+    case "characters":
+      return /(^|\n)\s*(#|##|###|[-*])?\s*(主角|配角|角色矩阵|Protagonist|Supporting cast|Character matrix)/m.test(trimmed) || trimmed.length >= 40;
+    case "arc":
+      return /(^|\n)\s*(#|##|###|[-*])?\s*(人物弧光|Character arc)/m.test(trimmed)
+        && /(^|\n)\s*(###|##|[-*]|\d+\.)\s*(核心弧光|起点状态|成长转折|终点状态)/m.test(trimmed);
+    case "relation":
+      return /(^|\n)\s*(#|##|###)?\s*(人物关系|Relationship map)/m.test(trimmed)
+        && /(^|\n)\s*(###|##|[-*]|\d+\.)\s*(核心关系|对立关系|隐藏联系|潜在冲突|Core relationships|Opposing relationships|Hidden links|Potential conflicts)/m.test(trimmed);
+  }
+}
+
+function stripWizardPreamble(
+  step: Exclude<BookCreationWizardStep, "intro">,
+  markdown: string,
+): string {
+  const trimmed = markdown.trim();
+  if (!trimmed) return trimmed;
+
+  const lines = trimmed.split(/\r?\n/);
+  let startIndex = -1;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const candidate = lines.slice(i).join("\n").trim();
+    if (!candidate) continue;
+    if (looksLikeWizardStepMarkdown(step, candidate)) {
+      startIndex = i;
+      break;
+    }
+  }
+
+  if (startIndex <= 0) return trimmed;
+
+  const prefix = lines.slice(0, startIndex).map((line) => line.trim()).filter(Boolean);
+  const hasPreambleSignal = prefix.some((line) => /^(我来|我先|先来|首先|接下来|由于|根据|基于|让我|让我们|分析|思考|推断|考虑|说明|总结|汇报|处理|正在|将要|计划|下面|如下|为了)/.test(line)
+    || /思考|分析|根据|基于|推断|先看|先审|我会|我将|打算|计划|说明|总结|汇报|确认|看看/.test(line));
+  if (!hasPreambleSignal) return trimmed;
+
+  return lines.slice(startIndex).join("\n").trim();
+}
+
 function buildVolumeOutlineContext(input: {
   readonly novelOutline?: string;
   readonly conflictCore?: string;
@@ -202,20 +519,26 @@ function buildVolumeOutlineContext(input: {
 }
 
 function buildCharacterArcContext(input: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
   readonly characterArc?: string;
   readonly protagonist?: string;
   readonly supportingCast?: string;
   readonly conflictCore?: string;
   readonly novelOutline?: string;
+  readonly volumeOutline?: string;
   readonly worldPremise?: string;
   readonly settingNotes?: string;
 }): string | undefined {
   const sections = [
+    input.blurb ? `## 简介 / 卖点\n${input.blurb}` : undefined,
+    input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
     input.characterArc ? `## 人物弧光草案\n${input.characterArc}` : undefined,
     input.protagonist ? `## 主角设定\n${input.protagonist}` : undefined,
     input.supportingCast ? `## 关键配角 / 势力\n${input.supportingCast}` : undefined,
     input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
     input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
+    input.volumeOutline ? `## 卷纲规划\n${input.volumeOutline}` : undefined,
     input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
     input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
   ].filter((section): section is string => Boolean(section?.trim()));
@@ -227,18 +550,62 @@ function buildCharacterArcContext(input: {
   return sections.join("\n\n");
 }
 
+function buildRelationshipMapContext(input: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly relationshipMap?: string;
+  readonly protagonist?: string;
+  readonly supportingCast?: string;
+  readonly characterArc?: string;
+  readonly conflictCore?: string;
+  readonly novelOutline?: string;
+  readonly volumeOutline?: string;
+  readonly worldPremise?: string;
+  readonly settingNotes?: string;
+}): string | undefined {
+  const sections = [
+    input.blurb ? `## 简介 / 卖点\n${input.blurb}` : undefined,
+    input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
+    input.relationshipMap ? `## 人物关系草案\n${input.relationshipMap}` : undefined,
+    input.protagonist ? `## 主角设定\n${input.protagonist}` : undefined,
+    input.supportingCast ? `## 关键配角 / 势力\n${input.supportingCast}` : undefined,
+    input.characterArc ? `## 人物弧光\n${input.characterArc}` : undefined,
+    input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
+    input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
+    input.volumeOutline ? `## 卷纲规划\n${input.volumeOutline}` : undefined,
+    input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
+    input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
+  ].filter((section): section is string => Boolean(section?.trim()));
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join("\n\n");
+}
+
+function resolveTruthArtifactTarget(fileName: string): { readonly dir: "story" | "wizard"; readonly fileName: string } {
+  const trimmed = fileName.trim();
+  if (/人物关系页\.md$/i.test(trimmed) || /relation\.md$/i.test(trimmed) || /^relationship_map\.md$/i.test(trimmed)) {
+    return { dir: "wizard", fileName: "relationship_map.md" };
+  }
+  if (/人物弧光页\.md$/i.test(trimmed) || /arc\.md$/i.test(trimmed) || /^character_arc\.md$/i.test(trimmed)) {
+    return { dir: "wizard", fileName: "character_arc.md" };
+  }
+  return { dir: "story", fileName: trimmed };
+}
+
 type WizardMode = "generate" | "modify";
 type IntroRevisionMode = "generate" | "revise" | "polish";
 
 const WIZARD_STEP_FIELDS: Record<BookCreationWizardStep, ReadonlyArray<string>> = {
-  intro: ["blurb", "storyBackground"],
+  intro: ["blurb", "storyBackground", "introMarkdown"],
   world: ["worldPremise", "settingNotes"],
   outline: ["novelOutline", "conflictCore"],
   volume: ["volumeOutline"],
   characters: ["protagonist", "supportingCast", "characterMatrix"],
   arc: ["characterArc"],
   relation: ["relationshipMap"],
-  review: ["title", "genre", "platform", "language", "targetChapters", "chapterWordCount"],
 };
 
 const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
@@ -251,6 +618,7 @@ const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
     framework: ["一句话卖点", "故事背景", "主角处境", "引爆点", "核心悬念"],
     constraints: [
       "只补当前页，不要扩写世界观、卷纲、角色矩阵、关系等其他页。",
+      "正文首行禁止显示书名，不要把作品名写成 Markdown 一级标题。",
       "一句话卖点必须能直接用于书籍简介或封面文案开头。",
       "背景和引爆点要具体，不要散文式抒情。",
     ],
@@ -260,17 +628,30 @@ const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
     framework: ["时间 / 空间背景", "规则体系", "势力 / 阵营", "资源 / 权力结构", "不可违背的世界规则"],
     constraints: [
       "只补世界观页，不要写故事大纲或人物弧光。",
+      "正文首行禁止显示书名，不要把作品名写成 Markdown 一级标题。",
       "世界规则必须可检查、可执行、可复用。",
       "势力和资源结构必须服务冲突，不要堆设定名词。",
     ],
   },
   outline: {
     title: "小说大纲",
-    framework: ["开局", "发展", "转折", "高潮", "结局方向", "主角修行路 / 成长路", "大事件时间线（按章节）", "结构设计", "卡点设计（按章节）"],
+    framework: [
+      "故事主线",
+      "核心冲突",
+      "结构设计",
+      "大事件时间线（按剧情顺序）",
+      "落点设计（关键章节 / 关键场景收束）",
+      "卡点设计（章节中段 / 转折点 / 追读点）",
+      "主角成长路径",
+    ],
     constraints: [
-      "只补大纲页，不要写卷纲或人物关系页。",
-      "大事件时间线和卡点设计必须按章节或章节段落排列。",
+      "只补大纲页，不要写卷级结构或人物关系页。",
+      "正文首行禁止显示书名，不要把作品名写成 Markdown 一级标题。",
+      "大事件时间线必须按剧情顺序排列，不能按卷拆分。",
       "结构设计要说明前中后段的功能分配。",
+      "落点设计必须写清楚关键章节或关键场景的收尾钩子、反转或悬念。",
+      "卡点设计必须写清楚章节中段、转折点和追读点。",
+      "不要出现每卷、卷1、卷2、卷末收束等表述。",
     ],
   },
   volume: {
@@ -302,39 +683,46 @@ const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
     constraints: [
       "只补人物弧光页，不要扩写角色矩阵或世界观。",
       "必须按“核心弧光 -> 起点状态 -> 成长转折 -> 终点状态”的顺序输出。",
+      "必须围绕角色逐个展开，至少写出主角和 2 个关键角色的完整弧光，不要只给总框架。",
+      "每个角色都要写明从哪里来、被什么推动、发生了什么变化、最后成为什么。",
       "起点状态必须明确写出性格缺陷、内心恐惧、错误信念。",
       "成长转折必须明确写出触发事件、内心挣扎、觉醒时刻、持续考验。",
       "终点状态必须明确写出性格蜕变、克服恐惧、新信念、残留痕迹。",
       "每一项都要具体、可落地、可写进章节，不要空泛总结。",
+      "必须直接输出可落盘的 Markdown 正文，禁止输出任何“已重写”“已保存”“相比原内容”“总结”“汇报”之类说明。",
+      "必须基于简介、故事背景、世界观、小说大纲、卷纲规划、主角和配角去写，不得只复述当前页框架。",
+      "必须写出至少 3 条具体变化线索或事件触发点，不能只写标题和占位符。",
+      "参考结构应接近：角色名 -> 核心弧光 -> 起点状态 -> 成长转折 -> 终点状态；每个小节都要写满具体内容。",
     ],
   },
   relation: {
     title: "人物关系",
-    framework: ["关系矩阵", "核心关系线", "关系驱动力", "关系冲突 / 转折", "关系变化方向"],
+    framework: ["核心关系", "对立关系", "隐藏联系", "潜在冲突"],
     constraints: [
       "只补人物关系页，不要写大纲或卷纲。",
+      "不要询问用户“是不是生成人物关系”或任何确认问题，直接生成正文。",
+      "必须围绕角色逐个写出关系链，至少覆盖主角与 2 个关键角色，不要只给抽象关系框架。",
       "关系必须能推动剧情，不只是身份表。",
-      "关系变化方向要明确，便于后续章节拆解。",
-    ],
-  },
-  review: {
-    title: "最终确认",
-    framework: ["完整性检查", "一致性检查", "缺口修补", "可创建确认"],
-    constraints: [
-      "只做最终核对，不要再扩写新内容。",
-      "如果还有缺口，明确指出缺口并给出最小修补建议。",
-      "确认通过后才能创建书籍。",
+      "必须按“核心关系 -> 对立关系 -> 隐藏联系 -> 潜在冲突”的顺序输出。",
+      "每条关系都要尽量采用“角色A → 角色B：具体关系内容”的写法，直接写实质，不要只写标签。",
+      "必须直接输出可落盘的 Markdown 正文，禁止输出任何“已重写”“已保存”“相比原内容”“总结”“汇报”之类说明。",
+      "必须基于简介、故事背景、世界观、小说大纲、卷纲规划、主角和配角去写，不得只复述当前页框架。",
+      "必须写出至少 6 条具体关系条目，且至少包含 2 条对立关系、2 条隐藏联系或潜在冲突。",
+      "隐藏联系必须带出旧案、把柄、身份秘密、误解来源或历史伤痕中的至少一种。",
+      "潜在冲突必须说明一旦真相曝光或利益变化，关系会如何反转，并能直接转成后续剧情事件。",
+      "参考结构应接近：核心关系 -> 对立关系 -> 隐藏联系 -> 潜在冲突；每条关系都要写具体互动、代价和变化。",
     ],
   },
 };
 
 const INTRO_GENERATION_PROMPT = {
   title: "简介 / 故事背景",
-  framework: ["一句话卖点", "故事背景", "主角处境", "引爆点", "核心悬念"],
+  framework: ["书名", "一句话卖点", "故事概述", "故事走向", "主要人物成长路径", "核心冲突", "核心价值观"],
   constraints: [
     "只生成当前页，不要扩写世界观、卷纲、角色矩阵、关系等其他页。",
+    "书名信息必须明确，但正文首行禁止显示书名，不要把书名写成 Markdown 一级标题。",
     "一句话卖点必须能直接用于书籍简介或封面文案开头。",
-    "故事背景要具体，不能只写抽象设定。",
+    "故事概述、故事走向、人物成长路径、核心冲突、核心价值观要具体，不能只写抽象设定。",
     "不要输出生成说明、分析过程、结尾总结或建议下一步。",
   ],
 } as const;
@@ -344,7 +732,8 @@ const INTRO_REVISION_SYSTEM_PROMPT = [
   "你只处理简介页，不要把内容扩写到世界观、角色矩阵、卷纲或章节大纲。",
   "如果用户要求按题材生成，要优先遵守题材约束。",
   "如果用户要求修改或润色，要在保留原意的基础上优化表达和钩子。",
-  "必须输出结构化字段，至少返回 blurb 或 storyBackground 之一。",
+  "必须输出结构化字段，至少返回 blurb、storyBackground、introMarkdown 之一。",
+  "不要反问用户确认参数；如果信息足够，直接生成完整正文或直接修改正文。",
 ].join(" ");
 
 function getWizardStepTemplate(step: BookCreationWizardStep) {
@@ -372,16 +761,33 @@ export function buildWizardPrompt(
         worldPremise: existingDraft?.worldPremise,
         settingNotes: existingDraft?.settingNotes,
       })
-    : step === "arc"
+        : step === "arc"
       ? buildCharacterArcContext({
+          blurb: existingDraft?.blurb,
+          storyBackground: existingDraft?.storyBackground,
           characterArc: existingDraft?.characterArc,
           protagonist: existingDraft?.protagonist,
           supportingCast: existingDraft?.supportingCast,
           conflictCore: existingDraft?.conflictCore,
           novelOutline: existingDraft?.novelOutline,
+          volumeOutline: existingDraft?.volumeOutline,
           worldPremise: existingDraft?.worldPremise,
           settingNotes: existingDraft?.settingNotes,
         })
+      : step === "relation"
+        ? buildRelationshipMapContext({
+            blurb: existingDraft?.blurb,
+            storyBackground: existingDraft?.storyBackground,
+            relationshipMap: existingDraft?.relationshipMap,
+            protagonist: existingDraft?.protagonist,
+            supportingCast: existingDraft?.supportingCast,
+            characterArc: existingDraft?.characterArc,
+            conflictCore: existingDraft?.conflictCore,
+            novelOutline: existingDraft?.novelOutline,
+            volumeOutline: existingDraft?.volumeOutline,
+            worldPremise: existingDraft?.worldPremise,
+            settingNotes: existingDraft?.settingNotes,
+          })
     : undefined;
   const modeLabel = step === "intro" && mode === "generate"
     ? "生成正式简介"
@@ -416,10 +822,11 @@ export function buildWizardPrompt(
     "",
     "约束：",
     ...template.constraints.map((item, index) => `${index + 1}. ${item}`),
-    "4. blurb：用于书籍简介或卖点开头，必须抓人，不能是说明书语气。",
-    "5. storyBackground：交代故事起点、冲突环境和引爆条件，必须具体。",
-    `6. 只允许更新以下字段：${allowedFields}。其他字段必须保持草案原值。`,
-    "7. 多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。",
+    `4. 只允许更新以下字段：${allowedFields}。其他字段必须保持草案原值。`,
+    "5. 多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。",
+    (step === "intro" || step === "world" || step === "outline")
+      ? "6. 正文必须直接从当前页标题或当前页结构进入，禁止以书名作为首行标题。"
+      : "",
     "",
     draftBlock,
     "",
@@ -460,6 +867,12 @@ function applyWizardStepDraft(
     switch (key) {
       case "blurb":
         draft.blurb = text;
+        break;
+      case "introMarkdown":
+        draft.draftFields = {
+          ...(draft.draftFields ?? {}),
+          introMarkdown: text,
+        };
         break;
       case "storyBackground":
         draft.storyBackground = text;
@@ -528,6 +941,9 @@ async function runWizardDraftTool(params: {
   readonly mode: WizardMode;
   readonly input: string;
   readonly existingDraft?: BookCreationDraft;
+  readonly onThinkingDelta?: (text: string) => void;
+  readonly onDraftDelta?: (text: string) => void;
+  readonly onDraftRawDelta?: (text: string) => void;
 }): Promise<{
   readonly draft: BookCreationDraft;
   readonly responseText: string;
@@ -550,6 +966,27 @@ async function runWizardDraftTool(params: {
     };
   }
 
+  const stepTitle = getWizardStepTemplate(step).title;
+  const thinkingLead = [
+    `正在处理当前${stepTitle}页正文。`,
+    step === "world"
+      ? "正在整理世界规则、空间气氛与关键势力。"
+      : step === "outline"
+        ? "正在收束主线结构、章节卡点与推进节奏。"
+        : step === "volume"
+          ? "正在规划分卷目标、节奏分段与关键转折。"
+          : step === "characters"
+            ? "正在梳理主角、配角与功能分工。"
+            : step === "arc"
+              ? "正在组织角色弧光、成长拐点与终局变化。"
+              : step === "relation"
+                ? "正在搭建人物关系、冲突链与剧情引擎。"
+                : "正在收束当前页结构、核心设定与字段约束。",
+  ];
+  for (const line of thinkingLead) {
+    params.onThinkingDelta?.(line);
+  }
+
   const result = await chatWithTools(
     pipeline.config.client,
     pipeline.config.model,
@@ -558,11 +995,12 @@ async function runWizardDraftTool(params: {
         role: "system",
         content: [
           "你是 InkOS 的建书向导助手。",
-          "你只能处理当前步骤，并且只能更新当前页允许的字段。",
-          "不要改写其他页面内容。",
-          "如果信息不足，可以给出合理默认值，但必须保持当前页框架完整。",
-          "题材库约束优先于通用表达，必须遵守题材规则和禁忌。",
-        ].join(" "),
+        "你只能处理当前步骤，并且只能更新当前页允许的字段。",
+        "不要改写其他页面内容。",
+        "如果信息不足，可以给出合理默认值，但必须保持当前页框架完整。",
+        "题材库约束优先于通用表达，必须遵守题材规则和禁忌。",
+        "你必须输出当前页正文，不要输出总结、汇报、保存说明或改写说明。",
+      ].join(" "),
       },
       {
         role: "user",
@@ -573,18 +1011,33 @@ async function runWizardDraftTool(params: {
     { temperature: 0.35 },
   );
 
+  if (result.content) {
+    params.onDraftRawDelta?.(result.content);
+    params.onDraftDelta?.(result.content);
+  }
   const toolArgs = parseToolCallArguments(result.toolCalls[0]);
   const parsedIntro = step === "intro" ? parseIntroMarkdownDraft(input) : null;
   const normalizedArgs = step === "intro" ? {
+    title: typeof toolArgs.title === "string" ? toolArgs.title : existingDraft?.title ?? "",
     blurb: typeof toolArgs.blurb === "string" ? toolArgs.blurb : parsedIntro?.blurb ?? "",
     storyBackground: typeof toolArgs.storyBackground === "string" ? toolArgs.storyBackground : parsedIntro?.storyBackground ?? "",
   } : toolArgs;
   const draft = applyWizardStepDraft(step, existingDraft, concept, normalizedArgs);
+  const normalizedDraftRaw = normalizeWizardMarkdownOutput(step, result.content?.trim() || "", draft);
+  const cleanedDraftRaw = step === "arc" || step === "relation"
+    ? stripWizardPreamble(step, normalizedDraftRaw || result.content?.trim() || "")
+    : normalizedDraftRaw;
+  if (step === "intro" && normalizedDraftRaw) {
+    draft.draftFields = {
+      ...(draft.draftFields ?? {}),
+      introMarkdown: normalizedDraftRaw,
+    };
+  }
   return {
     draft,
-    responseText: result.content?.trim() || "已更新当前页内容。",
+    responseText: cleanedDraftRaw || normalizedDraftRaw || result.content?.trim() || "已更新当前页内容。",
     fieldsUpdated: Object.keys(normalizedArgs).filter((key) => WIZARD_STEP_FIELDS[step].includes(key)),
-    draftRaw: result.content?.trim() || "",
+    draftRaw: cleanedDraftRaw || normalizedDraftRaw,
   };
 }
 
@@ -594,13 +1047,19 @@ async function runIntroRevisionTool(params: {
   readonly existingDraft?: BookCreationDraft;
   readonly revisionKind?: IntroRevisionMode;
   readonly themeGenre?: string;
+  readonly writingLanguage?: "zh" | "en";
+  readonly targetChapters?: number;
+  readonly chapterWordCount?: number;
+  readonly onThinkingDelta?: (text: string) => void;
+  readonly onDraftDelta?: (text: string) => void;
+  readonly onDraftRawDelta?: (text: string) => void;
 }): Promise<{
   readonly draft: BookCreationDraft;
   readonly responseText: string;
   readonly fieldsUpdated: ReadonlyArray<string>;
   readonly draftRaw: string;
 }> {
-  const { pipeline, input, existingDraft, revisionKind = "revise", themeGenre } = params;
+  const { pipeline, input, existingDraft, revisionKind = "revise", themeGenre, writingLanguage, targetChapters, chapterWordCount } = params;
   const concept = existingDraft?.concept ?? input;
   const projectRoot = pipeline.config?.projectRoot;
   const genreContext = themeGenre && projectRoot
@@ -618,30 +1077,106 @@ async function runIntroRevisionTool(params: {
     };
   }
 
-  const result = await chatWithTools(
+  const thinkingLead = [
+    revisionKind === "polish" ? "正在润色简介正文。" : revisionKind === "generate" ? "正在生成简介正文。" : "正在修改简介正文。",
+    "正在收束书名、卖点、故事概述、故事走向、人物成长、核心冲突和核心价值观。",
+  ];
+  for (const line of thinkingLead) {
+    params.onThinkingDelta?.(line);
+  }
+  const emitDraftDelta = createIntroRevisionStreamNormalizer();
+  let streamedDraft = "";
+
+  const result = await chatCompletion(
     pipeline.config.client,
     pipeline.config.model,
     [
-      { role: "system", content: INTRO_REVISION_SYSTEM_PROMPT },
+      { role: "system", content: [INTRO_REVISION_SYSTEM_PROMPT, "你只能输出完整正文，不要输出工具调用，不要输出解释说明。"].join(" ") },
       { role: "user", content: buildIntroRevisionPrompt({
         mode: revisionKind,
         userMessage: input,
         existingDraft,
         genreContext,
+        writingLanguage,
+        targetChapters,
+        chapterWordCount,
       }) },
     ],
-    [SAVE_BOOK_WIZARD_STEP_TOOL],
-    { temperature: revisionKind === "polish" ? 0.25 : 0.35 },
+    {
+      temperature: revisionKind === "polish" ? 0.25 : 0.35,
+      onTextDelta: (text) => {
+        const normalizedChunk = emitDraftDelta(text);
+        if (normalizedChunk) {
+          streamedDraft += normalizedChunk;
+          params.onDraftDelta?.(normalizedChunk);
+          params.onDraftRawDelta?.(normalizedChunk);
+        }
+      },
+    },
   );
 
-  const toolArgs = parseToolCallArguments(result.toolCalls[0]);
+  const rawDraft = result.content.trim();
+  const normalizedStreamDraft = normalizeIntroRevisionOutput(streamedDraft);
+  const normalizedDraft = stripLeadingBookTitleHeading(
+    pickBestIntroMarkdownCandidate([
+      normalizedStreamDraft,
+      normalizeIntroRevisionOutput(rawDraft),
+      rawDraft,
+    ]),
+    extractIntroTitleFromMarkdown(rawDraft) ?? existingDraft?.title,
+  );
+  const parsedIntro = parseIntroMarkdownDraft(normalizedDraft);
+  const parsedTitle = extractIntroTitleFromMarkdown(normalizedDraft) ?? existingDraft?.title?.trim();
   const normalizedArgs: Record<string, string> = {};
-  for (const [key, value] of Object.entries(toolArgs)) {
-    if (value === undefined || value === null) continue;
-    normalizedArgs[key] = typeof value === "string" ? value : String(value);
+  if (parsedTitle) normalizedArgs.title = parsedTitle;
+  if (parsedIntro.blurb) normalizedArgs.blurb = parsedIntro.blurb;
+  if (parsedIntro.storyBackground) normalizedArgs.storyBackground = parsedIntro.storyBackground;
+  if (normalizedDraft) normalizedArgs.introMarkdown = normalizedDraft;
+
+  if (!normalizedArgs.title && existingDraft?.title?.trim()) {
+    normalizedArgs.title = existingDraft.title.trim();
+  }
+  if (!normalizedArgs.introMarkdown) {
+    const introSummary = [
+      normalizedArgs.blurb || existingDraft?.blurb,
+      normalizedArgs.storyBackground || existingDraft?.storyBackground,
+      normalizedArgs.title || existingDraft?.title ? `书名：${normalizedArgs.title || existingDraft?.title}` : undefined,
+      existingDraft?.genreAlias ? `题材别名：${existingDraft.genreAlias}` : undefined,
+    ].filter((item): item is string => Boolean(item));
+    normalizedArgs.introMarkdown = buildIntroBodyMarkdown({
+      title: normalizedArgs.title || existingDraft?.title,
+      genre: themeGenre ?? existingDraft?.genre,
+      platform: existingDraft?.platform,
+      theme: existingDraft?.genreAlias ?? themeGenre ?? existingDraft?.genre,
+      blurb: normalizedArgs.blurb || existingDraft?.blurb,
+      storyBackground: normalizedArgs.storyBackground || existingDraft?.storyBackground,
+      plotDirection: introSummary.join("；"),
+      characterGrowth: existingDraft?.characterArc,
+      coreConflict: existingDraft?.conflictCore,
+      coreValue: existingDraft?.constraints,
+    });
   }
 
   const draft = applyFieldsToDraft(existingDraft, normalizedArgs, concept);
+  draft.worldPremise = existingDraft?.worldPremise;
+  draft.settingNotes = existingDraft?.settingNotes;
+  draft.novelOutline = existingDraft?.novelOutline;
+  draft.protagonist = existingDraft?.protagonist;
+  draft.supportingCast = existingDraft?.supportingCast;
+  draft.characterMatrix = existingDraft?.characterMatrix;
+  draft.characterArc = existingDraft?.characterArc;
+  draft.relationshipMap = existingDraft?.relationshipMap;
+  draft.conflictCore = existingDraft?.conflictCore;
+  draft.volumeOutline = existingDraft?.volumeOutline;
+  draft.constraints = existingDraft?.constraints;
+  draft.authorIntent = existingDraft?.authorIntent;
+  draft.currentFocus = existingDraft?.currentFocus;
+  if (normalizedArgs.introMarkdown) {
+    draft.draftFields = {
+      ...(draft.draftFields ?? {}),
+      introMarkdown: normalizedArgs.introMarkdown,
+    };
+  }
   if (themeGenre?.trim()) {
     draft.genre = themeGenre.trim();
     draft.mappedGenreId = draft.mappedGenreId ?? themeGenre.trim();
@@ -652,11 +1187,11 @@ async function runIntroRevisionTool(params: {
   return {
     draft: {
       ...draft,
-      readyToCreate: Boolean(draft.title && draft.genre && draft.platform),
+      readyToCreate: false,
     },
-    responseText: result.content?.trim() || (revisionKind === "polish" ? "已润色简介与故事背景。" : "已修改简介与故事背景。"),
-    fieldsUpdated: Object.keys(normalizedArgs).filter((key) => ["blurb", "storyBackground", "genre", "genreAlias", "genreSource", "mappedGenreId"].includes(key)),
-    draftRaw: result.content?.trim() || "",
+    responseText: normalizedDraft || (revisionKind === "polish" ? "已润色简介与故事背景。" : "已修改简介与故事背景。"),
+    fieldsUpdated: Object.keys(normalizedArgs).filter((key) => ["title", "blurb", "storyBackground", "introMarkdown", "genre", "genreAlias", "genreSource", "mappedGenreId"].includes(key)),
+    draftRaw: normalizedDraft,
   };
 }
 
@@ -855,29 +1390,17 @@ async function withPipelineInteractionTelemetry<T extends { chapterNumber?: numb
 
 const CREATE_BOOK_TOOL: ToolDefinition = {
   name: "create_book",
-  description: "根据用户描述生成建书参数。系统会将参数渲染为可编辑表单，用户确认后建书。",
+  description: "根据用户简介创建书籍壳。只保存简介 / 故事背景，不生成世界观、大纲或角色设定。",
   parameters: {
     type: "object",
     properties: {
       title: { type: "string", description: "书名" },
       genre: { type: "string", description: "题材标识，如 xuanhuan, urban, romance, scifi, mystery" },
       platform: { type: "string", enum: ["tomato", "qidian", "feilu", "other"], description: "发布平台" },
-      targetChapters: { type: "number", description: "目标章数，默认 200" },
-      chapterWordCount: { type: "number", description: "每章字数，默认 3000" },
       language: { type: "string", enum: ["zh", "en"], description: "写作语言，默认 zh" },
       brief: { type: "string", description: "创意简述，会传给 Architect 智能体生成完整的世界观、主角、冲突等 foundation 文件。把用户提到的所有创意要素都写进这里。" },
       storyBackground: { type: "string", description: "简介 / 故事背景" },
-      worldPremise: { type: "string", description: "世界观" },
-      novelOutline: { type: "string", description: "小说大纲" },
-      volumeOutline: { type: "string", description: "卷纲规划" },
-      protagonist: { type: "string", description: "主角 / 配角" },
-      supportingCast: { type: "string", description: "配角" },
-      characterMatrix: { type: "string", description: "人物矩阵 / 人物弧光" },
-      characterArc: { type: "string", description: "核心弧光" },
-      relationshipMap: { type: "string", description: "人物关系" },
-      settingNotes: { type: "string", description: "补充设定" },
-      conflictCore: { type: "string", description: "核心冲突" },
-      constraints: { type: "string", description: "创作约束" },
+      introMarkdown: { type: "string", description: "简介正文 Markdown" },
     },
     required: ["title", "genre", "platform", "brief"],
   },
@@ -946,6 +1469,13 @@ function applyFieldsToDraft(
       case "brief":
         draft.blurb = value;
         break;
+      case "introMarkdown":
+        draft.introMarkdown = value;
+        draft.draftFields = {
+          ...(draft.draftFields ?? {}),
+          introMarkdown: value,
+        };
+        break;
       case "storyBackground":
         draft.storyBackground = value;
         break;
@@ -1005,13 +1535,16 @@ function buildLegacyDraftUserContent(input: string, existingDraft?: BookCreation
   ].join("\n");
 }
 
-function buildIntroRevisionPrompt(params: {
+export function buildIntroRevisionPrompt(params: {
   readonly mode: IntroRevisionMode;
   readonly userMessage: string;
   readonly existingDraft?: BookCreationDraft;
   readonly genreContext?: WizardGenreContext | null;
+  readonly writingLanguage?: "zh" | "en";
+  readonly targetChapters?: number;
+  readonly chapterWordCount?: number;
 }): string {
-  const { mode, userMessage, existingDraft, genreContext } = params;
+  const { mode, userMessage, existingDraft, genreContext, writingLanguage, targetChapters, chapterWordCount } = params;
   const draftBlock = existingDraft
     ? ["## 当前草案", JSON.stringify(existingDraft, null, 2)].join("\n")
     : "## 当前草案\n（空）";
@@ -1040,21 +1573,29 @@ function buildIntroRevisionPrompt(params: {
   return [
     `模式：${contentMode}`,
     "目标页：简介 / 故事背景",
+    "输出方式：直接输出正文，不要反问任何确认项，不要把问题抛回给用户。",
+    writingLanguage ? `写作语言：${writingLanguage}` : "写作语言：已由左侧向导固定",
+    typeof targetChapters === "number" ? `目标章节数：${targetChapters}` : "目标章节数：已由左侧向导固定",
+    typeof chapterWordCount === "number" ? `每章字数：${chapterWordCount}` : "每章字数：已由左侧向导固定",
+    "约束：以上三项已在左侧向导中固定，不要再次询问，不要把它们当成待确认问题。",
     "",
     ...(genreBlock ? [genreBlock, ""] : []),
     "内容框架必须包含：",
-    "1. 一句话卖点",
-    "2. 故事背景",
-    "3. 主角处境",
-    "4. 引爆点",
-    "5. 核心悬念",
+    "1. 书名",
+    "2. 一句话卖点",
+    "3. 故事概述",
+    "4. 故事走向",
+    "5. 主要人物成长路径",
+    "6. 核心冲突",
+    "7. 核心价值观",
     "",
-    "输出结构：",
-    "1. blurb：用于书籍简介或卖点开头，必须抓人，不能是说明书语气。",
-    "2. storyBackground：交代故事起点、冲突环境和引爆条件，必须具体。",
-    "3. 不要输出“以上是草案”“如果你确认”等前后缀说明。",
-    "4. 不要扩写到世界观、人物关系、卷纲或章节目录。",
-    "5. 至少返回 blurb 或 storyBackground 之一，且内容要可直接落库。",
+    "输出要求：",
+    "1. 只输出完整 Markdown 正文，不要输出 title、blurb、storyBackground、introMarkdown 这类字段标签。",
+    "2. 不要输出“title：”“blurb：”“storyBackground：”“introMarkdown：”这种结构化前缀。",
+    "3. 正文首行禁止显示书名，不要输出“# 书名”或任何把书名放在第一行的标题。",
+    "4. 不要输出“以上是草案”“如果你确认”等前后缀说明。",
+    "5. 不要扩写到世界观、人物关系、卷纲或章节目录。",
+    "6. 不要再次询问写作语言、目标章节数、每章字数；它们已经确定。",
     "",
     draftBlock,
     "",
@@ -1062,11 +1603,9 @@ function buildIntroRevisionPrompt(params: {
     userMessage.trim(),
     "",
     "约束：",
-    "1. 只更新 blurb、storyBackground、genre、genreAlias、genreSource、mappedGenreId 这些字段。",
-    "2. 至少返回 blurb 或 storyBackground 之一。",
-    "3. 如果已有题材，必须保留并强化题材一致性。",
-    "4. 润色模式优先保留原信息结构，修改模式允许重写表达。",
-    "5. 输出正文必须是可直接落库的正式文案，不要夹带生成过程说明。",
+    "1. 如果已有题材，必须保留并强化题材一致性。",
+    "2. 润色模式优先保留原信息结构，修改模式允许重写表达。",
+    "3. 输出正文必须是可直接落库的正式文案，不要夹带生成过程说明。",
   ].join("\n");
 }
 
@@ -1162,6 +1701,7 @@ export function createInteractionToolsFromDeps(
   state: StateLike,
   hooks?: {
     readonly onChatTextDelta?: (text: string) => void;
+    readonly onThinkingDelta?: (text: string) => void;
     readonly onDraftTextDelta?: (text: string) => void;
     readonly onDraftRawDelta?: (text: string) => void;
     readonly getChatRequestOptions?: () => {
@@ -1198,6 +1738,9 @@ export function createInteractionToolsFromDeps(
         existingDraft,
         revisionKind,
         themeGenre,
+        onThinkingDelta: hooks?.onThinkingDelta,
+        onDraftDelta: hooks?.onDraftTextDelta,
+        onDraftRawDelta: hooks?.onDraftRawDelta,
       });
       return {
         __interaction: {
@@ -1217,6 +1760,9 @@ export function createInteractionToolsFromDeps(
         mode: "modify",
         input,
         existingDraft,
+        onThinkingDelta: hooks?.onThinkingDelta,
+        onDraftDelta: hooks?.onDraftTextDelta,
+        onDraftRawDelta: hooks?.onDraftRawDelta,
       });
       return {
         __interaction: {
@@ -1236,6 +1782,9 @@ export function createInteractionToolsFromDeps(
         mode: "generate",
         input,
         existingDraft,
+        onThinkingDelta: hooks?.onThinkingDelta,
+        onDraftDelta: hooks?.onDraftTextDelta,
+        onDraftRawDelta: hooks?.onDraftRawDelta,
       });
       return {
         __interaction: {
@@ -1400,7 +1949,10 @@ export function createInteractionToolsFromDeps(
     },
     writeTruthFile: async (bookId, fileName, content) => {
       await state.ensureControlDocuments(bookId);
-      await writeFile(join(state.bookDir(bookId), "story", fileName), content, "utf-8");
+      const target = resolveTruthArtifactTarget(fileName);
+      const targetDir = join(state.bookDir(bookId), target.dir);
+      await mkdir(targetDir, { recursive: true });
+      await writeFile(join(targetDir, target.fileName), content, "utf-8");
     },
   };
 }

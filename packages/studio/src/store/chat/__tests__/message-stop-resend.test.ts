@@ -228,6 +228,111 @@ describe("chat stop + resend run isolation", () => {
     expect(stream.closed).toBe(true);
   });
 
+  it("preserves streamed wizard body when finalization payload is only a short summary", async () => {
+    const store = createTestStore();
+
+    store.setState((state) => ({
+      ...state,
+      sessions: {
+        ...state.sessions,
+        s1: createSessionRuntime({
+          sessionId: "s1",
+          bookId: "book-1",
+          title: "Session 1",
+          currentWizardStep: "world",
+          messages: [
+            {
+              role: "assistant",
+              content: "# 世界观\n\n近未来港口城被灰产账本和旧债网络盘踞，公开秩序和地下清算并行存在。",
+              wizardStep: "world",
+              timestamp: 100,
+              parts: [
+                { type: "text", content: "# 世界观\n\n近未来港口城被灰产账本和旧债网络盘踞，公开秩序和地下清算并行存在。" },
+              ],
+            },
+          ],
+        }),
+      },
+    }));
+
+    store.getState().finalizeStream("s1", 100, "已完成重写。", undefined);
+
+    const session = store.getState().sessions.s1;
+    const last = session.messages.at(-1);
+    expect(last?.content).toContain("近未来港口城被灰产账本和旧债网络盘踞");
+    expect(last?.content).not.toBe("已完成重写。");
+  });
+
+  it("keeps streamed wizard body when final summary has no markdown body", async () => {
+    const store = createTestStore();
+
+    store.setState((state) => ({
+      ...state,
+      sessions: {
+        ...state.sessions,
+        s1: createSessionRuntime({
+          sessionId: "s1",
+          bookId: "book-1",
+          title: "Session 1",
+          currentWizardStep: "outline",
+          messages: [
+            {
+              role: "assistant",
+              content: "# 小说大纲\n\n## 第一卷\n- 主线：港城清算",
+              wizardStep: "outline",
+              timestamp: 101,
+              parts: [
+                { type: "text", content: "# 小说大纲\n\n## 第一卷\n- 主线：港城清算" },
+              ],
+            },
+          ],
+        }),
+      },
+    }));
+
+    store.getState().finalizeStream("s1", 101, "已完成重写并保存。", undefined);
+
+    const session = store.getState().sessions.s1;
+    const last = session.messages.at(-1);
+    expect(last?.content).toContain("港城清算");
+    expect(last?.content).not.toBe("已完成重写并保存。");
+  });
+
+  it("keeps streamed intro markdown when final content is not intro body", async () => {
+    const store = createTestStore();
+
+    store.setState((state) => ({
+      ...state,
+      sessions: {
+        ...state.sessions,
+        s1: createSessionRuntime({
+          sessionId: "s1",
+          bookId: "book-1",
+          title: "Session 1",
+          currentWizardStep: "intro",
+          messages: [
+            {
+              role: "assistant",
+              content: "# 简介正文\n\n## 一句话卖点\n账本牵出港城旧债。\n\n## 故事概述\n林砚被迫卷入灰产清算。",
+              wizardStep: "intro",
+              timestamp: 102,
+              parts: [
+                { type: "text", content: "# 简介正文\n\n## 一句话卖点\n账本牵出港城旧债。\n\n## 故事概述\n林砚被迫卷入灰产清算。" },
+              ],
+            },
+          ],
+        }),
+      },
+    }));
+
+    store.getState().finalizeStream("s1", 102, "好的，我已生成并更新允许的字段。", undefined);
+
+    const session = store.getState().sessions.s1;
+    const last = session.messages.at(-1);
+    expect(last?.content).toContain("账本牵出港城旧债");
+    expect(last?.content).not.toBe("好的，我已生成并更新允许的字段。");
+  });
+
   it("probes /agent/status on timeout-like failure and avoids immediate hard error when still running", async () => {
     const store = createTestStore();
     const fetchJsonMock = vi.mocked(fetchJson);

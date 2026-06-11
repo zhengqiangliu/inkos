@@ -68,7 +68,7 @@ export interface ChapterReviewCycleResult {
   };
 }
 
-const DEFAULT_AUTO_REVISE_ROUNDS = 2;
+const DEFAULT_AUTO_REVISE_ROUNDS = 3;
 const MAX_ADAPTIVE_REVISE_ROUNDS = 5;
 const MAX_REVISE_TOTAL_TOKENS = 200_000;
 const AUTO_REVIEW_STOP_REASON_MAX_ROUNDS = "达到自动修订轮次上限，仍未通过审计";
@@ -125,8 +125,18 @@ function countIssueSeverities(issues: ReadonlyArray<AuditIssue>): AuditSeverityC
   return { critical, warning, info };
 }
 
-function estimateAuditScore(severityCounts: AuditSeverityCounts): number {
-  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12;
+function estimateAuditScore(severityCounts: AuditSeverityCounts, issues?: ReadonlyArray<AuditIssue>): number {
+  let warningDeduction = 0;
+  if (issues) {
+    for (const issue of issues) {
+      if (issue.severity === "warning") {
+        warningDeduction += isStructuralAuditIssue(issue) ? 12 : 6;
+      }
+    }
+  } else {
+    warningDeduction = severityCounts.warning * 12;
+  }
+  const raw = 100 - severityCounts.critical * 35 - warningDeduction;
   return Math.max(0, Math.min(100, raw));
 }
 
@@ -145,7 +155,7 @@ function applyScoreGateToAuditResult(params: {
 }): AuditResult {
   if (!params.auditResult.passed) return params.auditResult;
   const severityCounts = countIssueSeverities(params.auditResult.issues);
-  const score = estimateAuditScore(severityCounts);
+  const score = estimateAuditScore(severityCounts, params.auditResult.issues);
   if (score >= MIN_AUDIT_PASS_SCORE) return params.auditResult;
 
   // Remove any existing score gate issues — they are not useful revision targets.
@@ -153,7 +163,7 @@ function applyScoreGateToAuditResult(params: {
     (issue) => issue.category !== "评分门禁" && issue.category !== "Score Gate",
   );
   const scoreGateIssue: AuditIssue = {
-    severity: "warning",
+    severity: "info",
     category: "评分门禁",
     description: `审计评分低于通过阈值（${score}/${MIN_AUDIT_PASS_SCORE}）。`,
     suggestion: "请优先修复警告项并提升章节质量后再审计。",
@@ -206,7 +216,7 @@ function buildAuditRoundSummary(
     severityCounts,
     issueClassCounts,
     primaryIssueClass: resolvePrimaryIssueClass(issueClassCounts),
-    score: estimateAuditScore(severityCounts),
+    score: estimateAuditScore(severityCounts, auditResult.issues),
     summary: auditResult.summary?.trim() ? auditResult.summary.trim() : undefined,
     issues: auditResult.issues,
     ...(issueLifecycle ? { issueLifecycle } : {}),
@@ -327,7 +337,7 @@ function resolveTextualReviseMode(
     return reviseRound <= 1 ? "spot-fix" : "rework";
   }
   if (reviseRound <= 1 && severity.critical === 0 && severity.warning >= 3) {
-    if (failureGate === "score" && typeof scoreShortfall === "number" && scoreShortfall >= 8) {
+    if (failureGate === "score" && typeof scoreShortfall === "number" && scoreShortfall >= 4) {
       return "rewrite";
     }
     return "polish";
@@ -446,9 +456,8 @@ function resolveAdaptiveReviseMode(
       : undefined;
     return resolveTextualReviseMode(issues, reviseRound, reviseContext?.failureGate, scoreShortfall);
   }
-  // Stage switch: first round tackles structural issues with deeper rewrite,
-  // then fallback to spot-fix for follow-up convergence rounds.
-  return reviseRound <= 1 ? "rework" : "spot-fix";
+  // Structural issues always require rework regardless of round number.
+  return "rework";
 }
 
 function resolveAdaptiveIssuesForRound(
@@ -899,7 +908,7 @@ export async function runChapterReviewCycle(params: {
   let priorRoundIssues: ReadonlyArray<AuditIssue> = auditResult.issues.filter(
     (issue) => issue.severity === "critical" || issue.severity === "warning",
   );
-  let priorAuditScore = estimateAuditScore(countIssueSeverities(auditResult.issues));
+  let priorAuditScore = estimateAuditScore(countIssueSeverities(auditResult.issues), auditResult.issues);
   let priorWordCount = finalWordCount;
   let reviseRoundsUsed = 0;
   let stoppedByMaxRounds = false;
@@ -908,7 +917,7 @@ export async function runChapterReviewCycle(params: {
   const reviseLoopStartTokens = totalUsage.totalTokens;
   const structureOverload = shouldTriggerStructureOverload({
     issues: auditResult.issues,
-    score: estimateAuditScore(countIssueSeverities(auditResult.issues)),
+    score: estimateAuditScore(countIssueSeverities(auditResult.issues), auditResult.issues),
     preflightSignals: params.preflightSignals,
   });
   for (let reviseRound = 1; (unboundedReview || reviseRound <= maxReviseRounds) && !auditResult.passed; reviseRound += 1) {
@@ -1133,7 +1142,7 @@ export async function runChapterReviewCycle(params: {
     priorRoundIssues = auditResult.issues.filter(
       (issue) => issue.severity === "critical" || issue.severity === "warning",
     );
-    priorAuditScore = estimateAuditScore(countIssueSeverities(auditResult.issues));
+    priorAuditScore = estimateAuditScore(countIssueSeverities(auditResult.issues), auditResult.issues);
     priorWordCount = finalWordCount;
     if (!auditResult.passed && reAuditReturnedNoIssues) {
       const unresolvedBlockingIssues = hasBlockingIssues(auditResult.issues);

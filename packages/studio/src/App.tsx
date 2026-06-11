@@ -49,6 +49,7 @@ export function App() {
   const [showLanguageSelector, setShowLanguageSelector] = useState(false);
   const [ready, setReady] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [bookCreateInstanceId, setBookCreateInstanceId] = useState(0);
 
   const isDark = theme === "dark";
 
@@ -78,10 +79,15 @@ export function App() {
 
   useSessionEvents(sse, route, setRoute);
 
+  const openBookCreate = (bookId?: string) => {
+    setBookCreateInstanceId((current) => current + 1);
+    setRoute(bookId ? { page: "book-create", bookId } : { page: "book-create" });
+  };
+
   const nav = useMemo(() => ({
     toDashboard: () => setRoute({ page: "dashboard" }),
     toBook: (bookId: string) => setRoute({ page: "book", bookId }),
-    toBookCreate: () => setRoute({ page: "book-create" }),
+    toBookCreate: openBookCreate,
     toBookDraft: (draftSessionId: string) => setRoute({ page: "book-create", draftSessionId }),
     toChapter: (bookId: string, chapterNumber: number) =>
       setRoute({ page: "chapter", bookId, chapterNumber }),
@@ -97,7 +103,7 @@ export function App() {
     toImport: () => setRoute({ page: "import" }),
     toRadar: () => setRoute({ page: "radar" }),
     toDoctor: () => setRoute({ page: "doctor" }),
-  }), [setRoute]);
+  }), [openBookCreate, setRoute]);
 
   const activeBookId = deriveActiveBookId(route);
   const activePage = deriveSidebarActivePage(route);
@@ -199,7 +205,14 @@ export function App() {
                   sse={sse}
                 />
               ) : (
-                <BookCreate nav={nav} theme={theme} t={t} draftSessionId={"draftSessionId" in route ? route.draftSessionId : undefined} />
+                <BookCreate
+                  key={`book-create-${bookCreateInstanceId}`}
+                  nav={nav}
+                  theme={theme}
+                  t={t}
+                  draftSessionId={"draftSessionId" in route ? route.draftSessionId : undefined}
+                  resumeBookId={"bookId" in route ? route.bookId : undefined}
+                />
               )}
             </div>
           )}

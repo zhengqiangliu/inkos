@@ -1,4 +1,4 @@
-export type ArtifactReaderMode = "chapter" | "design" | "outline" | "truth";
+export type ArtifactReaderMode = "chapter" | "design" | "outline" | "truth" | "wizard";
 
 export interface BookArtifactMenuItem {
   readonly file: string;
@@ -13,9 +13,17 @@ export interface BookArtifactLabel {
   readonly subtitle: string;
 }
 
+const ARTIFACT_FILE_ALIASES: Readonly<Record<string, string>> = {
+  "story/outline/story_frame.md": "story_bible.md",
+  "story/outline/volume_map.md": "story/outline/volume_map.md",
+};
+
 const FILE_LABELS: Record<string, BookArtifactLabel> = {
   "story_bible.md": { title: "世界观设定", subtitle: "story_bible.md" },
+  "novel_outline.md": { title: "小说大纲", subtitle: "novel_outline.md" },
   "volume_outline.md": { title: "卷纲规划", subtitle: "volume_outline.md" },
+  "story/outline/story_frame.md": { title: "世界观设定", subtitle: "story/outline/story_frame.md" },
+  "story/outline/volume_map.md": { title: "卷纲规划", subtitle: "story/outline/volume_map.md" },
   "book_rules.md": { title: "叙事规则", subtitle: "book_rules.md" },
   "current_state.md": { title: "世界状态", subtitle: "current_state.md" },
   "particle_ledger.md": { title: "资源账本", subtitle: "particle_ledger.md" },
@@ -28,17 +36,32 @@ const FILE_LABELS: Record<string, BookArtifactLabel> = {
   "relationship_map.md": { title: "人物关系", subtitle: "relationship_map.md" },
   "author_intent.md": { title: "长期作者意图", subtitle: "author_intent.md" },
   "current_focus.md": { title: "当前阶段的关注点", subtitle: "current_focus.md" },
+  "foundation_brief.md": { title: "创作基础简报", subtitle: "foundation_brief.md" },
   "story/author_intent.md": { title: "长期作者意图", subtitle: "story/author_intent.md" },
   "story/current_focus.md": { title: "当前阶段的关注点", subtitle: "story/current_focus.md" },
 };
 
 export function normalizeArtifactFile(file: string): string {
-  return file.replace(/^story\//, "");
+  const aliased = ARTIFACT_FILE_ALIASES[file] ?? file;
+  return aliased.replace(/^story\//, "");
 }
 
 export function getArtifactLabel(file: string): BookArtifactLabel {
   const normalized = normalizeArtifactFile(file);
   return FILE_LABELS[file] ?? FILE_LABELS[normalized] ?? { title: normalized, subtitle: normalized };
+}
+
+export function resolveArtifactStoragePath(file: string): string {
+  switch (file) {
+    case "story_bible.md":
+      return "story/outline/story_frame.md";
+    case "volume_outline.md":
+      return "story/outline/volume_map.md";
+    case "story/outline/volume_map.md":
+      return "story/outline/volume_map.md";
+    default:
+      return file;
+  }
 }
 
 export function createArtifactMenuItem(
@@ -58,7 +81,7 @@ export function createArtifactMenuItem(
 
 export const ASSET_MENU_ITEMS: ReadonlyArray<BookArtifactMenuItem> = [
   createArtifactMenuItem("story_bible.md", "资产列表", "truth"),
-  createArtifactMenuItem("volume_outline.md", "资产列表", "outline"),
+  createArtifactMenuItem("story/outline/volume_map.md", "资产列表", "outline"),
   createArtifactMenuItem("book_rules.md", "资产列表", "truth"),
   createArtifactMenuItem("current_state.md", "资产列表", "truth"),
   createArtifactMenuItem("pending_hooks.md", "资产列表", "truth"),
@@ -68,10 +91,10 @@ export const ASSET_MENU_ITEMS: ReadonlyArray<BookArtifactMenuItem> = [
 ];
 
 export const GUIDE_MENU_ITEMS: ReadonlyArray<BookArtifactMenuItem> = [
-  createArtifactMenuItem("brief.md", "向导资料", "truth"),
+  createArtifactMenuItem("foundation_brief.md", "向导资料", "truth"),
   createArtifactMenuItem("story_bible.md", "向导资料", "truth"),
   createArtifactMenuItem("novel_outline.md", "向导资料", "truth"),
-  createArtifactMenuItem("volume_outline.md", "向导资料", "outline"),
+  createArtifactMenuItem("story/outline/volume_map.md", "向导资料", "outline"),
   createArtifactMenuItem("character_matrix.md", "向导资料", "truth"),
   createArtifactMenuItem("character_arc.md", "向导资料", "truth"),
   createArtifactMenuItem("relationship_map.md", "向导资料", "truth"),

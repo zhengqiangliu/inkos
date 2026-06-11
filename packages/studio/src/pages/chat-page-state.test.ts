@@ -5,6 +5,7 @@ import {
   getBookCreateSessionId,
   resolveAssistantPreview,
   resolveModelSelection,
+  resolvePersistedModelSelection,
   setBookCreateSessionId,
 } from "./chat-page-state";
 
@@ -149,6 +150,36 @@ describe("resolveModelSelection", () => {
 
   it("returns null for empty groups", () => {
     expect(resolveModelSelection([], "gpt-5.4", "openai")).toBeNull();
+  });
+});
+
+describe("resolvePersistedModelSelection", () => {
+  const grouped = [
+    {
+      service: "openai",
+      label: "OpenAI",
+      models: [
+        { id: "gpt-5.4", name: "gpt-5.4" },
+        { id: "gpt-4o", name: "gpt-4o" },
+      ],
+    },
+  ] as const;
+
+  it("resolves persisted service and model when available", () => {
+    expect(resolvePersistedModelSelection(grouped, {
+      service: "openai",
+      defaultModel: "gpt-4o",
+    })).toEqual({
+      model: "gpt-4o",
+      service: "openai",
+    });
+  });
+
+  it("returns null when persisted selection is incomplete", () => {
+    expect(resolvePersistedModelSelection(grouped, {
+      service: "openai",
+      defaultModel: "missing-model",
+    })).toBeNull();
   });
 });
 

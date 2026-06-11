@@ -120,18 +120,66 @@ function buildDimensionNote(
   }
 
   switch (id) {
+    case 1:
+      return language === "en"
+        ? "Check character behavior/dialogue against their established personality. Contradiction with established trait → critical. Inconsistent tone or uncharacteristic response without motivation → warning. Minor voice deviation → info."
+        : "对照已设定的性格底色检查角色行为/对白。与已明确性格直接矛盾→critical；语气风格与人设不符但无直接矛盾→warning；轻微口吻偏差→info。";
+    case 2:
+      return language === "en"
+        ? "Check event sequence and time consistency. Direct timeline contradiction (event order impossible) → critical. Ambiguous time gap or unclear interval → warning."
+        : "检查事件顺序和时间一致性。事件先后顺序出现直接矛盾→critical；时间跨度模糊或前后时间衔接不清晰→warning。";
+    case 3:
+      return language === "en"
+        ? "Check whether chapter content contradicts established world/system settings. Direct contradiction (ability that was confirmed unavailable, location that shouldn't exist) → critical. Soft inconsistency or under-specified rule application → warning."
+        : "检查章节内容是否与已设定的世界观/体系矛盾。直接矛盾（已明确不存在的能力出现、不该有的地点出现）→critical；设定模糊区域的软矛盾→warning。";
+    case 6:
+      return language === "en"
+        ? "Check hook recovery and assignment against the chapter plan. A hook declared recovered but not actually resolved → critical. Required hook not addressed at all → warning. Hook partially addressed → info."
+        : "对照章节计划检查伏笔回收和新增。标记为已回收但实际未解决→critical；计划要求回收的伏笔完全未处理→warning；伏笔部分处理→info。";
+    case 7:
+      return language === "en"
+        ? "Check opening scene pacing. No conflict, no character under pressure, no hook in the first screen → warning. Pure background dump with no action or tension → warning."
+        : "检查开篇节奏。首屏无冲突、无角色承压、无悬念→warning；纯背景/世界观灌输无动作张力→warning。";
+    case 8:
+      return language === "en"
+        ? "Check style consistency with the established style guide. Style shift that breaks immersion → warning. Minor deviation → info."
+        : "检查文风与已设定风格指南的一致性。破坏沉浸感的文风突变→warning；轻微偏差→info。";
+    case 9:
+      return language === "en"
+        ? "Check whether characters act on information they should not have at this point. Using future-revealed information → critical. Referencing information they couldn't reasonably know → warning."
+        : "检查角色是否使用了此时不应知道的信息。使用只在后续章节才揭示的信息→critical；引用在当前叙事时间点无法合理获知的信息→warning。";
+    case 13:
+      return language === "en"
+        ? "Check whether antagonist/side characters are made artificially stupid to serve the plot. Character ignores obvious information they would clearly notice → warning. Character acts against their established competence level without motivation → warning."
+        : "检查对手/配角是否被人为降智以配合剧情。明显应该注意到的信息被无视→warning；角色行为明显低于其已设定的能力水平且无动机→warning。";
+    case 14:
+      return language === "en"
+        ? "Check whether side characters exist only as plot tools with no independent agency. A character's only function is to deliver information or be defeated → warning (if it's a pattern across ≥2 characters this chapter)."
+        : "检查配角是否仅作为剧情工具存在、无独立动机。配角唯一功能是传递信息或被击败→warning（本章≥2个配角有此问题才标记）。";
+    case 16:
+      return language === "en"
+        ? "Check whether character dialogue is authentic to their voice and situation. Dialogue that is out of character for the speaker's background/personality → warning. Dialogue that sounds like narration rather than speech → warning."
+        : "检查对白是否符合说话者的性格/背景/处境。对白明显不符合说话者身份背景→warning；对白过于像旁白叙述而非真实口语→warning。";
+    case 17:
+      return language === "en"
+        ? "Check for chronicle drift: a sequence of 'A happened, then B happened, then C happened' with no scene focus or emotional weight. More than 3 consecutive plot-summary paragraphs → warning."
+        : "检查流水账问题：'A发生了→然后B发生了→然后C发生了'的堆叠，没有场景聚焦和情感重量。连续超过3段纯情节流水描述→warning。";
+    case 18:
+      return language === "en"
+        ? "Check whether planning/meta language leaked into the chapter body (e.g., 'this chapter will...', 'the author arranges...', hook_id labels, ledger notation). Any such leak → critical."
+        : "检查规划性/元语言是否泄露到正文（如'本章将…'、'作者安排…'、hook_id标签、账本符号等）。任何此类泄露→critical。";
     case 19:
       return language === "en"
         ? "Check whether POV shifts are signaled clearly and stay consistent with the configured viewpoint."
         : "检查视角切换是否有过渡、是否与设定视角一致";
     case 24:
       return language === "en"
-        ? "Cross-check subplot_board and chapter_summaries: flag any subplot that stays dormant long enough to feel abandoned, or a recent run where every subplot is only restated instead of genuinely moving."
-        : "对照 subplot_board 和 chapter_summaries：标记那些沉寂到接近被遗忘的支线，或近期连续只被重复提及、没有真实推进的支线。";
+        ? "Cross-check subplot_board and chapter_summaries: flag any subplot dormant ≥3 chapters as warning; dormant ≥5 chapters with no mention as critical. A subplot counts as active only if it has a new beat this chapter, not just a mention."
+        : "对照 subplot_board 和 chapter_summaries：支线连续≥3章无真实推进→warning；连续≥5章完全未提及→critical。仅被提及不算推进，必须有新的剧情动作。";
     case 25:
       return language === "en"
-        ? "Cross-check emotional_arcs and chapter_summaries: flag any major character whose emotional line holds one pressure shape across a run instead of taking new pressure, release, reversal, or reinterpretation. Distinguish unchanged circumstances from unchanged inner movement."
-        : "对照 emotional_arcs 和 chapter_summaries：标记主要角色在一段时间内始终停留在同一种情绪压力形态、没有新压力、释放、转折或重估的情况。注意区分'处境未变'和'内心未变'。";
+        ? "Cross-check emotional_arcs and chapter_summaries: flag any major character whose emotional state is unchanged ≥3 chapters as warning. Distinguish unchanged circumstances (acceptable) from unchanged inner response to new pressure (not acceptable)."
+        : "对照 emotional_arcs 和 chapter_summaries：主要角色情绪状态连续≥3章无变化（无新压力、无释放、无转折）→warning。注意区分'处境未变'（可接受）和'对新压力的内心反应未变'（不可接受）。";
     case 26:
       return language === "en"
         ? "Cross-check chapter_summaries for chapter-type distribution: warn when the recent sequence stays in the same mode long enough to flatten rhythm, or when payoff / release beats disappear for too long. Explicitly list the recent type sequence."
@@ -158,8 +206,8 @@ function buildDimensionNote(
         : "检查：章尾是否重新点燃好奇心，已经承诺的回收是否按伏笔自身节奏落地，压力是否得到释放，读者期待缺口是在持续累积还是在被满足。";
     case 33:
       return language === "en"
-        ? "Cross-check volume_outline: does this chapter match the planned beat for the current chapter range? Did it skip planned nodes or consume later nodes too early? Does actual pacing match the planned chapter span? If a beat planned for N chapters is consumed in 1-2 chapters -> critical."
-        : "对照 volume_outline：本章内容是否对应卷纲中当前章节范围的剧情节点？是否跳过了节点或提前消耗了后续节点？剧情推进速度是否与卷纲规划的章节跨度匹配？如果卷纲规划某段剧情跨N章但实际1-2章就讲完→critical";
+        ? "Cross-check volume_outline: does this chapter match the planned beat for the current chapter range? Did it skip planned nodes or consume later nodes too early? Does actual pacing match the planned chapter span? If a beat planned for N chapters is consumed in 1-2 chapters -> warning."
+        : "对照 volume_outline：本章内容是否对应卷纲中当前章节范围的剧情节点？是否跳过了节点或提前消耗了后续节点？剧情推进速度是否与卷纲规划的章节跨度匹配？如果卷纲规划某段剧情跨N章但实际1-2章就讲完→warning。";
     case 34:
     case 35:
     case 36:
@@ -181,8 +229,8 @@ function buildDimensionNote(
     }
     case 38:
       return language === "en"
-        ? "Compare the end of the previous chapter with the start of this chapter. Check: do events, location, time, character state, and emotional tone connect naturally? Are there missing transitions, contradictions, or abrupt jumps between the two chapters? If no previous chapter exists, skip this dimension."
-        : "对比上一章结尾与本章开头：事件、地点、时间、角色状态、情绪基调是否自然衔接？是否有跳跃、矛盾或缺少过渡？如无上一章则跳过本维度。";
+        ? "Compare the end of the previous chapter with the start of this chapter. Severity guide: location/time/character-state contradiction → critical; emotional tone jump or missing transition but no factual conflict → warning; first paragraph does not echo previous ending but no contradiction → info. If no previous chapter exists, skip this dimension."
+        : "对比上一章结尾与本章开头。判定标准：地点/时间/角色状态出现直接矛盾→critical；情绪基调有跳跃或缺少过渡但无事实冲突→warning；首段未呼应上章结尾但无矛盾→info。如无上一章则跳过本维度。";
     default:
       return "";
   }
@@ -393,8 +441,8 @@ export function formatAuditPriorityPreview(
     ? "- Target: pass the first audit on the first attempt, with critical issues at 0 and score at or above 80."
     : "- 目标：首审一次通过，critical=0，分数达到80分及以上。";
   const scoringLine = isEnglish
-    ? "- Scoring: each critical issue deducts 35 pts; each warning deducts 12 pts. 1 critical = instant fail; 2 warnings = −24 pts (near fail line)."
-    : "- 扣分规则：每个 critical 扣35分，每个 warning 扣12分。1个critical直接不过；2个warning扣24分，接近失败线。";
+    ? "- Scoring: each critical deducts 35 pts; each structural warning deducts 12 pts; each textual/style warning deducts 6 pts. 1 critical = instant fail; 2 structural warnings = −24 pts (near fail line)."
+    : "- 扣分规则：每个 critical 扣35分；每个结构性 warning（连续性/偏离/弧线）扣12分；每个文本性 warning（句面/风格）扣6分。1个critical直接不过；2个结构性warning扣24分，接近失败线。";
   const strategyLine = isEnglish
     ? "- Order of work: structure first, continuity second, character consistency third, then style."
     : "- 处理顺序：先结构，再连续性，再人物一致性，最后才是句面。";

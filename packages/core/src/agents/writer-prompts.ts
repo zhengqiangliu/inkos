@@ -84,6 +84,20 @@ function buildAuditGateBlock(
   return formatAuditPriorityPreview(gp, bookRules, isEnglish, options);
 }
 
+function formatPlatformLabel(platform: BookConfig["platform"], isEnglish: boolean): string {
+  if (isEnglish) return platform;
+  switch (platform) {
+    case "tomato":
+      return "番茄";
+    case "feilu":
+      return "飞卢";
+    case "qidian":
+      return "起点";
+    default:
+      return platform;
+  }
+}
+
 export function buildWriterSystemPrompt(
   book: BookConfig,
   genreProfile: GenreProfile,
@@ -190,7 +204,7 @@ export function buildWriterSystemPrompt(
 // ---------------------------------------------------------------------------
 
 function buildGenreIntro(book: BookConfig, gp: GenreProfile): string {
-  return `你是一位专业的${gp.name}网络小说作家。你为${book.platform}平台写作。`;
+  return `你是一位专业的${gp.name}网络小说作家。你为${formatPlatformLabel(book.platform, gp.language === "en")}平台写作。`;
 }
 
 function buildGovernedInputContract(language: "zh" | "en", governed: boolean): string {
@@ -306,7 +320,8 @@ function buildCoreRules(lengthSpec: LengthSpec): string {
 - 【公式化转折禁令】禁止使用套路化反转结构（"就在此时""然而就在这时""正当……之际"引导的意外）；转折必须由前文铺垫的矛盾自然爆发，不得凭空降临
 - 【列表式结构禁令】禁止用"第一……第二……第三……"或连续三个以上并列句描述同类事物；每2000字内最多出现1次三件事并列，超出时改写为叙事推进
 - 【支线/弧线/节奏】支线不得连续3章无进展；角色弧线不得在同一情绪层级停滞超过2章；每5章内至少有1次明显的节奏变化（高潮→缓和或缓和→爆发）
-- 【章节衔接铁律】本章开头必须与上章结尾在时间、空间、情绪上自然衔接；禁止无过渡的场景跳切；如需跳切，必须用一句明确的时空标记交代`;
+- 【章节衔接铁律】本章开头必须与上章结尾在时间、空间、情绪上自然衔接；禁止无过渡的场景跳切；如需跳切，必须用一句明确的时空标记交代
+- 【文本性三扣禁令（每项-6分，三项同时触发=-18分）】①词汇疲劳：同一词根/意象在500字内出现≥3次，必须替换；②套话密度：禁止"不禁感叹""心中一震""眼神复杂""陷入沉思"等空洞短语，直接写具体感官或动作；③公式化转折：禁止"虽然……但是……""然而……""正当此时……"等结构，改用角色动作或内心直接切换`;
 }
 
 // ---------------------------------------------------------------------------
@@ -638,9 +653,12 @@ function buildGovernedPreWriteChecklist(book: BookConfig, gp: GenreProfile): str
     `${idx++}. 本章结束时读者要记住什么钩子？`,
     `${idx++}. 需要回收的伏笔有哪些？`,
     `${idx++}. 当前视角能知道什么，不能知道什么？`,
+    `${idx++}. 【OOC检查】主角/关键角色的行为、动机、口吻与已有人设是否一致？`,
+    `${idx++}. 【流水账检查】是否有"然后A→然后B→然后C"的流水账结构？若有，改为场景聚焦写法。`,
+    `${idx++}. 【爽点节奏】本章是否有至少一个明确的情绪释放点或读者爽点？`,
+    `${idx++}. 【支线/弧线】本轮有哪条支线或角色弧线需要推进？有没有超过3章没动的支线？`,
     `${idx++}. 【章节衔接确认】本章开头与上章结尾在时间、空间、情绪上是否自然衔接？如需跳切，是否已写明时空标记？`,
     `${idx++}. 【审计预演】本章最可能被审不过的三项是什么？对应的规避动作是否已经写进正文结构里？`,
-    `${idx++}. 本章最容易挂审计的三项是什么？是否已经按优先级预留处理位？`,
   ];
 
   if (gp.numericalSystem) {
@@ -718,6 +736,7 @@ function buildCreativeOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpe
 | 检查项 | 本章记录 | 备注 |
 |--------|----------|------|
 ${chapterDesignRow}| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
+| 节奏锚定 | 本段弧线/节点预计跨X章，本章是第Y章（还剩Z章） | 剩余章数>1时禁止本章终结当前节点 |
 | 上下文范围 | 第X章至第Y章 / 状态卡 / 设定文件 | |
 | 当前锚点 | 地点 / 对手 / 收益目标 | 锚点必须具体 |
 ${resourceRow}| 待回收伏笔 | 只填伏笔池中的真实 hook_id，多个用逗号分隔；禁止写名称/摘要/解释（无则写 none） | 与伏笔池一致 |
@@ -761,6 +780,7 @@ function buildOutputFormat(book: BookConfig, gp: GenreProfile, lengthSpec: Lengt
 | 检查项 | 本章记录 | 备注 |
 |--------|----------|------|
 ${chapterDesignRow}| 大纲锚定 | 当前卷名/阶段 + 本章应推进的具体节点 | 严禁跳过节点或提前消耗后续剧情 |
+| 节奏锚定 | 本段弧线/节点预计跨X章，本章是第Y章（还剩Z章） | 剩余章数>1时禁止本章终结当前节点 |
 | 上下文范围 | 第X章至第Y章 / 状态卡 / 设定文件 | |
 | 当前锚点 | 地点 / 对手 / 收益目标 | 锚点必须具体 |
 ${resourceRow}| 待回收伏笔 | 只填伏笔池中的真实 hook_id，多个用逗号分隔；禁止写名称/摘要/解释（无则写 none） | 与伏笔池一致 |

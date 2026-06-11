@@ -13,7 +13,7 @@
  * legacy file content, or an empty default placeholder.
  */
 
-import { readFile, readdir, access } from "node:fs/promises";
+import { readFile, readdir, access, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 /**
@@ -43,6 +43,7 @@ export async function readStoryFrame(
   bookDir: string,
   fallbackPlaceholder: string = "",
 ): Promise<string> {
+  await ensureReadyBookStoryArtifacts(bookDir).catch(() => undefined);
   const newPath = join(bookDir, "story", "outline", "story_frame.md");
   const legacyPath = join(bookDir, "story", "story_bible.md");
 
@@ -57,6 +58,7 @@ export async function readVolumeMap(
   bookDir: string,
   fallbackPlaceholder: string = "",
 ): Promise<string> {
+  await ensureReadyBookStoryArtifacts(bookDir).catch(() => undefined);
   const newPath = join(bookDir, "story", "outline", "volume_map.md");
   const legacyPath = join(bookDir, "story", "volume_outline.md");
 
@@ -64,6 +66,115 @@ export async function readVolumeMap(
   if (newContent.trim()) return newContent;
 
   return readOr(legacyPath, fallbackPlaceholder);
+}
+
+async function readWizardStepMarkdown(bookDir: string, fileName: string): Promise<string> {
+  const content = await readOr(join(bookDir, "wizard", fileName), "");
+  return content.trim() ? content : "";
+}
+
+/**
+ * Best-effort repair for books that were marked ready before wizard drafts
+ * were copied into story/. This keeps older books usable without requiring
+ * manual migration.
+ */
+export async function ensureReadyBookStoryArtifacts(bookDir: string): Promise<boolean> {
+  try {
+    const raw = await readFile(join(bookDir, "book.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { creationState?: unknown };
+    if (parsed.creationState !== "ready") {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  await mkdir(join(bookDir, "story", "outline"), { recursive: true }).catch(() => undefined);
+  await mkdir(join(bookDir, "story"), { recursive: true }).catch(() => undefined);
+
+  const [storyFrame, volumeMap, characters, characterArc, relationshipMap, intro, world, outline] = await Promise.all([
+    readOr(join(bookDir, "story", "outline", "story_frame.md"), ""),
+    readOr(join(bookDir, "story", "outline", "volume_map.md"), ""),
+    readOr(join(bookDir, "story", "character_matrix.md"), ""),
+    readOr(join(bookDir, "story", "character_arc.md"), ""),
+    readOr(join(bookDir, "story", "relationship_map.md"), ""),
+    readWizardStepMarkdown(bookDir, "intro.md"),
+    readWizardStepMarkdown(bookDir, "world.md"),
+    readWizardStepMarkdown(bookDir, "outline.md"),
+  ]);
+
+  const needsRepair = !storyFrame.trim()
+    || !volumeMap.trim()
+    || !characters.trim()
+    || !characterArc.trim()
+    || !relationshipMap.trim();
+  if (!needsRepair) return false;
+
+  if (intro.trim()) {
+    await writeFile(join(bookDir, "story", "foundation_brief.md"), intro, "utf-8").catch(() => undefined);
+  }
+  if (world.trim()) {
+    await writeFile(join(bookDir, "story", "outline", "story_frame.md"), world, "utf-8").catch(() => undefined);
+    await writeFile(join(bookDir, "story", "story_bible.md"), world, "utf-8").catch(() => undefined);
+  }
+  if (outline.trim()) {
+    await writeFile(join(bookDir, "story", "novel_outline.md"), outline, "utf-8").catch(() => undefined);
+  }
+  if (volumeMap.trim() || await readWizardStepMarkdown(bookDir, "volume.md")) {
+    const content = volumeMap.trim() ? volumeMap : await readWizardStepMarkdown(bookDir, "volume.md");
+    if (content.trim()) {
+      await writeFile(join(bookDir, "story", "outline", "volume_map.md"), content, "utf-8").catch(() => undefined);
+      await writeFile(join(bookDir, "story", "volume_outline.md"), content, "utf-8").catch(() => undefined);
+    }
+  }
+  if (characters.trim()) {
+    await writeFile(join(bookDir, "story", "character_matrix.md"), characters, "utf-8").catch(() => undefined);
+  }
+  if (characterArc.trim()) {
+    await writeFile(join(bookDir, "story", "character_arc.md"), characterArc, "utf-8").catch(() => undefined);
+  } else {
+    const draft = await readWizardStepMarkdown(bookDir, "character_arc.md");
+    if (draft.trim()) {
+      await writeFile(join(bookDir, "story", "character_arc.md"), draft, "utf-8").catch(() => undefined);
+    }
+  }
+  if (relationshipMap.trim()) {
+    await writeFile(join(bookDir, "story", "relationship_map.md"), relationshipMap, "utf-8").catch(() => undefined);
+  } else {
+    const draft = await readWizardStepMarkdown(bookDir, "relationship_map.md");
+    if (draft.trim()) {
+      await writeFile(join(bookDir, "story", "relationship_map.md"), draft, "utf-8").catch(() => undefined);
+    }
+  }
+  return true;
+}
+
+/** Read character_arc.md, falling back to wizard/character_arc.md for legacy draft-only books. */
+export async function readCharacterArc(
+  bookDir: string,
+  fallbackPlaceholder: string = "",
+): Promise<string> {
+  const newPath = join(bookDir, "story", "character_arc.md");
+  const draftPath = join(bookDir, "wizard", "character_arc.md");
+
+  const newContent = await readOr(newPath, "");
+  if (newContent.trim()) return newContent;
+
+  return readOr(draftPath, fallbackPlaceholder);
+}
+
+/** Read relationship_map.md, falling back to wizard/relationship_map.md for legacy draft-only books. */
+export async function readRelationshipMap(
+  bookDir: string,
+  fallbackPlaceholder: string = "",
+): Promise<string> {
+  const newPath = join(bookDir, "story", "relationship_map.md");
+  const draftPath = join(bookDir, "wizard", "relationship_map.md");
+
+  const newContent = await readOr(newPath, "");
+  if (newContent.trim()) return newContent;
+
+  return readOr(draftPath, fallbackPlaceholder);
 }
 
 /** Read the rhythm principles file (zh or en variant). */

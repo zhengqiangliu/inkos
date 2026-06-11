@@ -297,21 +297,26 @@ export async function runAgentSession(
   if (!cached) {
     const model = resolveModel(config.model);
     const turnInstructionRef = { value: "" };
+    const isNewBookMode = bookId === null;
     const agent = new Agent({
       initialState: {
         model,
         systemPrompt: buildAgentSystemPrompt(bookId, language),
-        tools: [
-          createSubAgentTool(pipeline, bookId, projectRoot, () => turnInstructionRef.value),
-          createReadTool(projectRoot),
-          createWriteTruthFileTool(pipeline, projectRoot, bookId),
-          createRenameEntityTool(pipeline, projectRoot, bookId),
-          createPatchChapterTextTool(pipeline, projectRoot, bookId),
-          createEditTool(projectRoot),
-          createWriteFileTool(projectRoot),
-          createGrepTool(projectRoot),
-          createLsTool(projectRoot),
-        ],
+        tools: isNewBookMode
+          ? [
+              createSubAgentTool(pipeline, bookId, projectRoot, () => turnInstructionRef.value),
+            ]
+          : [
+              createSubAgentTool(pipeline, bookId, projectRoot, () => turnInstructionRef.value),
+              createReadTool(projectRoot, bookId),
+              createWriteTruthFileTool(pipeline, projectRoot, bookId),
+              createRenameEntityTool(pipeline, projectRoot, bookId),
+              createPatchChapterTextTool(pipeline, projectRoot, bookId),
+              createEditTool(projectRoot, bookId),
+              createWriteFileTool(projectRoot, bookId),
+              createGrepTool(projectRoot, bookId),
+              createLsTool(projectRoot, bookId),
+            ],
       },
       transformContext: createBookContextTransform(bookId, projectRoot),
       streamFn: streamSimple,

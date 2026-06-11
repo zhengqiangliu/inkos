@@ -133,9 +133,21 @@ export class ComposerAgent extends BaseAgent {
       ),
       this.maybeContextSource(
         storyDir,
-        "volume_outline.md",
+        ["outline/volume_map.md", "volume_outline.md"],
         "Anchor the default planning node for this chapter.",
         plan.intent.outlineNode ? [plan.intent.outlineNode] : [],
+      ),
+      this.maybeContextSource(
+        storyDir,
+        "character_arc.md",
+        "Keep character progression constraints visible so governed writing and revision do not introduce abrupt arc jumps.",
+        plan.intent.mustKeep,
+      ),
+      this.maybeContextSource(
+        storyDir,
+        "relationship_map.md",
+        "Keep alliance, rivalry, and latent-conflict constraints visible so governed writing and revision preserve relationship pressure.",
+        plan.intent.mustKeep,
       ),
       this.maybeContextSource(
         storyDir,
@@ -365,19 +377,24 @@ export class ComposerAgent extends BaseAgent {
 
   private async maybeContextSource(
     storyDir: string,
-    fileName: string,
+    fileNames: string | ReadonlyArray<string>,
     reason: string,
     preferredExcerpts: ReadonlyArray<string> = [],
   ): Promise<ContextPackage["selectedContext"][number] | null> {
-    const path = join(storyDir, fileName);
-    const content = await this.readFileOrDefault(path);
-    if (!content || content === "(文件尚未创建)") return null;
+    const candidates = Array.isArray(fileNames) ? fileNames : [fileNames];
+    for (const fileName of candidates) {
+      const path = join(storyDir, fileName);
+      const content = await this.readFileOrDefault(path);
+      if (!content || content === "(文件尚未创建)") continue;
 
-    return {
-      source: `story/${fileName}`,
-      reason,
-      excerpt: this.pickExcerpt(content, preferredExcerpts),
-    };
+      return {
+        source: `story/${fileName}`,
+        reason,
+        excerpt: this.pickExcerpt(content, preferredExcerpts),
+      };
+    }
+
+    return null;
   }
 
   private pickExcerpt(content: string, preferredExcerpts: ReadonlyArray<string>): string | undefined {

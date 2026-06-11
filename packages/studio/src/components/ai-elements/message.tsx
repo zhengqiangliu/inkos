@@ -329,6 +329,7 @@ export const MessageResponse = memo(
   ({ className, size = "sm", ...props }: MessageResponseProps) => (
     <Streamdown
       className={cn(
+        "w-full min-w-0 max-w-none break-words [&_*]:min-w-0",
         size === "base"
           ? "size-full text-[15px] leading-7 font-['SimSun','Songti_SC','STSong',serif] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-3.5"
           : "size-full text-[16px] leading-[1.6] font-['SimSun','Songti_SC','STSong',serif] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&>p+p]:mt-4",

@@ -151,6 +151,10 @@ export interface AgentResponse {
   readonly tokenUsage?: TokenUsageSummary;
   readonly details?: {
     readonly draftRaw?: string;
+    readonly creationDraft?: unknown;
+    readonly creationWizard?: unknown;
+    readonly fieldsUpdated?: ReadonlyArray<string>;
+    readonly activeBookId?: string;
     readonly toolCall?: ToolCall;
     readonly effects?: {
       readonly writeNext?: {
@@ -180,7 +184,7 @@ export interface SessionResponse {
     readonly creationDraft?: unknown;
     readonly creationWizard?: unknown;
     readonly messages?: ReadonlyArray<SessionMessage>;
-  };
+  } | null;
   readonly activeBookId?: string;
 }
 
@@ -250,6 +254,7 @@ export interface CreateState {
   createProgress: string;
   bookDataVersion: number;
   sidebarView: "panel" | "artifact";
+  artifactSource: "truth" | "wizard";
   artifactFile: string | null;         // foundation file name, e.g. "story_bible.md"
   artifactChapter: number | null;      // chapter number, e.g. 1
   artifactChapterMeta: ArtifactChapterMeta | null;
@@ -266,6 +271,7 @@ export interface MessageActions {
   setInput: (text: string) => void;
   addUserMessage: (sessionId: string, content: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
   appendAssistantMessage: (sessionId: string, content: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
+  replaceWizardStepMessage: (sessionId: string, wizardStep: import("@actalk/inkos-core").BookCreationWizardStep, content: string) => void;
   appendStreamChunk: (sessionId: string, text: string, streamTs: number) => void;
   finalizeStream: (sessionId: string, streamTs: number, content: string, toolCall?: ToolCall) => void;
   replaceStreamWithError: (sessionId: string, streamTs: number, errorMsg: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
@@ -287,8 +293,10 @@ export interface MessageActions {
       readonly skipAutoNewPrefix?: boolean;
       readonly wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep;
       readonly forceStream?: boolean;
+      readonly responseFormat?: "json_object";
       readonly wizardAdvance?: {
         readonly wizardStep: string;
+        readonly nextStep?: string;
         readonly language: string;
         readonly stepTitle: string;
         readonly title?: string;
@@ -301,7 +309,7 @@ export interface MessageActions {
     },
   ) => Promise<AgentResponse | null>;
   stopMessage: (sessionId: string) => Promise<void>;
-  setSelectedModel: (model: string, service: string) => void;
+  setSelectedModel: (model: string, service: string, options?: { readonly persist?: boolean }) => void;
 }
 
 export interface CreateActions {
@@ -310,7 +318,7 @@ export interface CreateActions {
   setCreateProgress: (progress: string) => void;
   handleCreateBook: (sessionId: string, activeBookId?: string) => Promise<string | null>;
   bumpBookDataVersion: () => void;
-  openArtifact: (file: string) => void;
+  openArtifact: (file: string, source?: "truth" | "wizard") => void;
   openChapterArtifact: (
     chapterNum: number,
     options?: {

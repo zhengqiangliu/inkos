@@ -69,6 +69,187 @@ describe("interaction runtime", () => {
     expect(result.responseText).toContain("港风商战悬疑");
   });
 
+  it("routes revise_book_intro through the intro revision tool and stores introMarkdown", async () => {
+    const reviseBookIntro = vi.fn(async () => ({
+      __interaction: {
+        responseText: "已生成简介正文。",
+        details: {
+          creationDraft: {
+            concept: "港风商战悬疑，主角从灰产洗白。",
+            title: "夜港账本",
+            genre: "urban",
+            blurb: "港口账本牵出灰产洗白风暴。",
+            storyBackground: "港城、账本、灰产洗白。",
+            draftFields: {
+              introMarkdown: "# 夜港账本\n\n## 一句话卖点\n港口账本牵出灰产洗白风暴。",
+            },
+            missingFields: [],
+            readyToCreate: false,
+          },
+        },
+      },
+    }));
+
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-intro-revise",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          title: "夜港账本",
+          genre: "urban",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "revise_book_intro",
+        revisionKind: "generate",
+        instruction: "根据种子生成简介正文",
+      },
+      tools: makeTools({
+        reviseBookIntro,
+      }),
+    });
+
+    expect(reviseBookIntro).toHaveBeenCalledWith(
+      "根据种子生成简介正文",
+      expect.objectContaining({
+        concept: "港风商战悬疑，主角从灰产洗白。",
+        title: "夜港账本",
+        genre: "urban",
+        blurb: "港口账本牵出灰产洗白风暴。",
+        storyBackground: "港城、账本、灰产洗白。",
+      }),
+      "generate",
+      "urban",
+    );
+    expect(result.session.creationDraft?.draftFields?.introMarkdown).toContain("夜港账本");
+    expect(result.responseText).toContain("已生成简介正文");
+  });
+
+  it("keeps revise_book_intro on intro and ignores non-intro fields from the tool result", async () => {
+    const reviseBookIntro = vi.fn(async () => ({
+      __interaction: {
+        responseText: "已生成简介正文。",
+        details: {
+          creationDraft: {
+            concept: "港风商战悬疑，主角从灰产洗白。",
+            title: "夜港账本",
+            genre: "urban",
+            blurb: "港口账本牵出灰产洗白风暴。",
+            storyBackground: "港城、账本、灰产洗白。",
+            worldPremise: "不该被这一步写出的世界观。",
+            novelOutline: "不该被这一步写出的小说大纲。",
+            draftFields: {
+              introMarkdown: "# 夜港账本\n\n## 一句话卖点\n港口账本牵出灰产洗白风暴。",
+            },
+            missingFields: [],
+            readyToCreate: false,
+          },
+        },
+      },
+    }));
+
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-intro-revise-lock",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          title: "夜港账本",
+          genre: "urban",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          worldPremise: "旧世界观",
+          novelOutline: "旧大纲",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        creationWizard: {
+          currentStep: "world",
+          completedSteps: [],
+          stepNotes: {},
+          updatedAt: 0,
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "revise_book_intro",
+        revisionKind: "generate",
+        instruction: "根据种子生成简介正文",
+      },
+      tools: makeTools({
+        reviseBookIntro,
+      }),
+    });
+
+    expect(result.session.creationWizard?.currentStep).toBe("intro");
+    expect(result.session.creationDraft?.worldPremise).toBe("旧世界观");
+    expect(result.session.creationDraft?.novelOutline).toBe("旧大纲");
+    expect(result.session.creationDraft?.draftFields?.introMarkdown).toContain("夜港账本");
+  });
+
+  it("prefers the fuller intro markdown body when revise_book_intro returns both scaffold and complete text", async () => {
+    const reviseBookIntro = vi.fn(async () => ({
+      __interaction: {
+        responseText: "已生成简介正文。",
+        details: {
+          draftRaw: "# 简介正文\n\n## 一句话卖点\n港口账本牵出灰产洗白风暴。\n\n## 故事概述\n林砚被迫卷入港城旧债和灰产洗白链。\n\n## 故事走向\n他在自保、复仇和真相之间越陷越深。\n\n## 主要人物成长路径\n林砚从被动防守到主动追索真相。\n\n## 核心冲突\n他与灰产链条的对抗不断升级。\n\n## 核心价值观\n在灰色秩序中守住底线。",
+          creationDraft: {
+            concept: "港风商战悬疑，主角从灰产洗白。",
+            title: "夜港账本",
+            genre: "urban",
+            blurb: "港口账本牵出灰产洗白风暴。",
+            storyBackground: "港城、账本、灰产洗白。",
+            draftFields: {
+              introMarkdown: "# 简介正文\n\n## 一句话卖点\n-\n\n## 故事概述\n-\n\n## 故事走向\n-\n\n## 主要人物成长路径\n-\n\n## 核心冲突\n-\n\n## 核心价值观\n-",
+            },
+            missingFields: [],
+            readyToCreate: false,
+          },
+        },
+      },
+    }));
+
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-intro-revise-fuller",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          title: "夜港账本",
+          genre: "urban",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "revise_book_intro",
+        revisionKind: "generate",
+        instruction: "根据种子生成简介正文",
+      },
+      tools: makeTools({
+        reviseBookIntro,
+      }),
+    });
+
+    expect(result.session.creationDraft?.draftFields?.introMarkdown).toContain("林砚从被动防守到主动追索真相。");
+    expect(result.session.creationDraft?.draftFields?.introMarkdown).not.toContain("## 核心价值观\n-");
+  });
+
   it("selects a genre from the shared genre library and seeds a draft", async () => {
     const result = await runInteractionRequest({
       session: InteractionSessionSchema.parse({
@@ -94,8 +275,9 @@ describe("interaction runtime", () => {
       genreSource: "custom",
       genreAlias: "港风商战悬疑",
       mappedGenreId: "urban",
-      nextQuestion: expect.stringContaining("故事概述"),
+      readyToCreate: false,
     }));
+    expect(result.session.creationDraft?.nextQuestion).toBeUndefined();
     expect(result.session.creationWizard?.currentStep).toBe("intro");
     expect(result.responseText).toContain("都市");
   });
@@ -244,14 +426,19 @@ describe("interaction runtime", () => {
   });
 
   it("routes advance_book_wizard through the shared wizard tool and moves to the next step", async () => {
-    const advanceBookWizard = vi.fn(async () => ({
+    const advanceBookWizard = vi.fn(async (_input, existingDraft, currentStep, nextStep) => ({
       __interaction: {
-        responseText: "已生成简介 / 故事背景并进入世界观。",
+        responseText: "已生成世界观。",
         details: {
           creationDraft: {
+            ...(existingDraft ?? {}),
             concept: "港风商战悬疑，主角从灰产洗白。",
+            title: "夜港账本",
+            genre: "urban",
             blurb: "港口账本牵出灰产洗白风暴。",
             storyBackground: "港城、账本、灰产洗白。",
+            worldPremise: "近未来港口城，账本牵出多方势力。",
+            settingNotes: "港口、灰产、旧债交织。",
             missingFields: [],
             readyToCreate: false,
           },
@@ -264,6 +451,15 @@ describe("interaction runtime", () => {
         sessionId: "session-wizard",
         projectRoot: "/tmp/project",
         automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          title: "夜港账本",
+          genre: "urban",
+          blurb: "港口账本牵出灰产洗白风暴。",
+          storyBackground: "港城、账本、灰产洗白。",
+          missingFields: [],
+          readyToCreate: false,
+        },
         creationWizard: {
           currentStep: "intro",
           completedSteps: [],
@@ -276,16 +472,21 @@ describe("interaction runtime", () => {
         intent: "advance_book_wizard",
         instruction: "确认当前简介页，进入世界观。",
         wizardStep: "intro",
+        nextStep: "world",
       },
       tools: makeTools({
         advanceBookWizard,
       }),
     });
 
-    expect(advanceBookWizard).toHaveBeenCalledWith("确认当前简介页，进入世界观。", undefined, "intro");
+    expect(advanceBookWizard).toHaveBeenCalledWith("确认当前简介页，进入世界观。", expect.objectContaining({
+      concept: "港风商战悬疑，主角从灰产洗白。",
+      blurb: "港口账本牵出灰产洗白风暴。",
+    }), "intro", "world");
     expect(result.session.creationDraft).toEqual(expect.objectContaining({
       blurb: "港口账本牵出灰产洗白风暴。",
       storyBackground: "港城、账本、灰产洗白。",
+      worldPremise: "近未来港口城，账本牵出多方势力。",
     }));
     expect(result.session.creationWizard?.currentStep).toBe("world");
   });
@@ -463,7 +664,7 @@ describe("interaction runtime", () => {
       }),
       request: {
         intent: "create_book",
-        wizardStep: "review",
+        wizardStep: "relation",
       },
       tools: makeTools(),
     })).rejects.toThrow("基础资料尚未完成");
@@ -522,7 +723,7 @@ describe("interaction runtime", () => {
 
     expect(result.responseText).toContain("夜港账本");
     expect(result.responseText).toContain("近未来港口城");
-    expect(result.responseText).toContain("卷一先查账还是先砸场");
+    expect(result.responseText).not.toContain("卷一先查账还是先砸场");
   });
 
   it("routes export_book through the shared export tool", async () => {
@@ -803,6 +1004,36 @@ describe("interaction runtime", () => {
       "harbor",
       "current_focus.md",
       "# Current Focus\n\nBring the story back to the old harbor debt line.\n",
+    );
+  });
+
+  it("routes wizard arc truth files by their canonical wizard filename", async () => {
+    const writeTruthFile = vi.fn(async () => ({ ok: true }));
+
+    await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-4b-arc",
+        projectRoot: "/tmp/project",
+        activeBookId: "harbor",
+        automationMode: "semi",
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "edit_truth",
+        bookId: "harbor",
+        fileName: "人物弧光页.md",
+        instruction: "# 人物弧光\n\n## 主角\n从自保到反击。\n",
+      },
+      tools: makeTools({
+        writeTruthFile,
+      }),
+    });
+
+    expect(writeTruthFile).toHaveBeenCalledWith(
+      "harbor",
+      "人物弧光页.md",
+      "# 人物弧光\n\n## 主角\n从自保到反击。\n",
     );
   });
 

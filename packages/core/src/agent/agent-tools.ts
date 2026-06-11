@@ -64,6 +64,13 @@ function normalizeBooksRelativePath(relativePath: string): string {
   return trimmed.replace(/^books(?:[\\/]|$)/i, "");
 }
 
+function extractBooksRelativeBookId(relativePath: string): string | undefined {
+  const normalized = normalizeBooksRelativePath(relativePath);
+  const [firstSegment] = normalized.split(/[\\/]/);
+  if (!firstSegment) return undefined;
+  return normalizeBookIdInput(firstSegment);
+}
+
 /**
  * Resolve a user-supplied relative path against the books root and guard
  * against path-traversal (../ etc.).
@@ -86,6 +93,22 @@ function resolveToolBookId(
   const resolvedBookId = normalizeBookIdInput(paramsBookId) ?? normalizeBookIdInput(activeBookId ?? undefined);
   if (!resolvedBookId) {
     throw new Error(`${toolName} requires bookId when there is no active book.`);
+  }
+  return resolvedBookId;
+}
+
+function resolveLockedToolBookId(
+  toolName: string,
+  paramsBookId: string | undefined,
+  activeBookId: string | null,
+): string {
+  const resolvedBookId = normalizeBookIdInput(activeBookId ?? undefined);
+  if (!resolvedBookId) {
+    throw new Error(`${toolName} requires an active book.`);
+  }
+  const requestedBookId = normalizeBookIdInput(paramsBookId);
+  if (requestedBookId && requestedBookId !== resolvedBookId) {
+    throw new Error(`${toolName} is locked to the active book "${resolvedBookId}".`);
   }
   return resolvedBookId;
 }
@@ -254,10 +277,12 @@ function normalizeBookIdInput(bookId: string | undefined): string | undefined {
 
 const REVISION_INTENT_RE = /(修订|重订|修改|改写|重写|润色|精修|polish|rewrite|rework|revise|spot-fix|anti-detect|fix)/i;
 const REWRITE_INTENT_RE = /(重写|rewrite|rework)/i;
+const NEGATED_CREATE_RE = /(不要|别|勿|禁止|无需|不需要|不要去|do\s*not|don't|no\s+need\s+to)\s*(再|去|直接|调用|触发)?\s*(建书|创建|新书|create\s+book|init\s+book|architect)/i;
 
 function inferSubAgentFromInstruction(instruction: string): Static<typeof SubAgentParams>["agent"] | undefined {
   const text = instruction.trim().toLowerCase();
   if (!text) return undefined;
+  if (NEGATED_CREATE_RE.test(text)) return undefined;
   if (/(导出|export|epub|\bmd\b|markdown|txt)/i.test(text)) return "exporter";
   if (/(审计|审核|audit)/i.test(text)) return "auditor";
   if (REVISION_INTENT_RE.test(text)) return "reviser";
@@ -520,7 +545,7 @@ export function createWriteTruthFileTool(
     label: "Write Truth File",
     parameters: WriteTruthFileParams,
     async execute(_toolCallId, params): Promise<AgentToolResult<undefined>> {
-      const bookId = resolveToolBookId("write_truth_file", params.bookId, activeBookId);
+      const bookId = resolveLockedToolBookId("write_truth_file", params.bookId, activeBookId);
       await tools.writeTruthFile(bookId, params.fileName, params.content);
       return textResult(`Updated "${params.fileName}" for "${bookId}".`);
     },
@@ -574,7 +599,7 @@ export function createPatchChapterTextTool(
     label: "Patch Chapter",
     parameters: PatchChapterTextParams,
     async execute(_toolCallId, params): Promise<AgentToolResult<undefined>> {
-      const bookId = resolveToolBookId("patch_chapter_text", params.bookId, activeBookId);
+      const bookId = resolveLockedToolBookId("patch_chapter_text", params.bookId, activeBookId);
       const result = await tools.patchChapterText(
         bookId,
         params.chapterNumber,
@@ -597,7 +622,7 @@ const ReadParams = Type.Object({
   path: Type.String({ description: "File path relative to books/, e.g. {bookId}/story/story_bible.md" }),
 });
 
-export function createReadTool(projectRoot: string): AgentTool<typeof ReadParams> {
+export function createReadTool(projectRoot: string, activeBookId: string | null): AgentTool<typeof ReadParams> {
   const booksRoot = join(projectRoot, "books");
 
   return {
@@ -610,6 +635,14 @@ export function createReadTool(projectRoot: string): AgentTool<typeof ReadParams
       params: Static<typeof ReadParams>,
     ): Promise<AgentToolResult<undefined>> {
       try {
+        const requestedBookId = extractBooksRelativeBookId(params.path);
+        const activeResolvedBookId = normalizeBookIdInput(activeBookId ?? undefined);
+        if (!activeResolvedBookId) {
+          throw new Error("read requires an active book.");
+        }
+        if (requestedBookId && requestedBookId !== activeResolvedBookId) {
+          throw new Error(`read is locked to the active book "${activeResolvedBookId}".`);
+        }
         const filePath = safeBooksPath(booksRoot, params.path);
         let content = await readFile(filePath, "utf-8");
         if (content.length > 10_000) {
@@ -633,7 +666,7 @@ const EditParams = Type.Object({
   new_string: Type.String({ description: "Replacement string" }),
 });
 
-export function createEditTool(projectRoot: string): AgentTool<typeof EditParams> {
+export function createEditTool(projectRoot: string, activeBookId: string | null): AgentTool<typeof EditParams> {
   const booksRoot = join(projectRoot, "books");
 
   return {
@@ -650,6 +683,8 @@ export function createEditTool(projectRoot: string): AgentTool<typeof EditParams
       params: Static<typeof EditParams>,
     ): Promise<AgentToolResult<undefined>> {
       try {
+        const requestedBookId = extractBooksRelativeBookId(params.path);
+        const bookId = resolveLockedToolBookId("edit", requestedBookId, activeBookId);
         const filePath = safeBooksPath(booksRoot, params.path);
         const content = await readFile(filePath, "utf-8");
         const idx = content.indexOf(params.old_string);
@@ -678,7 +713,7 @@ const WriteFileParams = Type.Object({
   content: Type.String({ description: "Full file content to write" }),
 });
 
-export function createWriteFileTool(projectRoot: string): AgentTool<typeof WriteFileParams> {
+export function createWriteFileTool(projectRoot: string, activeBookId: string | null): AgentTool<typeof WriteFileParams> {
   const booksRoot = join(projectRoot, "books");
 
   return {
@@ -695,6 +730,8 @@ export function createWriteFileTool(projectRoot: string): AgentTool<typeof Write
       params: Static<typeof WriteFileParams>,
     ): Promise<AgentToolResult<undefined>> {
       try {
+        const requestedBookId = extractBooksRelativeBookId(params.path);
+        const bookId = resolveLockedToolBookId("write", requestedBookId, activeBookId);
         const filePath = safeBooksPath(booksRoot, params.path);
         const parentDir = resolve(filePath, "..");
         const { mkdir } = await import("node:fs/promises");
@@ -717,7 +754,7 @@ const GrepParams = Type.Object({
   pattern: Type.String({ description: "Search pattern (plain text or regex)" }),
 });
 
-export function createGrepTool(projectRoot: string): AgentTool<typeof GrepParams> {
+export function createGrepTool(projectRoot: string, activeBookId: string | null): AgentTool<typeof GrepParams> {
   const booksRoot = join(projectRoot, "books");
 
   return {
@@ -731,7 +768,8 @@ export function createGrepTool(projectRoot: string): AgentTool<typeof GrepParams
       params: Static<typeof GrepParams>,
     ): Promise<AgentToolResult<undefined>> {
       try {
-        const bookDir = safeBooksPath(booksRoot, params.bookId);
+        const bookId = resolveLockedToolBookId("grep", params.bookId, activeBookId);
+        const bookDir = safeBooksPath(booksRoot, bookId);
         const regex = new RegExp(params.pattern, "gi");
         const results: string[] = [];
 
@@ -766,7 +804,7 @@ export function createGrepTool(projectRoot: string): AgentTool<typeof GrepParams
         ]);
 
         if (results.length === 0) {
-          return textResult(`No matches for "${params.pattern}" in book "${params.bookId}".`);
+          return textResult(`No matches for "${params.pattern}" in book "${bookId}".`);
         }
 
         const truncated = results.length > 100
@@ -792,7 +830,7 @@ const LsParams = Type.Object({
   ),
 });
 
-export function createLsTool(projectRoot: string): AgentTool<typeof LsParams> {
+export function createLsTool(projectRoot: string, activeBookId: string | null): AgentTool<typeof LsParams> {
   const booksRoot = join(projectRoot, "books");
 
   return {
@@ -805,7 +843,8 @@ export function createLsTool(projectRoot: string): AgentTool<typeof LsParams> {
       params: Static<typeof LsParams>,
     ): Promise<AgentToolResult<undefined>> {
       try {
-        const base = safeBooksPath(booksRoot, params.bookId);
+        const bookId = resolveLockedToolBookId("ls", params.bookId, activeBookId);
+        const base = safeBooksPath(booksRoot, bookId);
         const target = params.subdir ? safeBooksPath(base, params.subdir) : base;
 
         const entries = await readdir(target);
@@ -823,12 +862,12 @@ export function createLsTool(projectRoot: string): AgentTool<typeof LsParams> {
         }
 
         if (details.length === 0) {
-          return textResult(`Directory is empty: ${params.bookId}/${params.subdir ?? ""}`);
+          return textResult(`Directory is empty: ${bookId}/${params.subdir ?? ""}`);
         }
 
         return textResult(details.join("\n"));
       } catch (err: any) {
-        return textResult(`Failed to list "${params.bookId}/${params.subdir ?? ""}": ${err?.message ?? String(err)}`);
+        return textResult(`Failed to list "${activeBookId ?? ""}/${params.subdir ?? ""}": ${err?.message ?? String(err)}`);
       }
     },
   };

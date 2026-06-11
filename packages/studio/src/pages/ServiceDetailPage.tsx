@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { fetchJson } from "../hooks/use-api";
 import { useServiceStore } from "../store/service";
+import { useServicesConfig } from "../hooks/use-services-config";
 import { Eye, EyeOff, Loader2, ArrowLeft } from "lucide-react";
 import { ServiceConfigSourceCard } from "../components/ServiceConfigSourceCard";
 import {
@@ -59,6 +60,7 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
   const refreshServices = useServiceStore((s) => s.refreshServices);
   const setStoreModels = useServiceStore((s) => s.setModels);
   const clearStoreModels = useServiceStore((s) => s.clearModels);
+  const { data: servicesConfig } = useServicesConfig();
 
   useEffect(() => { void fetchServices(); }, [fetchServices]);
 
@@ -91,52 +93,45 @@ export function ServiceDetailPage({ serviceId, nav }: { serviceId: string; nav: 
   const [status, setStatus] = useState<ConnectionStatus>({ state: "idle" });
 
   useEffect(() => {
-    let cancelled = false;
-    void fetchJson<{ services: Array<Record<string, unknown>>; defaultModel?: string | null }>("/services/config")
-      .then((data) => {
-        if (cancelled) return;
-        const matched = (data.services ?? []).find((entry) => {
-          if (typeof entry.service !== "string") return false;
-          if (serviceId.startsWith("custom:")) {
-            return entry.service === "custom" && `custom:${String(entry.name ?? "")}` === serviceId;
-          }
-          return entry.service === serviceId;
-        });
-        if (!matched) return;
-        if (isCustom) {
-          setCustomName(String(matched.name ?? persistedCustomName));
-          setBaseUrl(String(matched.baseUrl ?? ""));
-        }
-        if (typeof matched.temperature === "number") setTemperature(String(matched.temperature));
-        if (typeof matched.maxTokens === "number") setMaxTokens(String(matched.maxTokens));
-        if (matched.apiFormat === "chat" || matched.apiFormat === "responses") setApiFormat(matched.apiFormat);
-        if (typeof matched.stream === "boolean") setStream(matched.stream);
-        if (matched.modelMode === "auto" || matched.modelMode === "manual" || matched.modelMode === "hybrid") {
-          setModelMode(matched.modelMode);
-        }
-        if (typeof matched.preferredModel === "string") {
-          setPreferredModel(matched.preferredModel);
-        } else if (typeof data.defaultModel === "string") {
-          setPreferredModel(data.defaultModel);
-        }
-        if (Array.isArray(matched.models)) {
-          const normalized = matched.models
-            .filter((model): model is Record<string, unknown> => Boolean(model) && typeof model === "object")
-            .map((model) => ({
-              id: typeof model.id === "string" ? model.id.trim() : "",
-              ...(typeof model.name === "string" && model.name.trim().length > 0 ? { name: model.name.trim() } : {}),
-              ...(typeof model.enabled === "boolean" ? { enabled: model.enabled } : { enabled: true }),
-              ...(model.source === "manual" || model.source === "detected"
-                ? { source: model.source as "manual" | "detected" }
-                : { source: "manual" as const }),
-            }))
-            .filter((model) => model.id.length > 0);
-          setEditableModels(normalized);
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [isCustom, persistedCustomName, serviceId]);
+    const matched = (servicesConfig?.services ?? []).find((entry) => {
+      if (typeof entry.service !== "string") return false;
+      if (serviceId.startsWith("custom:")) {
+        return entry.service === "custom" && `custom:${String(entry.name ?? "")}` === serviceId;
+      }
+      return entry.service === serviceId;
+    });
+    if (!matched) return;
+    if (isCustom) {
+      setCustomName(String(matched.name ?? persistedCustomName));
+      setBaseUrl(String(matched.baseUrl ?? ""));
+    }
+    if (typeof matched.temperature === "number") setTemperature(String(matched.temperature));
+    if (typeof matched.maxTokens === "number") setMaxTokens(String(matched.maxTokens));
+    if (matched.apiFormat === "chat" || matched.apiFormat === "responses") setApiFormat(matched.apiFormat);
+    if (typeof matched.stream === "boolean") setStream(matched.stream);
+    if (matched.modelMode === "auto" || matched.modelMode === "manual" || matched.modelMode === "hybrid") {
+      setModelMode(matched.modelMode);
+    }
+    if (typeof matched.preferredModel === "string") {
+      setPreferredModel(matched.preferredModel);
+    } else if (typeof servicesConfig?.defaultModel === "string") {
+      setPreferredModel(servicesConfig.defaultModel);
+    }
+    if (Array.isArray(matched.models)) {
+      const normalized = matched.models
+        .filter((model): model is Record<string, unknown> => Boolean(model) && typeof model === "object")
+        .map((model) => ({
+          id: typeof model.id === "string" ? model.id.trim() : "",
+          ...(typeof model.name === "string" && model.name.trim().length > 0 ? { name: model.name.trim() } : {}),
+          ...(typeof model.enabled === "boolean" ? { enabled: model.enabled } : { enabled: true }),
+          ...(model.source === "manual" || model.source === "detected"
+            ? { source: model.source as "manual" | "detected" }
+            : { source: "manual" as const }),
+        }))
+        .filter((model) => model.id.length > 0);
+      setEditableModels(normalized);
+    }
+  }, [isCustom, persistedCustomName, serviceId, servicesConfig]);
 
   const resolvedCustomName = persistedCustomName || customName.trim() || "Custom";
   const effectiveServiceId = isCustom ? `custom:${resolvedCustomName}` : serviceId;

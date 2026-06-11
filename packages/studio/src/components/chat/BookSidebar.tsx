@@ -46,6 +46,7 @@ export interface BookSidebarProps {
 const FOUNDATION_LABELS: Record<string, string> = {
   "story_bible.md": "世界观设定",
   "volume_outline.md": "卷纲规划",
+  "story/outline/volume_map.md": "卷纲规划",
   "book_rules.md": "叙事规则",
   "current_state.md": "状态卡",
   "pending_hooks.md": "伏笔池",
@@ -149,7 +150,18 @@ function QuickFileLinks({
   );
 }
 
+export function resolveArtifactEndpoint(
+  bookId: string,
+  artifactFile: string,
+  artifactSource: "truth" | "wizard",
+): string {
+  return artifactSource === "wizard"
+    ? `/books/${bookId}/wizard-file/${encodeURIComponent(artifactFile)}`
+    : `/books/${bookId}/truth/${encodeURIComponent(artifactFile)}`;
+}
+
 export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly t: TFunction }) {
+  const artifactSource = useChatStore((s) => s.artifactSource);
   const artifactFile = useChatStore((s) => s.artifactFile);
   const artifactChapter = useChatStore((s) => s.artifactChapter);
   const artifactChapterMeta = useChatStore((s) => s.artifactChapterMeta);
@@ -208,7 +220,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
         .catch(() => setContent(null))
         .finally(() => setLoading(false));
     } else if (artifactFile) {
-      fetchJson<{ content: string | null }>(`/books/${bookId}/truth/${artifactFile}`)
+      const endpoint = resolveArtifactEndpoint(bookId, artifactFile, artifactSource);
+      fetchJson<{ content: string | null }>(endpoint)
         .then((data) => {
           setContent(data.content ?? "");
           setContentWordCount(null);
@@ -216,7 +229,7 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
         .catch(() => setContent(null))
         .finally(() => setLoading(false));
     }
-  }, [bookId, artifactFile, artifactChapter, artifactEditMode, clearSelection, isChapter, bookDataVersion]);
+  }, [artifactSource, bookId, artifactFile, artifactChapter, artifactEditMode, clearSelection, isChapter, bookDataVersion]);
 
   useEffect(() => {
     if (!isChapter || !artifactEditMode || content === null) return;
@@ -328,7 +341,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
             : countChapterLengthByLanguage(editContent),
         );
       } else if (artifactFile) {
-        await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
+        const endpoint = resolveArtifactEndpoint(bookId, artifactFile, artifactSource);
+        await fetchJson(endpoint, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: editContent }),
@@ -342,7 +356,7 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
     } finally {
       setSaving(false);
     }
-  }, [bookId, artifactFile, artifactChapter, isChapter, editContent]);
+  }, [artifactSource, bookId, artifactFile, artifactChapter, isChapter, editContent]);
 
   const handleNormalizeDialogueQuotes = useCallback(() => {
     setEditContent((current) => normalizeDialogueQuotesToDouble(current));
@@ -360,7 +374,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
     setSaving(true);
     try {
       if (artifactFile) {
-        await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
+        const endpoint = resolveArtifactEndpoint(bookId, artifactFile, artifactSource);
+        await fetchJson(endpoint, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: next }),
@@ -378,6 +393,7 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
   }, [
     bookId,
     artifactFile,
+    artifactSource,
     isBookRules,
     editing,
     editContent,
@@ -400,7 +416,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
     setSaving(true);
     try {
       if (artifactFile) {
-        await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
+        const endpoint = resolveArtifactEndpoint(bookId, artifactFile, artifactSource);
+        await fetchJson(endpoint, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: next }),
@@ -418,6 +435,7 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
   }, [
     bookId,
     artifactFile,
+    artifactSource,
     isBookRules,
     editing,
     editContent,
@@ -446,7 +464,8 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
     setSaving(true);
     try {
       if (artifactFile) {
-        await fetchJson(`/books/${bookId}/truth/${artifactFile}`, {
+        const endpoint = resolveArtifactEndpoint(bookId, artifactFile, artifactSource);
+        await fetchJson(endpoint, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: next }),
@@ -461,7 +480,7 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
     } finally {
       setSaving(false);
     }
-  }, [bookId, artifactFile, isBookRules, editing, editContent, content]);
+  }, [artifactSource, bookId, artifactFile, isBookRules, editing, editContent, content]);
 
   const chapterStatus = artifactChapterMeta?.status ?? t("sidebar.chapter.statusUnknown");
   const chapterIssues = artifactChapterMeta?.auditIssues ?? [];
@@ -707,14 +726,14 @@ export function ArtifactView({ bookId, t }: { readonly bookId: string; readonly 
             </div>
             <div ref={contentContainerRef} className="flex-1 overflow-y-auto px-4 py-4 text-sm leading-7">
               <div className="mx-auto w-full max-w-none">
-                <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
+                <Streamdown className="w-full min-w-0 max-w-none break-words [&_*]:min-w-0" plugins={streamdownPlugins} mode="static">{content}</Streamdown>
               </div>
             </div>
           </div>
         ) : (
           <div ref={contentContainerRef} className="px-4 py-3 text-sm leading-7">
             <div className="mx-auto w-full max-w-none">
-              <Streamdown plugins={streamdownPlugins} mode="static">{content}</Streamdown>
+              <Streamdown className="w-full min-w-0 max-w-none break-words [&_*]:min-w-0" plugins={streamdownPlugins} mode="static">{content}</Streamdown>
             </div>
           </div>
         )}
@@ -948,7 +967,7 @@ function PanelView({ bookId, theme: _theme, t, sse }: BookSidebarProps) {
           <QuickFileLinks
             title="大纲导航"
             files={[
-              { file: "volume_outline.md", label: "卷纲规划" },
+              { file: "story/outline/volume_map.md", label: "卷纲规划" },
               { file: "pending_hooks.md", label: "伏笔池" },
               { file: "subplot_board.md", label: "支线进度" },
               { file: "current_state.md", label: "状态卡" },

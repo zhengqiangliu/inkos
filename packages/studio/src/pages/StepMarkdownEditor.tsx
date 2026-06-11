@@ -1,4 +1,4 @@
-import { Edit3, Sparkles } from "lucide-react";
+import { Edit3, Save, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import { cjk } from "@streamdown/cjk";
@@ -12,20 +12,26 @@ export function StepMarkdownEditor(props: {
   readonly value: string;
   readonly editing: boolean;
   readonly onToggleEditing: () => void;
+  readonly onSave?: () => void | Promise<boolean | void>;
   readonly onValueChange: (value: string) => void;
   readonly onAiModify?: (note: string, mode: "revise" | "polish") => void;
   readonly showAiActions?: boolean;
   readonly disabled?: boolean;
+  readonly saving?: boolean;
+  readonly onSaveSuccess?: () => void;
 }) {
   const {
     spec,
     value,
     editing,
     onToggleEditing,
+    onSave,
     onValueChange,
     onAiModify,
     showAiActions = true,
     disabled,
+    saving,
+    onSaveSuccess,
   } = props;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [promptOpen, setPromptOpen] = useState(false);
@@ -44,8 +50,8 @@ export function StepMarkdownEditor(props: {
   }, [editing, value]);
 
   return (
-    <div className="rounded-2xl border border-border/60 bg-background/50 p-4 space-y-4">
-      <div className="flex items-start justify-between gap-3">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col rounded-2xl border border-border/60 bg-background/50 p-4">
+      <div className="flex items-start justify-between gap-3 pb-4">
         <div>
           <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground">{spec.title}</div>
           <div className="text-xs text-muted-foreground">{spec.description}</div>
@@ -55,6 +61,22 @@ export function StepMarkdownEditor(props: {
             <Edit3 size={12} className="mr-1 inline-block" />
             {editing ? "预览" : "编辑"}
           </button>
+          {editing ? (
+            <button
+              type="button"
+              onClick={async () => {
+                const result = await onSave?.();
+                if (result !== false) {
+                  onSaveSuccess?.();
+                }
+              }}
+              disabled={disabled || saving || !onSave}
+              className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs font-medium text-primary disabled:opacity-50"
+            >
+              <Save size={12} className="mr-1 inline-block" />
+              {saving ? "保存中..." : "保存"}
+            </button>
+          ) : null}
           {showAiActions ? (
             <>
               <button type="button" onClick={() => { setPromptMode("revise"); setPromptOpen(true); }} disabled={disabled} className="rounded-md border border-primary/40 bg-primary/5 px-3 py-2 text-xs font-medium text-primary disabled:opacity-50">
@@ -68,19 +90,19 @@ export function StepMarkdownEditor(props: {
           ) : null}
         </div>
       </div>
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
-        <div className="min-w-0 rounded-xl border border-border/50 bg-background/60">
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-h-0 min-w-0 flex-1 rounded-xl border border-border/50 bg-background/60">
           {editing ? (
             <textarea
               ref={textareaRef}
               value={value}
               onChange={(e) => onValueChange(e.target.value)}
-              className="min-h-[280px] max-h-[560px] w-full resize-none rounded-xl bg-transparent px-4 py-3 text-sm leading-7 outline-none"
+              className="h-full min-h-0 w-full flex-1 resize-none rounded-xl bg-transparent px-4 py-3 text-sm leading-7 outline-none"
               placeholder={spec.sections.map((section) => section.placeholder).join("\n\n")}
             />
           ) : (
-            <div className="prose prose-sm max-w-none px-4 py-3">
-              <Streamdown plugins={streamdownPlugins} mode="static">{value || "暂无内容"}</Streamdown>
+            <div className="prose prose-sm max-w-none flex h-full min-h-0 w-full min-w-0 flex-1 overflow-auto px-4 py-3 break-words">
+              <Streamdown className="w-full min-w-0 max-w-none break-words [&_*]:min-w-0" plugins={streamdownPlugins} mode="static">{value || "暂无内容"}</Streamdown>
             </div>
           )}
         </div>

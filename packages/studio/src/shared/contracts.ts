@@ -282,6 +282,379 @@ export interface BookTaskResumeResponse {
   readonly task: BookTask;
 }
 
+export interface TaskChecklistItem {
+  readonly id: string;
+  readonly text: string;
+  readonly done: boolean;
+  readonly order: number;
+  readonly note?: string | null;
+}
+
+export interface TaskChecklistTemplateSummary {
+  readonly id: string;
+  readonly label: string;
+  readonly description: string;
+}
+
+export interface TaskChecklist {
+  readonly bookId: string;
+  readonly templateId?: string;
+  readonly items: ReadonlyArray<TaskChecklistItem>;
+  readonly updatedAt: string;
+}
+
+export interface TaskChecklistResponse {
+  readonly checklist: TaskChecklist;
+  readonly templates?: ReadonlyArray<TaskChecklistTemplateSummary>;
+}
+
+export interface TaskChecklistSavePayload {
+  readonly templateId?: string;
+  readonly items: ReadonlyArray<{
+    readonly id?: string;
+    readonly text: string;
+    readonly done?: boolean;
+    readonly note?: string | null;
+  }>;
+}
+
+// --- Script Workspace ---
+
+export interface ScriptWorkspacePromptTemplates {
+  readonly script: string;
+  readonly image: string;
+  readonly video: string;
+}
+
+export type ScriptWorkspaceGenerationStrategy = "chapter" | "episode";
+
+export interface ScriptWorkspaceConfig {
+  readonly visualStyle: string;
+  readonly directorMethod: string;
+  readonly aiTool: string;
+  readonly aiModel: string;
+  readonly generationStrategy?: ScriptWorkspaceGenerationStrategy;
+  readonly chaptersPerEpisode?: number;
+  readonly episodeDurationSec: number;
+  readonly segmentDurationSec: number;
+  readonly segmentDurationMinSec: number;
+  readonly segmentDurationMaxSec: number;
+  readonly scriptPrompts: ScriptWorkspacePromptTemplates;
+}
+
+export interface ScriptWorkspaceEntity {
+  readonly name: string;
+  readonly description: string;
+  readonly sourceChapterNumbers: ReadonlyArray<number>;
+}
+
+export interface ScriptWorkspaceScene {
+  readonly id: string;
+  readonly episodeNumber: number;
+  readonly chapterNumber: number;
+  readonly sourceChapterNumbers?: ReadonlyArray<number>;
+  readonly title: string;
+  readonly description: string;
+  readonly location: string;
+  readonly timeOfDay: string;
+  readonly characters: ReadonlyArray<string>;
+  readonly props: ReadonlyArray<string>;
+  readonly assets: ReadonlyArray<string>;
+}
+
+export interface ScriptWorkspaceSegment {
+  readonly id: string;
+  readonly order: number;
+  readonly episodeNumber: number;
+  readonly chapterNumber: number;
+  readonly sourceChapterNumbers?: ReadonlyArray<number>;
+  readonly title: string;
+  readonly scene: string;
+  readonly durationSec: number;
+  readonly characters: ReadonlyArray<string>;
+  readonly props: ReadonlyArray<string>;
+  readonly assets: ReadonlyArray<string>;
+  readonly scriptText: string;
+  readonly textToImagePrompt: string;
+  readonly imageToVideoPrompt: string;
+}
+
+export interface ScriptWorkspaceEpisode {
+  readonly episodeNumber: number;
+  readonly chapterNumber: number;
+  readonly sourceChapterNumbers?: ReadonlyArray<number>;
+  readonly chapterTitle: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly durationSec: number;
+  readonly segments: ReadonlyArray<ScriptWorkspaceSegment>;
+}
+
+export interface ScriptWorkspaceExtraction {
+  readonly scenes: ReadonlyArray<ScriptWorkspaceScene>;
+  readonly characters: ReadonlyArray<ScriptWorkspaceEntity>;
+  readonly props: ReadonlyArray<ScriptWorkspaceEntity>;
+  readonly assets: ReadonlyArray<ScriptWorkspaceEntity>;
+}
+
+export interface ScriptWorkspace {
+  readonly bookId: string;
+  readonly selectedChapterNumbers: ReadonlyArray<number>;
+  readonly updatedAt: string;
+  readonly config: ScriptWorkspaceConfig;
+  readonly scriptPrompt: string;
+  readonly extraction: ScriptWorkspaceExtraction;
+  readonly episodes: ReadonlyArray<ScriptWorkspaceEpisode>;
+}
+
+export interface ScriptWorkspaceResponse {
+  readonly workspace: ScriptWorkspace;
+}
+
+export interface ScriptWorkspaceSavePayload {
+  readonly workspace: ScriptWorkspace;
+}
+
+export interface ScriptWorkspaceGeneratePayload {
+  readonly selectedChapterNumbers?: ReadonlyArray<number>;
+  readonly config?: Partial<ScriptWorkspaceConfig>;
+}
+
+export interface ScriptWorkspaceHistoryEntry {
+  readonly bookId: string;
+  readonly version: number;
+  readonly action: string;
+  readonly savedAt: string;
+  readonly workspace: ScriptWorkspace;
+}
+
+export interface ScriptWorkspaceHistoryResponse {
+  readonly history: ReadonlyArray<ScriptWorkspaceHistoryEntry>;
+}
+
+export interface ScriptWorkspaceDiffResult {
+  readonly fromVersion: number;
+  readonly toVersion: number;
+  readonly changedFields: ReadonlyArray<string>;
+  readonly from: ScriptWorkspace;
+  readonly to: ScriptWorkspace;
+}
+
+// --- Production Workspace ---
+
+export type ProductionDialogueType = "none" | "dialogue" | "inner_monologue" | "voiceover";
+
+export interface ProductionShot {
+  readonly id: string;
+  readonly episodeNumber: number;
+  readonly chapterNumber: number;
+  readonly sourceChapterNumbers?: ReadonlyArray<number>;
+  readonly segmentId: string;
+  readonly segmentOrder: number;
+  readonly shotNumber: number;
+  readonly track: string;
+  readonly title: string;
+  readonly scene: string;
+  readonly durationSec: number;
+  readonly shotType: string;
+  readonly cameraMovement: string;
+  readonly dialogue: string;
+  readonly dialogueType: ProductionDialogueType;
+  readonly mood: string;
+  readonly lighting: string;
+  readonly shouldGenerateImage: boolean;
+  readonly characters: ReadonlyArray<string>;
+  readonly props: ReadonlyArray<string>;
+  readonly assets: ReadonlyArray<string>;
+  readonly scriptText: string;
+  readonly textToImagePrompt: string;
+  readonly imageToVideoPrompt: string;
+}
+
+export interface ProductionEpisode {
+  readonly episodeNumber: number;
+  readonly chapterNumber: number;
+  readonly sourceChapterNumbers?: ReadonlyArray<number>;
+  readonly title: string;
+  readonly chapterTitle: string;
+  readonly summary: string;
+  readonly durationSec: number;
+  readonly trackCount: number;
+  readonly shots: ReadonlyArray<ProductionShot>;
+}
+
+export interface ProductionWorkspace {
+  readonly bookId: string;
+  readonly selectedChapterNumbers: ReadonlyArray<number>;
+  readonly updatedAt: string;
+  readonly sourceScriptUpdatedAt: string;
+  readonly sourceConfig: ScriptWorkspaceConfig;
+  readonly episodes: ReadonlyArray<ProductionEpisode>;
+}
+
+export interface ProductionWorkspaceResponse {
+  readonly workspace: ProductionWorkspace;
+}
+
+export interface ProductionWorkspaceSavePayload {
+  readonly workspace: ProductionWorkspace;
+}
+
+export interface ProductionWorkspaceGeneratePayload {
+  readonly scriptWorkspace?: ScriptWorkspace;
+}
+
+// --- Director Plan ---
+
+export interface DirectorPlanEpisode {
+  readonly episodeNumber: number;
+  readonly title: string;
+  readonly storyGoal: string;
+  readonly emotionalBeat: string;
+  readonly pacing: string;
+  readonly lensLanguage: string;
+  readonly blockingNotes: string;
+  readonly lightingNotes: string;
+  readonly soundNotes: string;
+  readonly continuityNotes: string;
+}
+
+export interface DirectorPlan {
+  readonly bookId: string;
+  readonly updatedAt: string;
+  readonly sourceProductionUpdatedAt: string;
+  readonly sourceConfig: ScriptWorkspaceConfig;
+  readonly visualStatement: string;
+  readonly directorIntent: string;
+  readonly visualRules: ReadonlyArray<string>;
+  readonly cameraRules: ReadonlyArray<string>;
+  readonly colorScript: ReadonlyArray<string>;
+  readonly episodePlans: ReadonlyArray<DirectorPlanEpisode>;
+}
+
+export interface DirectorPlanResponse {
+  readonly plan: DirectorPlan;
+}
+
+export interface DirectorPlanSavePayload {
+  readonly plan: DirectorPlan;
+}
+
+export interface DirectorPlanGeneratePayload {
+  readonly productionWorkspace?: ProductionWorkspace;
+}
+
+export interface DirectorPlanHistoryEntry {
+  readonly bookId: string;
+  readonly version: number;
+  readonly action: string;
+  readonly savedAt: string;
+  readonly plan: DirectorPlan;
+}
+
+export interface DirectorPlanHistoryResponse {
+  readonly history: ReadonlyArray<DirectorPlanHistoryEntry>;
+}
+
+export interface DirectorPlanDiffResult {
+  readonly fromVersion: number;
+  readonly toVersion: number;
+  readonly changedFields: ReadonlyArray<string>;
+  readonly from: DirectorPlan;
+  readonly to: DirectorPlan;
+}
+
+// --- Asset Library ---
+
+export type AssetLibraryItemType = "character" | "prop" | "scene" | "reference";
+export type AssetLibraryItemStatus =
+  | "draft"
+  | "prompt_ready"
+  | "image_generating"
+  | "image_ready"
+  | "video_generating"
+  | "video_ready"
+  | "rejected";
+
+export type AssetGenerationStatus = "pending" | "queued" | "generating" | "ready" | "failed" | "rejected";
+
+export interface AssetLibraryGenerationState {
+  readonly imageStatus: AssetGenerationStatus;
+  readonly videoStatus: AssetGenerationStatus;
+  readonly needsRegeneration: boolean;
+  readonly lastError: string;
+  readonly notes: string;
+}
+
+export interface AssetLibraryItem {
+  readonly id: string;
+  readonly type: AssetLibraryItemType;
+  readonly name: string;
+  readonly description: string;
+  readonly episodeNumbers: ReadonlyArray<number>;
+  readonly shotIds: ReadonlyArray<string>;
+  readonly referenceCount: number;
+  readonly prompt: string;
+  readonly status: AssetLibraryItemStatus;
+  readonly thumbnailPath: string;
+  readonly filePath: string;
+  readonly generation: AssetLibraryGenerationState;
+  readonly tags: ReadonlyArray<string>;
+}
+
+export interface AssetLibrary {
+  readonly bookId: string;
+  readonly updatedAt: string;
+  readonly sourceProductionUpdatedAt: string;
+  readonly items: ReadonlyArray<AssetLibraryItem>;
+}
+
+export interface AssetLibraryResponse {
+  readonly library: AssetLibrary;
+}
+
+export interface AssetLibrarySavePayload {
+  readonly library: AssetLibrary;
+}
+
+export interface AssetLibraryGeneratePayload {
+  readonly productionWorkspace?: ProductionWorkspace;
+}
+
+export interface AssetLibraryHistoryEntry {
+  readonly bookId: string;
+  readonly version: number;
+  readonly action: string;
+  readonly savedAt: string;
+  readonly library: AssetLibrary;
+}
+
+export interface AssetLibraryHistoryResponse {
+  readonly history: ReadonlyArray<AssetLibraryHistoryEntry>;
+}
+
+export interface AssetLibraryDiffResult {
+  readonly fromVersion: number;
+  readonly toVersion: number;
+  readonly changedFields: ReadonlyArray<string>;
+  readonly from: AssetLibrary;
+  readonly to: AssetLibrary;
+}
+
+export interface AssetLibraryUploadResponse {
+  readonly path: string;
+  readonly fileName: string;
+  readonly url: string;
+  readonly library: AssetLibrary;
+}
+
+export interface AssetLibraryUploadPayload {
+  readonly itemId: string;
+  readonly kind: "thumbnail" | "file";
+  readonly fileName: string;
+  readonly dataUrl: string;
+}
+
 // --- API Error Response ---
 
 export interface ApiErrorResponse {

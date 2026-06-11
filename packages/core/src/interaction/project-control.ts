@@ -41,7 +41,7 @@ function summarizeStructuredRequest(request: InteractionRequest): string {
 
 function resolveRequestWizardStep(request: InteractionRequest, sessionStep?: string | null): InteractionRequest["wizardStep"] {
   if (request.wizardStep) return request.wizardStep;
-  if (sessionStep === "intro" || sessionStep === "world" || sessionStep === "outline" || sessionStep === "volume" || sessionStep === "characters" || sessionStep === "arc" || sessionStep === "relation" || sessionStep === "review") {
+  if (sessionStep === "intro" || sessionStep === "world" || sessionStep === "outline" || sessionStep === "volume" || sessionStep === "characters" || sessionStep === "arc" || sessionStep === "relation") {
     return sessionStep;
   }
   return undefined;

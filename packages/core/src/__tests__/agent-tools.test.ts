@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StateManager } from "../state/manager.js";
 import {
+  createReadTool,
   createSubAgentTool,
+  createGrepTool,
+  createLsTool,
   createPatchChapterTextTool,
   createRenameEntityTool,
+  createEditTool,
   createWriteFileTool,
   createWriteTruthFileTool,
 } from "../agent/agent-tools.js";
@@ -444,6 +448,26 @@ describe("agent deterministic writing tools", () => {
     }
   });
 
+  it("does not infer architect when instruction explicitly forbids creating a book", async () => {
+    const pipeline = {
+      initBook: vi.fn(async () => undefined),
+    };
+    const tool = createSubAgentTool(
+      pipeline as never,
+      null,
+      undefined,
+      () => "不要创建新书，只生成当前页草案，不要调用 architect",
+    );
+
+    const result = await tool.execute("tool-no-architect", {} as any);
+
+    expect(result.content[0]?.type).toBe("text");
+    if (result.content[0]?.type === "text") {
+      expect(result.content[0].text).toContain("agent is required");
+    }
+    expect(pipeline.initBook).not.toHaveBeenCalled();
+  });
+
   it("uses explicit exporter params instead of guessing from instruction", async () => {
     const pipeline = {};
     const tool = createSubAgentTool(pipeline as never, "harbor", root);
@@ -463,7 +487,7 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("creates nested files through the generic write tool", async () => {
-    const tool = createWriteFileTool(root);
+    const tool = createWriteFileTool(root, "harbor");
 
     const result = await tool.execute("tool-10", {
       path: "harbor/story/runtime/notes.md",
@@ -476,7 +500,7 @@ describe("agent deterministic writing tools", () => {
   });
 
   it("normalizes a legacy books/ prefix to avoid books/books nesting", async () => {
-    const tool = createWriteFileTool(root);
+    const tool = createWriteFileTool(root, "harbor");
 
     await tool.execute("tool-11", {
       path: "books/harbor/chapters/0004_Bridge.md",
@@ -487,5 +511,73 @@ describe("agent deterministic writing tools", () => {
       .resolves.toContain("桥上起雾");
     await expect(readFile(join(root, "books", "books", "harbor", "chapters", "0004_Bridge.md"), "utf-8"))
       .rejects.toThrow();
+  });
+
+  it("locks book-scoped tools to the active book", async () => {
+    const read = createReadTool(root, "harbor");
+    const write = createWriteFileTool(root, "harbor");
+    const edit = createEditTool(root, "harbor");
+    const grep = createGrepTool(root, "harbor");
+    const ls = createLsTool(root, "harbor");
+    const truth = createWriteTruthFileTool({} as never, root, "harbor");
+
+    const readResult = await read.execute("tool-12r", {
+      path: "other/story/story_bible.md",
+    });
+    expect(readResult.content[0]?.type).toBe("text");
+    if (readResult.content[0]?.type === "text") {
+      expect(readResult.content[0].text).toContain("locked to the active book");
+    }
+
+    const writeResult = await write.execute("tool-12", {
+      path: "harbor/story/runtime/notes.md",
+      content: "x",
+    });
+    expect(writeResult.content[0]?.type).toBe("text");
+    if (writeResult.content[0]?.type === "text") {
+      expect(writeResult.content[0].text).toContain("written successfully");
+    }
+
+    const lockedWriteResult = await write.execute("tool-12b", {
+      path: "other/story/runtime/notes.md",
+      content: "x",
+    });
+    expect(lockedWriteResult.content[0]?.type).toBe("text");
+    if (lockedWriteResult.content[0]?.type === "text") {
+      expect(lockedWriteResult.content[0].text).toContain("locked to the active book");
+    }
+
+    const editResult = await edit.execute("tool-13", {
+      path: "other/story/story_bible.md",
+      old_string: "x",
+      new_string: "y",
+    });
+    expect(editResult.content[0]?.type).toBe("text");
+    if (editResult.content[0]?.type === "text") {
+      expect(editResult.content[0].text).toContain("locked to the active book");
+    }
+
+    const grepResult = await grep.execute("tool-14", {
+      bookId: "other",
+      pattern: "jade",
+    });
+    expect(grepResult.content[0]?.type).toBe("text");
+    if (grepResult.content[0]?.type === "text") {
+      expect(grepResult.content[0].text).toContain("locked to the active book");
+    }
+
+    const lsResult = await ls.execute("tool-15", {
+      bookId: "other",
+    });
+    expect(lsResult.content[0]?.type).toBe("text");
+    if (lsResult.content[0]?.type === "text") {
+      expect(lsResult.content[0].text).toContain("locked to the active book");
+    }
+
+    await expect(truth.execute("tool-16", {
+      bookId: "other",
+      fileName: "story_bible.md",
+      content: "x",
+    })).rejects.toThrow("locked to the active book");
   });
 });

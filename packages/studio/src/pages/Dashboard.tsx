@@ -7,7 +7,10 @@ import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { deriveActiveBookIds, shouldRefetchBookCollections } from "../hooks/use-book-activity";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { dispatchWriteNextInstruction } from "../utils/write-next";
+import { isWizardIncompleteBook, resolveBookPrimaryNavigation, resolveWizardProgressLabel } from "../utils/book-creation-routing";
+import { markScriptWorkspaceAutoOpen } from "../utils/script-workspace-routing";
 import {
   Plus,
   BookOpen,
@@ -23,24 +26,54 @@ import {
   Settings,
   Download,
   FileInput,
+  Sparkles,
 } from "lucide-react";
-
 interface BookSummary {
   readonly id: string;
   readonly title: string;
   readonly genre: string;
   readonly status: string;
+  readonly creationState?: "wizard" | "ready";
   readonly chaptersWritten: number;
   readonly language?: string;
   readonly fanficMode?: string;
+  readonly creation?: {
+    readonly wizardCompleted: boolean;
+    readonly resumeStep: string;
+    readonly completedCount: number;
+    readonly totalSteps: number;
+  };
 }
 
 interface Nav {
   toBook: (id: string) => void;
   toAnalytics: (id: string) => void;
-  toBookCreate: () => void;
+  toBookCreate: (bookId?: string) => void;
   toServices: () => void;
 }
+
+export function buildDashboardExportSaveRequest(bookId: string): {
+  readonly path: string;
+  readonly init: RequestInit;
+} {
+  return {
+    path: `/books/${bookId}/export-save`,
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ format: "txt", approvedOnly: false }),
+    },
+  };
+}
+
+type ExportDialogState =
+  | { readonly open: false }
+  | {
+      readonly open: true;
+      readonly status: "success" | "error";
+      readonly message: string;
+      readonly path?: string;
+    };
 
 function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
   readonly bookId: string;
@@ -59,6 +92,8 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
     });
   };
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportDialog, setExportDialog] = useState<ExportDialogState>({ open: false });
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -75,6 +110,44 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
     setOpen(false);
     await fetchJson(`/books/${bookId}`, { method: "DELETE" });
     onDelete();
+  };
+
+  const handleExport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setOpen(false);
+    try {
+      const request = buildDashboardExportSaveRequest(bookId);
+      const result = await fetchJson<{ ok: boolean; path?: string }>(request.path, request.init);
+      setExportDialog({
+        open: true,
+        status: "success",
+        message: t("book.exportSaved"),
+        ...(result.path ? { path: result.path } : {}),
+      });
+    } catch (e) {
+      setExportDialog({
+        open: true,
+        status: "error",
+        message: e instanceof Error ? e.message : t("book.exportSaveFailed"),
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const handleOpenExportedFile = async () => {
+    if (exportDialog.open !== true || !exportDialog.path) return;
+    try {
+      await fetchJson(`/books/${bookId}/export-open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: exportDialog.path }),
+      });
+      setExportDialog((current) => (current.open ? { ...current, message: t("book.exportSaved") } : current));
+    } catch {
+      setExportDialog((current) => (current.open ? { ...current, message: t("book.exportOpenFailed") } : current));
+    }
   };
 
   return (
@@ -99,15 +172,15 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
             <Settings size={14} className="text-muted-foreground" />
             {t("book.settings")}
           </button>
-          <a
-            href={`/api/v1/books/${bookId}/export?format=txt`}
-            download
-            onClick={() => setOpen(false)}
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={exporting}
             className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-foreground hover:bg-secondary/50 transition-colors cursor-pointer"
           >
             <Download size={14} className="text-muted-foreground" />
             {t("book.export")}
-          </a>
+          </button>
           <div className="border-t border-border/50 my-1" />
           <button
             onClick={() => { setOpen(false); setConfirmDelete(true); }}
@@ -128,6 +201,43 @@ function BookMenu({ bookId, bookTitle, nav, t, onDelete, onOpenChange }: {
         onConfirm={handleDelete}
         onCancel={() => setConfirmDelete(false)}
       />
+      <Dialog open={exportDialog.open} onOpenChange={(open) => { if (!open) setExportDialog({ open: false }); }}>
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>
+              {exportDialog.open ? (exportDialog.status === "success" ? t("book.exportSaved") : t("book.exportSaveFailed")) : ""}
+            </DialogTitle>
+            {exportDialog.open && (
+              <div className="space-y-2 text-sm text-muted-foreground">
+                <p>{exportDialog.message}</p>
+                {exportDialog.path && (
+                  <p className="break-all rounded-lg border border-border/50 bg-secondary/40 px-3 py-2 text-xs">
+                    {exportDialog.path}
+                  </p>
+                )}
+              </div>
+            )}
+          </DialogHeader>
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => setExportDialog({ open: false })}
+              className="px-4 py-2.5 text-sm font-medium rounded-xl bg-secondary text-foreground hover:bg-secondary/80 transition-all border border-border/50"
+            >
+              {t("common.cancel")}
+            </button>
+            {exportDialog.open && exportDialog.status === "success" && exportDialog.path && (
+              <button
+                type="button"
+                onClick={() => void handleOpenExportedFile()}
+                className="px-4 py-2.5 text-sm font-bold rounded-xl bg-primary text-primary-foreground hover:shadow-primary/20 transition-all"
+              >
+                {t("book.openExport")}
+              </button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -197,7 +307,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
           {t("dash.createFirst")}
         </p>
         <button
-          onClick={nav.toBookCreate}
+          onClick={() => nav.toBookCreate()}
           className="group flex items-center gap-2 px-8 py-3.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
         >
           <Plus size={18} />
@@ -229,7 +339,7 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
           <p className="text-sm text-muted-foreground">{t("dash.subtitle")}</p>
         </div>
         <button
-          onClick={nav.toBookCreate}
+          onClick={() => nav.toBookCreate()}
           className="group flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold bg-primary text-primary-foreground hover:scale-105 active:scale-95 transition-all shadow-lg shadow-primary/20"
         >
           <Plus size={16} />
@@ -241,6 +351,8 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
         {data.books.map((book, index) => {
           const isWriting = writingBooks.has(book.id);
           const isSelected = selectedBookId === book.id;
+          const isWizardIncomplete = isWizardIncompleteBook(book);
+          const progressLabel = resolveWizardProgressLabel(book);
           const staggerClass = `stagger-${Math.min(index + 1, 5)}`;
           return (
             <div
@@ -252,6 +364,10 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                 if (typeof window !== "undefined") {
                   window.localStorage.setItem("inkos:last-active-book-id", book.id);
                 }
+                if (resolveBookPrimaryNavigation(book) === "book-create") {
+                  nav.toBookCreate(book.id);
+                  return;
+                }
                 nav.toBook(book.id);
               }}
               onKeyDown={(event) => {
@@ -261,10 +377,18 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                   if (typeof window !== "undefined") {
                     window.localStorage.setItem("inkos:last-active-book-id", book.id);
                   }
+                  if (resolveBookPrimaryNavigation(book) === "book-create") {
+                    nav.toBookCreate(book.id);
+                    return;
+                  }
                   nav.toBook(book.id);
                 }
               }}
-              className={`paper-sheet group relative rounded-2xl fade-in cursor-pointer transition-all hover:-translate-y-0.5 hover:shadow-xl hover:shadow-primary/10 hover:ring-1 hover:ring-primary/30 hover:bg-primary/[0.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${isSelected ? "ring-1 ring-primary/45 bg-primary/[0.045] shadow-lg shadow-primary/10" : ""} ${staggerClass} ${menuOpenBookId === book.id ? "z-50" : ""}`}
+              className={`paper-sheet group relative rounded-2xl fade-in cursor-pointer transition-all hover:-translate-y-0.5 hover:shadow-xl hover:ring-1 focus-visible:outline-none focus-visible:ring-2 ${
+                isWizardIncomplete
+                  ? "hover:shadow-amber-500/10 hover:ring-amber-400/30 hover:bg-amber-500/[0.02] focus-visible:ring-amber-400/40"
+                  : "hover:shadow-primary/10 hover:ring-primary/30 hover:bg-primary/[0.02] focus-visible:ring-primary/40"
+              } ${isSelected ? (isWizardIncomplete ? "ring-1 ring-amber-400/45 bg-amber-500/[0.045] shadow-lg shadow-amber-500/10" : "ring-1 ring-primary/45 bg-primary/[0.045] shadow-lg shadow-primary/10") : ""} ${staggerClass} ${menuOpenBookId === book.id ? "z-50" : ""}`}
             >
               <div className="p-8 flex items-start justify-between">
                 <div className="flex-1 min-w-0">
@@ -279,6 +403,10 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                         if (typeof window !== "undefined") {
                           window.localStorage.setItem("inkos:last-active-book-id", book.id);
                         }
+                        if (resolveBookPrimaryNavigation(book) === "book-create") {
+                          nav.toBookCreate(book.id);
+                          return;
+                        }
                         nav.toBook(book.id);
                       }}
                       className="font-serif text-2xl hover:text-primary transition-all text-left truncate block font-medium hover:underline underline-offset-4 decoration-primary/30"
@@ -288,6 +416,11 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                     {isSelected && (
                       <span className="shrink-0 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-primary">
                         褰撳墠鍒涗綔涓?
+                      </span>
+                    )}
+                    {isWizardIncomplete && (
+                      <span className="shrink-0 rounded-full border border-amber-400/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-amber-700">
+                        向导未完成 {progressLabel ?? "0/8"}
                       </span>
                     )}
                   </div>
@@ -352,6 +485,20 @@ export function Dashboard({ nav, sse, theme, t }: { nav: Nav; sse: { messages: R
                         {t("dash.writeNext")}
                       </>
                     )}
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (typeof window !== "undefined") {
+                        markScriptWorkspaceAutoOpen(window.localStorage);
+                        window.localStorage.setItem("inkos:last-active-book-id", book.id);
+                      }
+                      nav.toBook(book.id);
+                    }}
+                    className="p-3 rounded-xl bg-secondary text-muted-foreground hover:text-primary hover:bg-primary/10 hover:border-primary/30 hover:shadow-md hover:scale-105 active:scale-95 transition-all border border-border/50 shadow-sm"
+                    title="转剧本"
+                  >
+                    <Sparkles size={18} />
                   </button>
                   <button
                     onClick={(event) => {

@@ -389,32 +389,20 @@ describe("PipelineRunner", () => {
       projectRoot: root,
     });
 
-    const generateFoundationSpy = vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockResolvedValue({
-      storyBible: "# Story Bible\n",
-      volumeOutline: "# Volume Outline\n",
-      bookRules: "---\nversion: \"1.0\"\n---\n\n# Book Rules\n",
-      currentState: "# Current State\n",
-      pendingHooks: "# Pending Hooks\n",
-    });
-
     try {
       await runner.initBook(book, {
-        externalContext: "世界观重点：近未来港口城，账本与旧案牵出多方势力。",
+        foundationBrief: "港口账本牵出旧案。",
         authorIntent: "# 作者意图\n\n写成冷硬、克制、利益驱动的商战悬疑。\n",
         currentFocus: "# 当前聚焦\n\n先把旧账线和港口势力网立住。\n",
       });
-
-      expect(generateFoundationSpy).toHaveBeenCalledWith(
-        book,
-        expect.stringContaining("近未来港口城"),
-        undefined,
-      );
 
       const storyDir = join(root, "books", bookId, "story");
       await expect(readFile(join(storyDir, "author_intent.md"), "utf-8"))
         .resolves.toContain("冷硬、克制、利益驱动");
       await expect(readFile(join(storyDir, "current_focus.md"), "utf-8"))
         .resolves.toContain("旧账线和港口势力网");
+      await expect(readFile(join(storyDir, "foundation_brief.md"), "utf-8"))
+        .resolves.toContain("港口账本牵出旧案");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -531,7 +519,7 @@ describe("PipelineRunner", () => {
     }
   });
 
-  it("cleans staged files when initBook fails before foundation is complete", async () => {
+  it("initializes the book shell without generating foundation files", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-init-rollback-"));
     const runner = new PipelineRunner({
       client: {
@@ -561,13 +549,11 @@ describe("PipelineRunner", () => {
       updatedAt: now,
     };
 
-    vi.spyOn(ArchitectAgent.prototype, "generateFoundation").mockRejectedValue(
-      new Error("missing book_rules section"),
-    );
-
     try {
-      await expect(runner.initBook(book)).rejects.toThrow("missing book_rules section");
-      await expect(stat(join(root, "books", "atomic-book"))).rejects.toThrow();
+      await expect(runner.initBook(book, {
+        foundationBrief: "港口账本牵出灰产洗白风暴。",
+      })).resolves.toBeUndefined();
+      await expect(readFile(join(root, "books", "atomic-book", "story", "foundation_brief.md"), "utf-8")).resolves.toContain("港口账本牵出灰产洗白风暴。");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -1142,8 +1128,6 @@ describe("PipelineRunner", () => {
 
       expect(infos).toEqual(expect.arrayContaining([
         "阶段：保存书籍配置",
-        "阶段：生成基础设定",
-        "阶段：写入基础设定文件",
         "阶段：初始化控制文档",
         "阶段：创建初始快照",
       ]));

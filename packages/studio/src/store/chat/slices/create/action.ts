@@ -21,8 +21,9 @@ export const createCreateSlice: StateCreator<ChatStore, [], [], CreateActions> =
   setCreateProgress: (progress) => set({ createProgress: progress }),
 
   bumpBookDataVersion: () => set((s) => ({ bookDataVersion: s.bookDataVersion + 1 })),
-  openArtifact: (file) => set({
+  openArtifact: (file, source = "truth") => set({
     sidebarView: "artifact",
+    artifactSource: source,
     artifactFile: file,
     artifactChapter: null,
     artifactChapterMeta: null,
@@ -30,6 +31,7 @@ export const createCreateSlice: StateCreator<ChatStore, [], [], CreateActions> =
   }),
   openChapterArtifact: (chapterNum, options) => set({
     sidebarView: "artifact",
+    artifactSource: "truth",
     artifactFile: null,
     artifactChapter: chapterNum,
     artifactChapterMeta: options?.meta ?? null,
@@ -37,6 +39,7 @@ export const createCreateSlice: StateCreator<ChatStore, [], [], CreateActions> =
   }),
   closeArtifact: () => set({
     sidebarView: "panel",
+    artifactSource: "truth",
     artifactFile: null,
     artifactChapter: null,
     artifactChapterMeta: null,

@@ -342,7 +342,7 @@ export function buildPlannerUserMessage(input: PlannerUserMessageInput): string 
  * source for "what this book is". story_frame/volume_map are the architect's
  * abstraction of brief; chapter memos must honor brief first.
  *
- * Returns "" when no brief exists (legacy books without brief.md).
+ * Returns "" when no foundation brief exists.
  */
 function buildBriefBlock(brief: string, language: "zh" | "en"): string {
   const trimmed = brief.trim();

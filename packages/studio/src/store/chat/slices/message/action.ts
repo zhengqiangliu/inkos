@@ -42,6 +42,16 @@ function normalizeBookCreationWizard(value: unknown): BookCreationWizardState | 
   return value as BookCreationWizardState;
 }
 
+function isCustomServiceId(service: string): boolean {
+  return service === "custom" || service.startsWith("custom:");
+}
+
+function resolveCustomServiceName(service: string): string {
+  const rawName = service.startsWith("custom:") ? decodeURIComponent(service.slice("custom:".length)) : "";
+  const name = rawName.trim();
+  return name.length > 0 ? name : "Custom";
+}
+
 interface AgentRunStatusResponse {
   readonly ok?: boolean;
   readonly running?: boolean;
@@ -305,6 +315,56 @@ function finalizeDanglingToolStates(messages: ReadonlyArray<Message>, streamTs: 
   });
 }
 
+function looksLikeFinalizationSummary(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  return /已重写|已完成|已保存|总结|汇报|相较|相比|未改动|重新生成|完成重写|重写完成/i.test(trimmed)
+    && !/^#{1,6}\s+/m.test(trimmed)
+    && trimmed.length < 120;
+}
+
+function looksLikeIntroMarkdownBody(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return false;
+  if (/^(已|好的|我来|我先|正在|开始|生成|修改|润色|总结|汇报|说明)/.test(trimmed)) return false;
+  return /(^|\n)\s*#\s+/.test(trimmed)
+    || /(^|\n)\s*##\s+(一句话卖点|故事概述|故事走向|主要人物成长路径|核心冲突|核心价值观)/.test(trimmed);
+}
+
+function scoreIntroMarkdownBody(content: string): number {
+  const trimmed = content.trim();
+  if (!looksLikeIntroMarkdownBody(trimmed)) return Number.NEGATIVE_INFINITY;
+  const requiredSections = [
+    "一句话卖点",
+    "故事概述",
+    "故事走向",
+    "主要人物成长路径",
+    "核心冲突",
+    "核心价值观",
+  ];
+  const sectionCount = requiredSections.filter((section) => trimmed.includes(section)).length;
+  const concreteLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) =>
+      line
+      && !/^#/.test(line)
+      && !/^-+\s*$/.test(line)
+      && line !== "-"
+      && line !== "—"
+      && line !== "…"
+      && line !== "..."
+      && !/^(题材|平台|主题)[:：]/.test(line),
+    );
+  const substantiveCount = concreteLines.filter((line) => line.length >= 8).length;
+  const placeholderCount = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line === "-" || line === "—" || line === "…" || line === "..." || /^-\s*$/.test(line))
+    .length;
+  return sectionCount * 100 + substantiveCount * 12 + Math.min(500, trimmed.length / 2) - placeholderCount * 40;
+}
+
 function finalizeSessionStreamState(
   set: Parameters<StateCreator<ChatStore, [], [], MessageActions>>[0],
   sessionId: string,
@@ -354,6 +414,27 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       })),
     })),
 
+  replaceWizardStepMessage: (sessionId, wizardStep, content) =>
+    set((state) => ({
+      sessions: updateSession(state.sessions, sessionId, (session) => {
+        let replaced = false;
+        const nextMessages = [...session.messages];
+        for (let index = nextMessages.length - 1; index >= 0; index -= 1) {
+          const message = nextMessages[index];
+          if (message?.role !== "assistant" || message.wizardStep !== wizardStep) continue;
+          nextMessages[index] = { ...message, content };
+          replaced = true;
+          break;
+        }
+        if (replaced) {
+          return { messages: nextMessages };
+        }
+        return {
+          messages: [...session.messages, { role: "assistant", content, wizardStep, timestamp: Date.now() }],
+        };
+      }),
+    })),
+
   appendStreamChunk: (sessionId, text, streamTs) =>
     set((state) => ({
       sessions: updateSession(state.sessions, sessionId, (session) => {
@@ -375,18 +456,25 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         messages: session.messages.map((message) => {
           if (message.timestamp !== streamTs || message.role !== "assistant") return message;
           const parts = [...(message.parts ?? [])];
-          const lastPart = parts[parts.length - 1];
+          const lastTextIndex = [...parts].reverse().findIndex((part) => part.type === "text");
+          const textIndex = lastTextIndex >= 0 ? parts.length - 1 - lastTextIndex : -1;
+          const lastPart = textIndex >= 0 ? parts[textIndex] : parts[parts.length - 1];
+          const streamedText = parts
+            .filter((part): part is Extract<MessagePart, { type: "text" }> => part.type === "text")
+            .map((part) => part.content)
+            .join("");
+          const finalSummary = looksLikeFinalizationSummary(content);
+          const keepStreamedIntroBody = message.wizardStep === "intro"
+            && looksLikeIntroMarkdownBody(streamedText);
+          if (streamedText && (finalSummary || keepStreamedIntroBody)) {
+            return { ...message, toolCall, parts, content: streamedText };
+          }
           if (lastPart?.type === "text") {
-            // Preserve streamed content (e.g. chapter:delta events) when it's
-            // more substantial than the finalization summary.
-            if (content && lastPart.content.length > content.length) {
-              return { ...message, toolCall, parts };
-            }
-            parts[parts.length - 1] = { ...lastPart, content };
+            parts[parts.length - 1] = { ...lastPart, content: content || lastPart.content };
           } else if (content) {
             parts.push({ type: "text", content });
           }
-          return { ...message, content, toolCall, parts };
+          return { ...message, content: content || streamedText, toolCall, parts };
         }),
       })),
     })),
@@ -422,7 +510,42 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
       }),
     })),
 
-  setSelectedModel: (model, service) => set({ selectedModel: model, selectedService: service }),
+  setSelectedModel: (model, service, options) => {
+    set({ selectedModel: model, selectedService: service });
+    if (options?.persist === false) {
+      return;
+    }
+    void fetchJson("/services/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        service,
+        defaultModel: model,
+        services: [
+          isCustomServiceId(service)
+            ? {
+                service: "custom",
+                name: resolveCustomServiceName(service),
+                preferredModel: model,
+              }
+            : {
+                service,
+                preferredModel: model,
+              },
+        ],
+      }),
+    })
+      .then(() => {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("inkos:api-invalidate", {
+            detail: { paths: ["/api/v1/services/config"] },
+          }));
+        }
+      })
+      .catch(() => {
+        // Ignore persistence failures and keep the in-memory selection.
+      });
+  },
 
   loadSessionList: async (bookId) => {
     const query = bookId === null ? "null" : encodeURIComponent(bookId);
@@ -746,6 +869,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           ...(options?.quickMode !== undefined ? { quickMode: options.quickMode } : {}),
           ...(options?.preferFastWriterModel !== undefined ? { preferFastWriterModel: options.preferFastWriterModel } : {}),
           ...(options?.forceStream !== undefined ? { forceStream: options.forceStream } : {}),
+          ...(options?.responseFormat ? { responseFormat: options.responseFormat } : {}),
         }),
       });
 

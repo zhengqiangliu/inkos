@@ -7,18 +7,20 @@
 
 export const CHAPTER_DESIGN_SYSTEM_PROMPT_ZH = `你是一位资深小说分章设计师，负责根据卷纲和角色设定为每一章生成详细的章节设计方案。
 
-你的职责是根据输入的卷纲大纲、世界观设定、角色信息、感情弧线和伏笔池，生成高质量的章节设计。
+你的职责是根据输入的卷纲大纲、世界观设定、角色信息、人物弧光、人物关系、感情弧线和伏笔池，生成高质量的章节设计。
 其中卷纲是唯一的章节规划依据，必须优先于所有其他参考材料。
 
 ## 工作原则
 
 1. **符合卷纲**: 每章设计必须服务于卷纲设定的整体方向和节奏
 2. **角色驱动**: 基于角色设定（性格、目标、关系）设计冲突和发展
-3. **情感节奏**: 根据情感弧线安排章节的情感基调，确保高低起伏
-4. **伏笔呼应**: 适时回收伏笔，同时埋下新的伏笔钩子
-5. **具体可写**: 设计要具体到可以指导写作，不能太抽象
-6. **章数上限**: 严格遵守卷纲总章数，任何超出上限的章节都不允许生成
-7. **卷纲优先**: 所有章节编号、节奏和冲突推进都必须服从卷纲规划，不得自行扩展或补写超纲章节
+3. **弧光服从**: 章节冲突、行为选择和阶段推进必须服从人物弧光当前阶段，不能让角色无铺垫地越级成长、突然黑化或突然和解
+4. **关系入戏**: 章节设计必须显式利用人物关系中的联盟、对立、隐藏联系、潜在冲突，把关系变化转成可写事件
+5. **情感节奏**: 根据情感弧线安排章节的情感基调，确保高低起伏
+6. **伏笔呼应**: 适时回收伏笔，同时埋下新的伏笔钩子
+7. **具体可写**: 设计要具体到可以指导写作，不能太抽象
+8. **章数上限**: 严格遵守卷纲总章数，任何超出上限的章节都不允许生成
+9. **卷纲优先**: 所有章节编号、节奏和冲突推进都必须服从卷纲规划，不得自行扩展或补写超纲章节
 
 ## 输出字段说明
 
@@ -72,18 +74,20 @@ maxRecoveryPerChapter: 3
 
 export const CHAPTER_DESIGN_SYSTEM_PROMPT_EN = `You are a senior novel chapter designer, responsible for generating detailed chapter design plans for each chapter based on the volume outline and character settings.
 
-Your responsibility is to generate high-quality chapter designs based on the input volume outline, worldbuilding, character information, emotional arcs, and pending hooks.
+Your responsibility is to generate high-quality chapter designs based on the input volume outline, worldbuilding, character information, character arcs, relationship map, emotional arcs, and pending hooks.
 The volume outline is the only authoritative planning source; all other materials are secondary references.
 
 ## Working Principles
 
 1. **Align with Volume Outline**: Each chapter design must serve the overall direction and rhythm set by the volume outline
 2. **Character-Driven**: Design conflicts and developments based on character settings (personality, goals, relationships)
-3. **Emotional Rhythm**: Arrange the emotional tone of chapters according to emotional arcs, ensuring ups and downs
-4. **Hook Responsiveness**: Timely resolve hooks while planting new ones
-5. **Specific and Writeable**: Designs must be specific enough to guide writing, not too abstract
-6. **Chapter Limit**: Never generate chapters beyond the total chapter count in the outline
-7. **Outline First**: Chapter numbers, pacing, and conflict progression must obey the outline plan and never expand beyond it
+3. **Arc Compliance**: Character choices and escalation must match the current stage of each character arc; no unearned growth, betrayal, or reconciliation
+4. **Relationship Utilization**: Explicitly convert alliances, rivalries, hidden ties, and latent conflicts from the relationship map into writeable chapter events
+5. **Emotional Rhythm**: Arrange the emotional tone of chapters according to emotional arcs, ensuring ups and downs
+6. **Hook Responsiveness**: Timely resolve hooks while planting new ones
+7. **Specific and Writeable**: Designs must be specific enough to guide writing, not too abstract
+8. **Chapter Limit**: Never generate chapters beyond the total chapter count in the outline
+9. **Outline First**: Chapter numbers, pacing, and conflict progression must obey the outline plan and never expand beyond it
 
 ## Output Fields
 
@@ -142,6 +146,8 @@ export function getChapterDesignSystemPrompt(language: string): string {
 export interface ChapterDesignContext {
   readonly volumeOutline: string;
   readonly characterMatrix: string;
+  readonly characterArc?: string;
+  readonly relationshipMap?: string;
   readonly storyBible?: string;
   readonly emotionalArcs: string;
   readonly pendingHooks: string;
@@ -217,6 +223,18 @@ export function buildChapterDesignUserMessage(
   if (context.characterMatrix.trim()) {
     parts.push(isZh ? "## 角色矩阵（Character Matrix）" : "## Character Matrix");
     parts.push(context.characterMatrix.trim());
+    parts.push("");
+  }
+
+  if (context.characterArc?.trim()) {
+    parts.push(isZh ? "## 人物弧光（Character Arc）" : "## Character Arc");
+    parts.push(context.characterArc.trim());
+    parts.push("");
+  }
+
+  if (context.relationshipMap?.trim()) {
+    parts.push(isZh ? "## 人物关系（Relationship Map）" : "## Relationship Map");
+    parts.push(context.relationshipMap.trim());
     parts.push("");
   }
 

@@ -23,6 +23,10 @@ describe("hash route", () => {
       expect(parseHash("#/book/new")).toEqual({ page: "book-create" });
     });
 
+    it("parses book/{id}/create as book-create resume route", () => {
+      expect(parseHash("#/book/my-novel/create")).toEqual({ page: "book-create", bookId: "my-novel" });
+    });
+
     it("parses book/new/{draftSessionId} as book-create with a draft session", () => {
       expect(parseHash("#/book/new/draft-123")).toEqual({ page: "book-create", draftSessionId: "draft-123" });
     });
@@ -109,6 +113,10 @@ describe("hash route", () => {
 
     it("book-create -> #/book/new", () => {
       expect(routeToHash({ page: "book-create" })).toBe("#/book/new");
+    });
+
+    it("book-create with bookId -> #/book/{id}/create", () => {
+      expect(routeToHash({ page: "book-create", bookId: "draft-shell" })).toBe("#/book/draft-shell/create");
     });
 
     it("book-create with draft session -> #/book/new/{draftSessionId}", () => {

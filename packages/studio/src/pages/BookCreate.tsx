@@ -1,15 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BookCreationDraft, BookCreationWizardState, BookCreationWizardStep } from "@actalk/inkos-core";
-import { ApiRequestError, fetchJson, useApi } from "../hooks/use-api";
+import { ApiRequestError, fetchJson, postApi, useApi } from "../hooks/use-api";
 import type { Theme } from "../hooks/use-theme";
 import type { TFunction } from "../hooks/use-i18n";
 import { useColors } from "../hooks/use-colors";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { chatSelectors, useChatStore } from "../store/chat";
 import { useServiceStore } from "../store/service";
+import { usePersistedModelSelection } from "../hooks/use-persisted-model-selection";
 import type { Message as ChatMessageType } from "../store/chat/types";
-import { filterModelGroups, resolveModelSelection } from "./chat-page-state";
-import { BookCreateChatDock, IntroPanel, ReviewPanel, StepValidationBanner, WizardActions, WizardHeader } from "./book-create-panels";
+import {
+  filterModelGroups,
+  resolveModelSelection,
+  resolvePersistedModelSelection,
+  type PersistedModelSelection,
+} from "./chat-page-state";
+import { BookCreateChatDock, IntroPanel, StepValidationBanner, WizardActions, WizardHeader } from "./book-create-panels";
 import { StepMarkdownEditor } from "./StepMarkdownEditor";
 import {
   buildChatActionLabels,
@@ -19,42 +25,66 @@ import {
   buildCreationDraftSummary,
   buildCreationReviewChecklist,
   buildHardParamsSummary,
+  buildIntroCandidateGenerationInstruction,
   buildBookCreateCommand,
   buildStepActionSections,
   buildStepFocusCard,
   buildStepRecommendedAction,
   buildStepShortcuts,
   buildStepValidationReport,
+  buildWizardStepRegenerationInstruction,
   buildWizardValidationReports,
   buildIntroCandidateBackfill,
   buildStepMarkdownDraft,
   buildIntroMarkdownDraft,
+  looksLikeIntroBodyMarkdown,
+  normalizeIntroMarkdownCandidate,
+  resolveCanonicalIntroMarkdown,
+  resolveIntroMarkdownEditorContent,
+  resolvePreferredIntroMarkdown,
   getStepMarkdownSpec,
   mergeCreationWizardState,
+  isWizardNavigationLocked,
   resolveIntroCandidateTitle,
   composeIntroSeedText,
   buildWizardStepSeedText,
+  stripWizardPreamble,
+  resolveWizardStepDisplayContent,
+  resolveBookCreationResumeStep,
   canCreateFromDraft,
   defaultChapterWordsForLanguage,
+  explainManualWizardStepContentIssue,
+  hasMeaningfulIntroMarkdown,
+  hasMeaningfulManualWizardStepContent,
+  hasMeaningfulWizardStepContent,
+  looksLikeWizardStepMarkdown,
   parseIntroCandidateResponse,
   parseLatestIntroCandidates,
   parseIntroSeedText,
   buildIntroExpansionSeedText,
   parsePositiveIntegerInput,
+  normalizeIntroCandidateMessageForDisplay,
   platformOptionsForLanguage,
   pickValidValue,
   rankIntroCandidates,
   type StepShortcut,
   resolveDraftInstruction,
+  resolveBookCreateGenreSelection,
   resolveGenreMapping,
   resolveInitialGenreSelection,
   selectBookCreateDockMessages,
+  shouldSyncWizardStep,
+  shouldAutoGenerateWizardStepBody,
   shouldSubmitChatOnKeyDown,
   waitForBookReady,
   WIZARD_STEPS,
+  WIZARD_STEP_FILE_NAMES,
   type IntroCandidateLike,
   type StepValidationReport,
+  type WizardStepHydrationStatus,
 } from "./book-create-state";
+import { clearBookCreateSessionId, getBookCreateSessionId, setBookCreateSessionId } from "./chat-page-state";
+import { resolvePersistedDraftSessionId, resolveWizardStepsToPrefetch } from "../utils/book-creation-routing";
 
 export {
   buildChatActionLabels,
@@ -75,6 +105,7 @@ export {
   parseIntroCandidateResponse,
   parseLatestIntroCandidates,
   parsePositiveIntegerInput,
+  normalizeIntroCandidateMessageForDisplay,
   platformOptionsForLanguage,
   pickValidValue,
   rankIntroCandidates,
@@ -90,6 +121,7 @@ interface Nav {
   toDashboard: () => void;
   toBook: (id: string) => void;
   toServices: () => void;
+  toBookCreate?: (bookId?: string) => void;
 }
 
 interface AgentResponse {
@@ -108,13 +140,151 @@ interface AgentResponse {
   };
 }
 
+interface SessionListResponse {
+  readonly sessions: ReadonlyArray<{
+    readonly sessionId: string;
+  }>;
+}
+
 interface BlockedPromptState {
   readonly title: string;
   readonly message: string;
 }
 
+interface WizardStepFilePayload {
+  readonly step: BookCreationWizardStep;
+  readonly content: string;
+  readonly status: "empty" | "saved" | "dirty";
+  readonly version: number;
+  readonly updatedAt?: string;
+}
+
+interface BookCreationSummary {
+  readonly shellCreated: boolean;
+  readonly wizardCompleted: boolean;
+  readonly currentStep: BookCreationWizardStep;
+  readonly resumeStep: BookCreationWizardStep;
+  readonly completedSteps: ReadonlyArray<BookCreationWizardStep>;
+  readonly completedCount: number;
+  readonly totalSteps: number;
+}
+
+interface BookResumePayload {
+  readonly book: {
+    readonly id: string;
+    readonly title: string;
+    readonly genre: string;
+    readonly platform: string;
+    readonly targetChapters?: number;
+    readonly chapterWordCount: number;
+    readonly language?: "zh" | "en";
+  };
+  readonly creation: BookCreationSummary;
+}
+
+function normalizeTextValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+export async function resolveIntroRevisionBookId(
+  activeBookId: string | null,
+  ensureBookShell: () => Promise<string | null>,
+): Promise<string | null> {
+  return activeBookId ?? await ensureBookShell();
+}
+
+function extractWizardStepContent(response: AgentResponse | null, step: BookCreationWizardStep, language: "zh" | "en"): string {
+  const draft = response?.session?.creationDraft ?? response?.details?.creationDraft;
+  const raw = response?.details?.draftRaw?.trim() || "";
+  if (step === "arc" || step === "relation") {
+    return raw;
+  }
+  if (step === "volume" && draft?.volumeOutline?.trim()) {
+    return draft.volumeOutline.trim();
+  }
+  if (step === "characters" && (draft?.protagonist?.trim() || draft?.supportingCast?.trim() || draft?.characterMatrix?.trim())) {
+    return [
+      draft?.protagonist ? `主角：${draft.protagonist.trim()}` : "",
+      draft?.supportingCast ? `配角：${draft.supportingCast.trim()}` : "",
+      draft?.characterMatrix ? `角色矩阵：${draft.characterMatrix.trim()}` : "",
+    ].filter(Boolean).join("\n\n");
+  }
+  if (step === "outline" && (draft?.novelOutline?.trim() || draft?.conflictCore?.trim())) {
+    return [
+      draft?.novelOutline ? `大纲：${draft.novelOutline.trim()}` : "",
+      draft?.conflictCore ? `核心冲突：${draft.conflictCore.trim()}` : "",
+    ].filter(Boolean).join("\n\n");
+  }
+  if (step === "world" && (draft?.worldPremise?.trim() || draft?.settingNotes?.trim())) {
+    return [
+      draft?.worldPremise ? `世界观：${draft.worldPremise.trim()}` : "",
+      draft?.settingNotes ? `补充设定：${draft.settingNotes.trim()}` : "",
+    ].filter(Boolean).join("\n\n");
+  }
+  if (step === "intro") {
+    return draft?.draftFields?.introMarkdown?.trim()
+      || response?.response?.trim()
+      || buildIntroMarkdownDraft(draft ?? {}, language);
+  }
+  if (raw) return raw;
+  return buildStepMarkdownDraft(step as Exclude<BookCreationWizardStep, "intro">, draft ?? {}, language);
+}
+
+function resolveWizardStepSaveContent(
+  response: AgentResponse | null,
+  step: Exclude<BookCreationWizardStep, "intro">,
+  language: "zh" | "en",
+): string {
+  const raw = response?.details?.draftRaw?.trim() || response?.response?.trim() || "";
+  if (raw && looksLikeWizardStepMarkdown(step, raw)) return raw;
+  const draft = response?.session?.creationDraft ?? response?.details?.creationDraft;
+  const extracted = extractWizardStepContent(response, step, language).trim();
+  if (extracted && looksLikeWizardStepMarkdown(step, extracted)) return extracted;
+  if (step === "volume" && draft?.volumeOutline?.trim()) return draft.volumeOutline.trim();
+  if (step === "characters" && (draft?.protagonist?.trim() || draft?.supportingCast?.trim() || draft?.characterMatrix?.trim())) {
+    return [
+      draft?.protagonist ? `主角：${draft.protagonist.trim()}` : "",
+      draft?.supportingCast ? `配角：${draft.supportingCast.trim()}` : "",
+      draft?.characterMatrix ? `角色矩阵：${draft.characterMatrix.trim()}` : "",
+    ].filter(Boolean).join("\n\n");
+  }
+  return "";
+}
+
+function resolveRegeneratedWizardStepContent(
+  response: AgentResponse | null,
+  step: Exclude<BookCreationWizardStep, "intro">,
+  language: "zh" | "en",
+): string {
+  const raw = response?.details?.draftRaw?.trim() || response?.response?.trim() || "";
+  if (!raw) return "";
+  if (!looksLikeWizardStepMarkdown(step, raw)) return "";
+  return raw;
+}
+
+function resolveLatestAssistantWizardStepContent(
+  sessionId: string | null,
+  step: Exclude<BookCreationWizardStep, "intro">,
+): string {
+  if (!sessionId) return "";
+  const session = useChatStore.getState().sessions[sessionId];
+  const latest = [...(session?.messages ?? [])]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.wizardStep === step);
+  return latest?.content?.trim() || "";
+}
+
+function isEmptyWizardBody(content: string): boolean {
+  const trimmed = content.trim();
+  if (!trimmed) return true;
+  const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const bodyLines = lines.filter((line) => !/^#{1,6}\s+/.test(line));
+  if (bodyLines.length === 0) return true;
+  return bodyLines.every((line) => /^[-*]\s*[-—–…\.]+$/.test(line) || /^[-*]\s*[:：]?\s*$/.test(line) || line === "-" || line === "—" || line === "…" || line === "...");
+}
+
 interface BookCreateSessionRequest {
-  readonly intent: "select_intro_candidate";
+  readonly intent: "select_intro_candidate" | "set_book_draft_params";
   readonly title?: string;
   readonly genre?: string;
   readonly genreName?: string;
@@ -137,6 +307,7 @@ interface BookCreateWizardControlRequest {
   readonly language: "zh" | "en";
   readonly stepTitle: string;
   readonly wizardStep: BookCreationWizardStep;
+  readonly nextStep?: BookCreationWizardStep;
   readonly title?: string;
   readonly genre?: string;
   readonly platform?: string;
@@ -150,10 +321,35 @@ type BookCreateDockMessage = Pick<
   "role" | "content" | "timestamp" | "thinking" | "thinkingStreaming" | "audit" | "toolExecutions"
 >;
 
+function hasPersistedWizardStepContent(
+  step: BookCreationWizardStep,
+  draft: Partial<BookCreationDraft> | undefined,
+): boolean {
+  if (!draft) return false;
+  switch (step) {
+    case "intro":
+      return Boolean(draft.draftFields?.introMarkdown?.trim() || draft.blurb?.trim() || draft.storyBackground?.trim());
+    case "world":
+      return Boolean(draft.worldPremise?.trim() || draft.settingNotes?.trim());
+    case "outline":
+      return Boolean(draft.novelOutline?.trim() || draft.conflictCore?.trim());
+    case "volume":
+      return Boolean(draft.volumeOutline?.trim());
+    case "characters":
+      return Boolean(draft.protagonist?.trim() || draft.supportingCast?.trim() || draft.characterMatrix?.trim());
+    case "arc":
+      return Boolean(draft.characterArc?.trim());
+    case "relation":
+      return Boolean(draft.relationshipMap?.trim());
+    default:
+      return false;
+  }
+}
 
 
 
-export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme: Theme; t: TFunction; draftSessionId?: string }) {
+
+export function BookCreate({ nav, theme, t, draftSessionId, resumeBookId }: { nav: Nav; theme: Theme; t: TFunction; draftSessionId?: string; resumeBookId?: string }) {
   const c = useColors(theme);
   const { data: project } = useApi<{ language: string }>("/project");
   const { data: genresData } = useApi<{ genres: ReadonlyArray<{ id: string; name: string; language?: string; source?: string }> }>("/genres");
@@ -169,6 +365,8 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
   const setInput = useChatStore((s) => s.setInput);
   const sendMessage = useChatStore((s) => s.sendMessage);
   const stopMessage = useChatStore((s) => s.stopMessage);
+  const replaceWizardStepMessage = useChatStore((s) => s.replaceWizardStepMessage);
+  const bumpBookDataVersion = useChatStore((s) => s.bumpBookDataVersion);
   const setSelectedModel = useChatStore((s) => s.setSelectedModel);
   const loadSessionDetail = useChatStore((s) => s.loadSessionDetail);
   const activateSession = useChatStore((s) => s.activateSession);
@@ -203,32 +401,63 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
   const [introSeedText, setIntroSeedText] = useState("");
   const [introBodyDraft, setIntroBodyDraft] = useState("");
   const [introTheme, setIntroTheme] = useState("");
+  const [introBodyDirty, setIntroBodyDirty] = useState(false);
   const [introCandidateCount, setIntroCandidateCount] = useState("3");
   const [introCandidates, setIntroCandidates] = useState<ReadonlyArray<IntroCandidateLike>>([]);
   const [selectedIntroCandidateIndex, setSelectedIntroCandidateIndex] = useState(0);
   const [introCandidateLoading, setIntroCandidateLoading] = useState(false);
   const [introPanelTab, setIntroPanelTab] = useState<"generate" | "body">("generate");
   const [introBodyEditing, setIntroBodyEditing] = useState(false);
-  const [stepDrafts, setStepDrafts] = useState<Partial<Record<"intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review", string>>>({});
+  const [introBodySource, setIntroBodySource] = useState<"draft" | "generated">("draft");
+  const [stepDrafts, setStepDrafts] = useState<Partial<Record<"intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation", string>>>({});
+  const [persistedStepDrafts, setPersistedStepDrafts] = useState<Partial<Record<"intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation", string>>>({});
   const [stepEditing, setStepEditing] = useState<Partial<Record<"world" | "outline" | "volume" | "characters" | "arc" | "relation", boolean>>>({});
+  const [genreSelectionTouched, setGenreSelectionTouched] = useState(false);
   const [validationPanelStep, setValidationPanelStep] = useState<BookCreationWizardStep | null>(null);
   const [isAdvancing, setIsAdvancing] = useState(false);
   const [isAutoCompleting, setIsAutoCompleting] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [isStepSaving, setIsStepSaving] = useState(false);
+  const [isAutoGeneratingPage, setIsAutoGeneratingPage] = useState(false);
   const [visibleWizardStep, setVisibleWizardStep] = useState<BookCreationWizardStep>("intro");
+  const [wizardBookId, setWizardBookId] = useState<string | null>(null);
+  const [resumeDraftSessionId, setResumeDraftSessionId] = useState<string | null>(null);
+  const [wizardStepVersions, setWizardStepVersions] = useState<Partial<Record<BookCreationWizardStep, number>>>({});
+  const [wizardStepHydrationStatus, setWizardStepHydrationStatus] = useState<Partial<Record<BookCreationWizardStep, WizardStepHydrationStatus>>>({});
+  const wizardGenerationSeqRef = useRef(0);
+  const activeWizardStepRef = useRef<BookCreationWizardStep>("intro");
+  const wizardStepHydrationRef = useRef<Partial<Record<BookCreationWizardStep, WizardStepHydrationStatus>>>({});
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingWizardStepRef = useRef<BookCreationWizardStep | null>(null);
   const suppressIntroAutoSaveRef = useRef(false);
   const suppressAutoSaveRef = useRef(false);
+  const lastAutoSaveContentRef = useRef<Partial<Record<BookCreationWizardStep, string>>>({});
   const wizardStepOrder = useMemo(
     () => new Map(WIZARD_STEPS.map((item, index) => [item.id, index] as const)),
     [],
   );
+  const introThemeText = normalizeTextValue(introTheme);
+
+  useEffect(() => {
+    activeWizardStepRef.current = visibleWizardStep;
+  }, [visibleWizardStep]);
 
   const clearAutoSaveTimer = useCallback(() => {
     if (autoSaveTimerRef.current) {
       clearTimeout(autoSaveTimerRef.current);
       autoSaveTimerRef.current = null;
     }
+  }, []);
+
+  const updateWizardStepHydrationStatus = useCallback((step: BookCreationWizardStep, status: WizardStepHydrationStatus) => {
+    wizardStepHydrationRef.current = {
+      ...wizardStepHydrationRef.current,
+      [step]: status,
+    };
+    setWizardStepHydrationStatus((current) => ({
+      ...current,
+      [step]: status,
+    }));
   }, []);
 
   const pauseAutoSaveDuring = useCallback(async <T,>(task: () => Promise<T>): Promise<T> => {
@@ -274,21 +503,580 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const refreshDraft = useCallback(async (): Promise<void> => {
-    if (!draftSessionId) {
+    if (resumeBookId) {
+      return;
+    }
+    if (!resumeDraftSessionId) {
       setDraft(undefined);
       setWizard(undefined);
       return;
     }
-    await loadSessionDetail(draftSessionId);
+    await loadSessionDetail(resumeDraftSessionId);
     const state = useChatStore.getState();
-    const session = state.sessions[draftSessionId];
+    const session = state.sessions[resumeDraftSessionId];
     setDraft(session?.creationDraft);
     setWizard((current) => mergeCreationWizardState({
       current,
       fetched: session?.creationWizard,
       pendingStep: pendingWizardStepRef.current,
     }));
-  }, [draftSessionId, loadSessionDetail]);
+  }, [loadSessionDetail, resumeBookId, resumeDraftSessionId]);
+
+  const loadResumeBook = useCallback(async (bookId: string): Promise<void> => {
+    const data = await fetchJson<BookResumePayload>(`/books/${encodeURIComponent(bookId)}`);
+    setWizardBookId(data.book.id);
+    setBookTitle(data.book.title);
+    setBookPlatform(data.book.platform);
+    setBookLanguage((data.book.language ?? projectLang) as "zh" | "en");
+    if (typeof data.book.targetChapters === "number") setBookTargetChapters(String(data.book.targetChapters));
+    if (typeof data.book.chapterWordCount === "number") setBookChapterWords(String(data.book.chapterWordCount));
+    setDraft((current) => ({
+      concept: current?.concept ?? data.book.title,
+      title: data.book.title,
+      genre: data.book.genre,
+      platform: data.book.platform,
+      language: data.book.language,
+      targetChapters: data.book.targetChapters,
+      chapterWordCount: data.book.chapterWordCount,
+      missingFields: current?.missingFields ?? [],
+      readyToCreate: data.creation.wizardCompleted,
+      ...(current?.draftFields ? { draftFields: current.draftFields } : {}),
+      ...(current?.blurb ? { blurb: current.blurb } : {}),
+      ...(current?.storyBackground ? { storyBackground: current.storyBackground } : {}),
+      ...(current?.worldPremise ? { worldPremise: current.worldPremise } : {}),
+      ...(current?.settingNotes ? { settingNotes: current.settingNotes } : {}),
+      ...(current?.novelOutline ? { novelOutline: current.novelOutline } : {}),
+      ...(current?.conflictCore ? { conflictCore: current.conflictCore } : {}),
+      ...(current?.volumeOutline ? { volumeOutline: current.volumeOutline } : {}),
+      ...(current?.protagonist ? { protagonist: current.protagonist } : {}),
+      ...(current?.supportingCast ? { supportingCast: current.supportingCast } : {}),
+      ...(current?.characterMatrix ? { characterMatrix: current.characterMatrix } : {}),
+      ...(current?.characterArc ? { characterArc: current.characterArc } : {}),
+      ...(current?.relationshipMap ? { relationshipMap: current.relationshipMap } : {}),
+    }));
+    setWizard({
+      currentStep: data.creation.currentStep,
+      completedSteps: [...data.creation.completedSteps],
+      stepNotes: {},
+      updatedAt: Date.now(),
+    });
+    setVisibleWizardStep(data.creation.resumeStep);
+  }, [projectLang]);
+
+  useEffect(() => {
+    if (activeSession?.bookId) {
+      setWizardBookId(activeSession.bookId);
+    }
+  }, [activeSession?.bookId]);
+
+  useEffect(() => {
+    if (!genresData?.genres.length) return;
+    const { genreId: nextGenreId } = resolveBookCreateGenreSelection({
+      currentGenreId: genreSelectionTouched ? selectedGenreId : "",
+      currentSource: genreSelectionTouched ? "manual" : "auto",
+      genres: genresData.genres,
+      draftGenre: draft?.genre,
+      draftGenreAlias: draft?.genreAlias,
+      draftMappedGenreId: draft?.mappedGenreId,
+      projectLanguage: projectLang,
+    });
+    if (nextGenreId && nextGenreId !== selectedGenreId) setSelectedGenreId(nextGenreId);
+  }, [draft?.genre, draft?.genreAlias, draft?.mappedGenreId, genreSelectionTouched, genresData?.genres, projectLang, selectedGenreId]);
+
+  useEffect(() => {
+    const defaultPlatform = platformOptionsForLanguage(bookLanguage)[0]?.value ?? "";
+    if (!defaultPlatform) return;
+    if (!bookPlatform || !platformOptionsForLanguage(bookLanguage).some((item) => item.value === bookPlatform)) {
+      setBookPlatform(defaultPlatform);
+    }
+  }, [bookLanguage, bookPlatform]);
+
+  useEffect(() => {
+    if (draft?.title && !bookTitle) setBookTitle(draft.title);
+    if (draft?.platform && !bookPlatform) setBookPlatform(draft.platform);
+    if (draft?.language && bookLanguage === projectLang) setBookLanguage(draft.language);
+    if (typeof draft?.targetChapters === "number" && !bookTargetChaptersTouched) setBookTargetChapters(String(draft.targetChapters));
+    if (typeof draft?.chapterWordCount === "number" && !bookChapterWordsTouched) setBookChapterWords(String(draft.chapterWordCount));
+    if ((draft?.blurb || draft?.storyBackground) && !introSeedText) setIntroSeedText(composeIntroSeedText(draft?.blurb ?? "", draft?.storyBackground ?? ""));
+    if (draft?.genreAlias && !introThemeText) setIntroTheme(normalizeTextValue(draft.genreAlias));
+  }, [bookChapterWordsTouched, bookLanguage, bookChapterWords, bookPlatform, bookTargetChaptersTouched, bookTargetChapters, bookTitle, draft, introSeedText, introThemeText, projectLang]);
+
+  useEffect(() => {
+    if (!draft) return;
+    setStepDrafts((current) => {
+      const next = { ...current };
+      const nextBaselines: Partial<Record<BookCreationWizardStep, string>> = {};
+      for (const step of WIZARD_STEPS.map((item) => item.id)) {
+        if (next[step]) continue;
+        const seed = buildWizardStepSeedText(step, draft, projectLang);
+        if (seed) {
+          next[step] = seed;
+          nextBaselines[step] = seed;
+        }
+      }
+      lastAutoSaveContentRef.current = {
+        ...lastAutoSaveContentRef.current,
+        ...nextBaselines,
+      };
+      return next;
+    });
+  }, [draft, projectLang]);
+
+  useEffect(() => { void fetchServices(); }, [fetchServices]);
+  useEffect(() => { for (const svc of services) if (svc.connected) void fetchModels(svc.service); }, [services, fetchModels]);
+  const { persistedSelection, ready: persistedSelectionReady } = usePersistedModelSelection();
+
+  const groupedModels = useMemo(() => services
+    .filter((s) => s.connected && (modelsByService[s.service]?.models.length ?? 0) > 0)
+    .map((s) => ({ service: s.service, label: s.label, models: modelsByService[s.service]!.models })), [services, modelsByService]);
+  const filteredGroupedModels = useMemo(() => filterModelGroups(groupedModels, ""), [groupedModels]);
+  const modelPickerStatus = useMemo(() => {
+    if (servicesLoading || services.length === 0) return "loading" as const;
+    const connected = services.filter((s) => s.connected);
+    if (connected.length === 0) return "no-models" as const;
+    if (connected.some((s) => modelsByService[s.service]?.loading)) return "loading" as const;
+    return connected.some((s) => (modelsByService[s.service]?.models.length ?? 0) > 0) ? "ready" as const : "no-models" as const;
+  }, [modelsByService, services, servicesLoading]);
+
+  useEffect(() => {
+    if (!persistedSelectionReady) return;
+    const resolvedFromConfig = resolvePersistedModelSelection(groupedModels, persistedSelection);
+    if (resolvedFromConfig && (resolvedFromConfig.model !== selectedModel || resolvedFromConfig.service !== selectedService)) {
+      setSelectedModel(resolvedFromConfig.model, resolvedFromConfig.service, { persist: false });
+      return;
+    }
+    const resolved = resolveModelSelection(groupedModels, selectedModel, selectedService);
+    if (resolved && (resolved.model !== selectedModel || resolved.service !== selectedService)) {
+      setSelectedModel(resolved.model, resolved.service, { persist: false });
+    }
+  }, [groupedModels, persistedSelection, persistedSelectionReady, selectedModel, selectedService, setSelectedModel]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (resumeBookId) {
+        await loadResumeBook(resumeBookId);
+        if (!cancelled) setResumeDraftSessionId(null);
+        if (!cancelled) {
+          const sessionId = createDraftSession(resumeBookId);
+          if (!cancelled) activateSession(sessionId);
+        }
+        return;
+      }
+      if (draftSessionId) {
+        let persistedDraftSessionId = draftSessionId;
+        try {
+          const data = await fetchJson<SessionListResponse>("/sessions?bookId=null");
+          persistedDraftSessionId = resolvePersistedDraftSessionId(
+            draftSessionId,
+            getBookCreateSessionId(),
+            data.sessions.map((session) => session.sessionId),
+          ) ?? draftSessionId;
+        } catch {
+          // Fall back to the route-provided draft session id when the session list probe fails.
+        }
+        await loadSessionDetail(persistedDraftSessionId);
+        if (cancelled) return;
+        const state = useChatStore.getState();
+        const session = state.sessions[persistedDraftSessionId];
+        if (session?.bookId === null || session?.bookId === undefined) {
+          setBookCreateSessionId(persistedDraftSessionId);
+          setResumeDraftSessionId(persistedDraftSessionId);
+          activateSession(persistedDraftSessionId);
+          return;
+        }
+      }
+      clearBookCreateSessionId();
+      if (!cancelled) setResumeDraftSessionId(null);
+      const sessionId = createDraftSession(null);
+      if (!cancelled) {
+        activateSession(sessionId);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activateSession, createDraftSession, draftSessionId, loadResumeBook, loadSessionDetail, nav, resumeBookId]);
+
+  useEffect(() => {
+    if (!activeSessionId || activeSession?.bookId !== null || activeSession?.isDraft) {
+      return;
+    }
+    setBookCreateSessionId(activeSessionId);
+    setResumeDraftSessionId(activeSessionId);
+  }, [activeSession?.bookId, activeSession?.isDraft, activeSessionId]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [input]);
+
+  const currentStep = visibleWizardStep;
+  const currentStepIndex = Math.max(0, WIZARD_STEPS.findIndex((s) => s.id === currentStep));
+  const currentStepMeta = WIZARD_STEPS[currentStepIndex] ?? WIZARD_STEPS[0]!;
+  const nextStepMeta = WIZARD_STEPS[currentStepIndex + 1];
+  const canGoBack = currentStepIndex > 0;
+  const effectiveDraft = useMemo<BookCreationDraft | undefined>(() => {
+    if (!draft && !bookTitle.trim()) return draft;
+    if (!draft) {
+      return {
+        concept: "",
+        missingFields: [],
+        readyToCreate: false,
+        title: bookTitle.trim() || undefined,
+        platform: bookPlatform || undefined,
+        language: bookLanguage,
+        targetChapters: parsePositiveIntegerInput(bookTargetChapters),
+        chapterWordCount: parsePositiveIntegerInput(bookChapterWords),
+      };
+    }
+    return {
+      ...draft,
+      title: bookTitle.trim() || draft.title,
+      platform: bookPlatform || draft.platform,
+      language: bookLanguage || draft.language,
+      targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft.targetChapters,
+      chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft.chapterWordCount,
+    };
+  }, [bookChapterWords, bookLanguage, bookPlatform, bookTargetChapters, bookTitle, draft]);
+  const canCreate = currentStep === "relation" && canCreateFromDraft(effectiveDraft);
+  const validationReports = useMemo(() => buildWizardValidationReports(effectiveDraft, projectLang), [effectiveDraft, projectLang]);
+  const worldStepDraft = stepDrafts.world ?? buildWizardStepSeedText("world", draft ?? {}, projectLang);
+  const introMarkdownDraft = resolveIntroMarkdownEditorContent({
+    draft: draft ?? {},
+    language: projectLang,
+    persistedIntroMarkdown: persistedStepDrafts.intro,
+    currentIntroMarkdown: introBodyDraft,
+    currentSource: introBodySource,
+    dirty: introBodyDirty,
+  });
+  const currentStepDraft = resolveWizardStepDisplayContent({
+    step: currentStep,
+    draft: draft ?? {},
+    language: projectLang,
+    editedDraft: stepDrafts[currentStep],
+    persistedDraft: persistedStepDrafts[currentStep],
+    introMarkdown: introBodyDraft,
+  });
+  const currentStepContent = currentStepDraft;
+  const currentValidationReport = useMemo(() => {
+    if (currentStep === "intro") {
+      return buildStepValidationReport("intro", effectiveDraft ?? {}, projectLang, currentStepContent);
+    }
+    return buildStepValidationReport(currentStep, effectiveDraft ?? {}, projectLang, currentStepDraft);
+  }, [currentStep, currentStepContent, currentStepDraft, effectiveDraft, projectLang, validationReports]);
+  const selectedGenre = genresData?.genres.find((genre) => genre.id === selectedGenreId) ?? null;
+  const genreBindingLabel = selectedGenre
+    ? `${selectedGenre.name}${selectedGenre.source ? ` · ${selectedGenre.source}` : ""}`
+    : draft?.genreAlias?.trim() || draft?.mappedGenreId?.trim() || draft?.genre?.trim() || "未选择";
+  const selectedIntroCandidate = introCandidates[selectedIntroCandidateIndex] ?? null;
+  const parsedIntroSeed = parseIntroSeedText(introSeedText);
+  const introBlurb = parsedIntroSeed.blurb;
+  const introStoryBackground = parsedIntroSeed.storyBackground;
+  useEffect(() => {
+    if (!draft || introBodyDirty) return;
+    const preferred = resolvePreferredIntroMarkdown({
+      draft,
+      language: projectLang,
+      persistedIntroMarkdown: persistedStepDrafts.intro,
+      currentIntroMarkdown: introBodyDraft,
+      currentSource: introBodySource,
+    });
+    setIntroBodyDraft(preferred.content);
+    setIntroBodySource(preferred.source);
+    lastAutoSaveContentRef.current.intro = preferred.content;
+  }, [draft, introBodyDirty, persistedStepDrafts.intro, projectLang]);
+  const isMarkdownStep = currentStep !== "intro";
+  const currentMarkdownSpec = isMarkdownStep ? getStepMarkdownSpec(currentStep as Exclude<BookCreationWizardStep, "intro">) : null;
+  const autoGenerateAllowed = Boolean(introThemeText.trim() || selectedGenre?.name?.trim());
+  const stopping = activeSession?.isStopping ?? false;
+  const canStop = Boolean(activeSessionId) && (loading || stopping);
+  const navigationLocked = isWizardNavigationLocked({
+    loadingDraft,
+    loading,
+    creating,
+    isAdvancing,
+    isAutoCompleting,
+    isRegenerating,
+    isAutoGeneratingPage,
+    stopping,
+  });
+  const shouldShowValidationPanel = validationPanelStep === currentStep;
+  const syncDisplayedStepDraft = useCallback((step: BookCreationWizardStep) => {
+    const sessionId = draftSessionId ?? activeSessionId;
+    const latestDraft = sessionId ? (useChatStore.getState().sessions[sessionId]?.creationDraft ?? draft) : draft;
+    if (!latestDraft) return;
+    if (step === "intro") {
+      const introSeed = composeIntroSeedText(latestDraft.blurb ?? "", latestDraft.storyBackground ?? "");
+      setIntroSeedText(introSeed);
+      const preferred = resolvePreferredIntroMarkdown({
+        draft: latestDraft,
+        language: projectLang,
+        persistedIntroMarkdown: persistedStepDrafts.intro,
+        currentIntroMarkdown: introBodyDraft,
+        currentSource: introBodySource,
+      });
+      setIntroBodyDraft(preferred.content);
+      setIntroBodySource(preferred.source);
+      setIntroBodyDirty(false);
+      lastAutoSaveContentRef.current.intro = preferred.content;
+      return;
+    }
+    const persistedStepDraft = persistedStepDrafts[step]?.trim();
+    const editedStepDraft = stepDrafts[step]?.trim();
+    if (editedStepDraft || persistedStepDraft) {
+      const displayed = resolveWizardStepDisplayContent({
+        step,
+        draft: latestDraft,
+        language: projectLang,
+        editedDraft: editedStepDraft,
+        persistedDraft: persistedStepDraft,
+        introMarkdown: introBodyDraft,
+      });
+      setStepDrafts((current) => ({
+        ...current,
+        [step]: displayed,
+      }));
+      lastAutoSaveContentRef.current[step] = displayed;
+      return;
+    }
+    const nextStepDraft = buildStepMarkdownDraft(step, latestDraft, projectLang);
+    setStepDrafts((current) => ({
+      ...current,
+      [step]: nextStepDraft,
+    }));
+    lastAutoSaveContentRef.current[step] = nextStepDraft;
+  }, [activeSessionId, draft, draftSessionId, persistedStepDrafts, projectLang, stepDrafts]);
+
+  const activeBookId = activeSession?.bookId ?? wizardBookId ?? null;
+
+  const applyWizardStepFileContent = useCallback((step: BookCreationWizardStep, content: string) => {
+    if (step === "intro") {
+      setPersistedStepDrafts((current) => ({ ...current, intro: content }));
+      setIntroBodyDraft(content);
+      setIntroBodySource("generated");
+      setIntroBodyDirty(false);
+      lastAutoSaveContentRef.current.intro = content;
+      if (activeSessionId && content.trim()) {
+        replaceWizardStepMessage(activeSessionId, step, content);
+      }
+      return;
+    }
+    setPersistedStepDrafts((current) => ({ ...current, [step]: content }));
+    setStepDrafts((current) => ({ ...current, [step]: content }));
+    lastAutoSaveContentRef.current[step] = content;
+    if (activeSessionId && content.trim()) {
+      replaceWizardStepMessage(activeSessionId, step, content);
+    }
+  }, [activeSessionId, replaceWizardStepMessage]);
+
+  const loadWizardStepFromFile = useCallback(async (bookId: string, step: BookCreationWizardStep): Promise<WizardStepFilePayload | null> => {
+    updateWizardStepHydrationStatus(step, "loading");
+    try {
+      const data = await fetchJson<WizardStepFilePayload>(`/books/${encodeURIComponent(bookId)}/wizard-file/${WIZARD_STEP_FILE_NAMES[step]}`);
+      applyWizardStepFileContent(step, data.content ?? "");
+      if (activeSessionId && data.content.trim()) {
+        replaceWizardStepMessage(activeSessionId, step, data.content);
+      }
+      setWizardStepVersions((current) => ({ ...current, [step]: data.version }));
+      updateWizardStepHydrationStatus(step, "loaded");
+      return data;
+    } catch (cause) {
+      updateWizardStepHydrationStatus(step, "error");
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    }
+  }, [activeSessionId, applyWizardStepFileContent, replaceWizardStepMessage, updateWizardStepHydrationStatus]);
+
+  const extractAssistantStepBody = useCallback((targetStep: BookCreationWizardStep): string => {
+    if (!activeSessionId) return "";
+    const session = useChatStore.getState().sessions[activeSessionId];
+    const message = [...(session?.messages ?? [])]
+      .reverse()
+      .find((item) => item.role === "assistant" && item.wizardStep === targetStep);
+    if (!message) return "";
+    const partsText = (message.parts ?? [])
+      .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
+      .map((p) => p.content)
+      .join("")
+      .trim();
+    if (targetStep === "intro") {
+      const fromParts = normalizeIntroMarkdownCandidate(partsText);
+      if (fromParts) return fromParts;
+      const fromContent = normalizeIntroMarkdownCandidate(message.content?.trim() ?? "");
+      return fromContent;
+    }
+    const content = message?.content?.trim() ?? "";
+    if (!content) return "";
+    if (!looksLikeWizardStepMarkdown(targetStep as Exclude<BookCreationWizardStep, "intro">, content)) {
+      return "";
+    }
+    return content;
+  }, [activeSessionId]);
+
+  const resolveLatestAssistantIntroContent = useCallback((): string => {
+    return extractAssistantStepBody("intro");
+  }, [extractAssistantStepBody]);
+
+  const generateWizardStepBody = useCallback(async (targetStep: Exclude<BookCreationWizardStep, "intro">, instruction: string): Promise<string> => {
+    if (!activeSessionId) return "";
+    const requestSeq = ++wizardGenerationSeqRef.current;
+    const response = await sendMessage(activeSessionId, instruction, activeBookId ?? undefined, {
+      skipAutoNewPrefix: true,
+      wizardStep: targetStep,
+      forceStream: true,
+    }) as AgentResponse | null;
+    if (wizardGenerationSeqRef.current !== requestSeq || activeWizardStepRef.current !== targetStep) {
+      return "";
+    }
+    const responseContent = resolveWizardStepSaveContent(response, targetStep, projectLang);
+    const streamContent = extractAssistantStepBody(targetStep);
+    const contentToSave = stripWizardPreamble(
+      targetStep,
+      responseContent || streamContent,
+    );
+    if (!contentToSave.trim() || !hasMeaningfulWizardStepContent(targetStep, contentToSave, draft)) {
+      setStatus(projectLang === "zh" ? `${currentStepMeta.title} 生成结果不是当前页有效正文，已拦截保存，请重试。` : `The generated result was not valid body text, so saving was blocked.`);
+      return "";
+    }
+    return contentToSave.trim();
+  }, [activeBookId, activeSessionId, currentStepMeta.title, draft, extractAssistantStepBody, projectLang, resolveWizardStepSaveContent, sendMessage]);
+
+  const saveWizardStepToFile = useCallback(async (bookId: string, step: BookCreationWizardStep, content: string): Promise<boolean> => {
+    const attemptSave = async (expectedVersion: number | undefined): Promise<{ ok: boolean; version?: number; conflict?: boolean }> => {
+      try {
+        const data = await fetchJson<{ ok: boolean; step: BookCreationWizardStep; version: number; updatedAt: string }>(`/books/${encodeURIComponent(bookId)}/wizard/${step}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content,
+            expectedVersion,
+          }),
+        });
+        return { ok: true, version: data.version };
+      } catch (cause) {
+        if (cause instanceof ApiRequestError && cause.status === 409) {
+          return { ok: false, conflict: true };
+        }
+        throw cause;
+      }
+    };
+    try {
+      const first = await attemptSave(wizardStepVersions[step]);
+      if (first.ok && typeof first.version === "number") {
+        setWizardStepVersions((current) => ({ ...current, [step]: first.version! }));
+        bumpBookDataVersion();
+        return true;
+      }
+      if (first.conflict) {
+        const latest = await fetchJson<WizardStepFilePayload>(`/books/${encodeURIComponent(bookId)}/wizard-file/${WIZARD_STEP_FILE_NAMES[step]}`);
+        setWizardStepVersions((current) => ({ ...current, [step]: latest.version }));
+        const retry = await attemptSave(latest.version);
+        if (retry.ok && typeof retry.version === "number") {
+          setWizardStepVersions((current) => ({ ...current, [step]: retry.version! }));
+          bumpBookDataVersion();
+          return true;
+        }
+      }
+      return false;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+  }, [bumpBookDataVersion, wizardStepVersions]);
+
+  const ensureBookShell = useCallback(async (): Promise<string | null> => {
+    if (activeBookId) return activeBookId;
+    try {
+      const payload = await fetchJson<{ ok: boolean; bookId: string }>("/books/create-shell", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: bookTitle || resolveIntroCandidateTitle(selectedIntroCandidate ?? { title: "", blurb: "", storyBackground: "" }) || "未命名书稿",
+          genre: selectedGenre?.id ?? draft?.genre ?? "other",
+          language: bookLanguage,
+          platform: bookPlatform,
+          chapterWordCount: parsePositiveIntegerInput(bookChapterWords),
+          targetChapters: parsePositiveIntegerInput(bookTargetChapters),
+          blurb: introBlurb || draft?.blurb || undefined,
+          storyBackground: introStoryBackground || draft?.storyBackground || undefined,
+          introMarkdown: introBodyDraft || introSeedText,
+        }),
+      });
+      const nextBookId = payload.bookId;
+      if (!nextBookId) return null;
+      setWizardBookId(nextBookId);
+      return nextBookId;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return null;
+    }
+  }, [activeBookId, bookChapterWords, bookLanguage, bookPlatform, bookTargetChapters, bookTitle, draft?.blurb, draft?.genre, draft?.storyBackground, introBlurb, introBodyDraft, introSeedText, introStoryBackground, selectedGenre?.id, selectedIntroCandidate]);
+
+  useEffect(() => {
+    if (!activeBookId || loadingDraft) return;
+    void loadWizardStepFromFile(activeBookId, currentStep);
+  }, [activeBookId, currentStep, loadWizardStepFromFile, loadingDraft]);
+
+  useEffect(() => {
+    if (!activeBookId || loadingDraft || currentStep === "intro") return;
+    const currentSession = activeSessionId ? useChatStore.getState().sessions[activeSessionId] : null;
+    const hydrationStatus = wizardStepHydrationRef.current[currentStep] ?? wizardStepHydrationStatus[currentStep];
+    const latestBody = currentSession?.messages
+      ?.slice()
+      .reverse()
+      .find((message) => message.role === "assistant" && message.wizardStep === currentStep)
+      ?.content?.trim() ?? "";
+    const persisted = persistedStepDrafts[currentStep]?.trim() ?? "";
+    if (!shouldAutoGenerateWizardStepBody({
+      currentStep,
+      loadingDraft,
+      loading,
+      isAdvancing,
+      isAutoCompleting,
+      isRegenerating,
+      isAutoGeneratingPage,
+      hydrationStatus,
+      latestBody,
+      persisted,
+    })) {
+      return;
+    }
+    setIsAutoGeneratingPage(true);
+    const targetStep = currentStep as Exclude<BookCreationWizardStep, "intro">;
+    const instruction = projectLang === "zh"
+      ? `请自动生成当前${currentStepMeta.title}页正文，只写这一页，不要写总结说明，不要修改其他页面。\n\n【当前页】${currentStepMeta.title}\n【当前草案】\n${currentStepDraft}`
+      : `Automatically generate the current ${currentStepMeta.title} page only. Write only this page, do not write a summary, and do not modify other pages.\n\n[Current Page] ${currentStepMeta.title}\n[Current Draft]\n${currentStepDraft}`;
+    void (async () => {
+      try {
+        const resolvedBookId = activeBookId ?? await ensureBookShell();
+        if (!resolvedBookId) return;
+        const content = await generateWizardStepBody(targetStep, instruction);
+        if (!content) return;
+        const saved = await saveWizardStepToFile(resolvedBookId, targetStep, content);
+        if (saved) {
+          applyWizardStepFileContent(targetStep, content);
+          await loadWizardStepFromFile(resolvedBookId, targetStep);
+        }
+      } finally {
+        setIsAutoGeneratingPage(false);
+      }
+    })();
+  }, [activeBookId, activeSessionId, currentStep, currentStepDraft, currentStepMeta.title, ensureBookShell, generateWizardStepBody, isAdvancing, isAutoCompleting, isAutoGeneratingPage, isRegenerating, loading, loadingDraft, loadWizardStepFromFile, persistedStepDrafts, projectLang, saveWizardStepToFile, wizardStepHydrationStatus]);
+
+  useEffect(() => {
+    if (!resumeBookId || !wizardBookId || loadingDraft || !wizard) return;
+    const steps = resolveWizardStepsToPrefetch({
+      creationState: "wizard",
+      creation: {
+        wizardCompleted: false,
+        resumeStep: visibleWizardStep,
+        completedSteps: wizard.completedSteps,
+      },
+    });
+    if (steps.length === 0) return;
+    void Promise.all(steps.map((step) => loadWizardStepFromFile(wizardBookId, step)));
+  }, [loadWizardStepFromFile, loadingDraft, resumeBookId, visibleWizardStep, wizard, wizardBookId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -312,193 +1100,31 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
   }, [visibleWizardStep, wizard?.currentStep, wizardStepOrder]);
 
   useEffect(() => {
-    if (!genresData?.genres.length) return;
-    const nextGenreId = resolveInitialGenreSelection(selectedGenreId, genresData.genres, draft?.genre, projectLang);
-    if (nextGenreId && nextGenreId !== selectedGenreId) setSelectedGenreId(nextGenreId);
-  }, [draft?.genre, genresData?.genres, projectLang, selectedGenreId]);
-
-  useEffect(() => {
-    const defaultPlatform = platformOptionsForLanguage(bookLanguage)[0]?.value ?? "";
-    if (!defaultPlatform) return;
-    if (!bookPlatform || !platformOptionsForLanguage(bookLanguage).some((item) => item.value === bookPlatform)) {
-      setBookPlatform(defaultPlatform);
-    }
-  }, [bookLanguage, bookPlatform]);
-
-  useEffect(() => {
-    if (draft?.title && !bookTitle) setBookTitle(draft.title);
-    if (draft?.platform && !bookPlatform) setBookPlatform(draft.platform);
-    if (draft?.language && bookLanguage === projectLang) setBookLanguage(draft.language);
-    if (typeof draft?.targetChapters === "number" && !bookTargetChaptersTouched) setBookTargetChapters(String(draft.targetChapters));
-    if (typeof draft?.chapterWordCount === "number" && !bookChapterWordsTouched) setBookChapterWords(String(draft.chapterWordCount));
-    if ((draft?.blurb || draft?.storyBackground) && !introSeedText) setIntroSeedText(composeIntroSeedText(draft?.blurb ?? "", draft?.storyBackground ?? ""));
-    if (draft?.genreAlias && !introTheme) setIntroTheme(draft.genreAlias);
-  }, [bookChapterWordsTouched, bookLanguage, bookChapterWords, bookPlatform, bookTargetChaptersTouched, bookTargetChapters, bookTitle, draft, introSeedText, introTheme, projectLang]);
-
-  useEffect(() => {
-    if (!draft) return;
-    setStepDrafts((current) => {
-      const next = { ...current };
-      for (const step of WIZARD_STEPS.map((item) => item.id)) {
-        if (next[step]) continue;
-        const seed = buildWizardStepSeedText(step, draft, projectLang);
-        if (seed) next[step] = seed;
-      }
-      return next;
-    });
-  }, [draft, projectLang]);
-
-  useEffect(() => { void fetchServices(); }, [fetchServices]);
-  useEffect(() => { for (const svc of services) if (svc.connected) void fetchModels(svc.service); }, [services, fetchModels]);
-
-  const groupedModels = useMemo(() => services
-    .filter((s) => s.connected && (modelsByService[s.service]?.models.length ?? 0) > 0)
-    .map((s) => ({ service: s.service, label: s.label, models: modelsByService[s.service]!.models })), [services, modelsByService]);
-  const filteredGroupedModels = useMemo(() => filterModelGroups(groupedModels, ""), [groupedModels]);
-  const modelPickerStatus = useMemo(() => {
-    if (servicesLoading || services.length === 0) return "loading" as const;
-    const connected = services.filter((s) => s.connected);
-    if (connected.length === 0) return "no-models" as const;
-    if (connected.some((s) => modelsByService[s.service]?.loading)) return "loading" as const;
-    return connected.some((s) => (modelsByService[s.service]?.models.length ?? 0) > 0) ? "ready" as const : "no-models" as const;
-  }, [modelsByService, services, servicesLoading]);
-
-  useEffect(() => {
-    const resolved = resolveModelSelection(groupedModels, selectedModel, selectedService);
-    if (resolved && (resolved.model !== selectedModel || resolved.service !== selectedService)) {
-      setSelectedModel(resolved.model, resolved.service);
-    }
-  }, [groupedModels, selectedModel, selectedService, setSelectedModel]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      if (draftSessionId) {
-        await loadSessionDetail(draftSessionId);
-        if (cancelled) return;
-        const state = useChatStore.getState();
-        const session = state.sessions[draftSessionId];
-        if (session?.bookId === null) {
-          activateSession(draftSessionId);
-          return;
-        }
-        if (session?.bookId) {
-          nav.toBook(session.bookId);
-          return;
-        }
-      }
-      const sessionId = createDraftSession(null);
-      if (!cancelled) activateSession(sessionId);
-    })();
-    return () => { cancelled = true; };
-  }, [activateSession, createDraftSession, draftSessionId, loadSessionDetail, nav]);
-
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-  }, [input]);
-
-  const currentStep = visibleWizardStep;
-  const currentStepIndex = Math.max(0, WIZARD_STEPS.findIndex((s) => s.id === currentStep));
-  const currentStepMeta = WIZARD_STEPS[currentStepIndex] ?? WIZARD_STEPS[0]!;
-  const nextStepMeta = WIZARD_STEPS[currentStepIndex + 1];
-  const canGoBack = currentStepIndex > 0;
-  const canCreate = currentStep === "review" && canCreateFromDraft(draft);
-  const validationReports = useMemo(() => buildWizardValidationReports(draft, projectLang), [draft, projectLang]);
-  const worldStepDraft = stepDrafts.world ?? buildWizardStepSeedText("world", draft ?? {}, projectLang);
-  const introMarkdownDraft = introBodyDraft || buildIntroMarkdownDraft(draft ?? {}, projectLang);
-  const currentStepDraft = currentStep === "intro"
-    ? introMarkdownDraft
-    : currentStep === "world"
-      ? worldStepDraft
-      : stepDrafts[currentStep] ?? buildStepMarkdownDraft(currentStep as Exclude<BookCreationWizardStep, "intro" | "review">, draft ?? {}, projectLang);
-  const currentStepContent = currentStep === "intro"
-    ? introMarkdownDraft
-    : currentStep === "world"
-      ? worldStepDraft
-      : currentStepDraft;
-  const currentValidationReport = useMemo(() => {
-    if (currentStep === "intro") {
-      return buildStepValidationReport("intro", draft ?? {}, projectLang, currentStepContent);
-    }
-    if (currentStep === "review") return validationReports[currentStep];
-    return buildStepValidationReport(currentStep, draft ?? {}, projectLang, currentStepDraft);
-  }, [currentStep, currentStepContent, currentStepDraft, draft, projectLang, validationReports]);
-  const selectedGenre = genresData?.genres.find((genre) => genre.id === selectedGenreId) ?? null;
-  const selectedIntroCandidate = introCandidates[selectedIntroCandidateIndex] ?? null;
-  const parsedIntroSeed = parseIntroSeedText(introSeedText);
-  const introBlurb = parsedIntroSeed.blurb;
-  const introStoryBackground = parsedIntroSeed.storyBackground;
-  useEffect(() => {
-    if (!draft) return;
-    setIntroBodyDraft(buildIntroMarkdownDraft(draft, projectLang));
-  }, [draft, projectLang]);
-  const isMarkdownStep = currentStep !== "intro" && currentStep !== "review";
-  const currentMarkdownSpec = isMarkdownStep ? getStepMarkdownSpec(currentStep as Exclude<BookCreationWizardStep, "intro" | "review">) : null;
-  const autoGenerateAllowed = Boolean(introTheme.trim() || selectedGenre?.name?.trim());
-  const stopping = activeSession?.isStopping ?? false;
-  const canStop = Boolean(activeSessionId) && (loading || stopping);
-  const shouldShowValidationPanel = validationPanelStep === currentStep;
-  const syncDisplayedStepDraft = useCallback((step: BookCreationWizardStep) => {
-    const sessionId = draftSessionId ?? activeSessionId;
-    const latestDraft = sessionId ? (useChatStore.getState().sessions[sessionId]?.creationDraft ?? draft) : draft;
-    if (!latestDraft) return;
-    if (step === "intro") {
-      setIntroSeedText(composeIntroSeedText(latestDraft.blurb ?? "", latestDraft.storyBackground ?? ""));
-      setIntroBodyDraft(buildIntroMarkdownDraft(latestDraft, projectLang));
-      return;
-    }
-    if (step === "review") return;
-    setStepDrafts((current) => ({
-      ...current,
-      [step]: buildStepMarkdownDraft(step, latestDraft, projectLang),
-    }));
-  }, [activeSessionId, draft, draftSessionId, projectLang]);
-
-  useEffect(() => {
     setValidationPanelStep(null);
   }, [currentStep]);
 
-  // 自动保存：stepDrafts / introSeedText 变化后 debounce 600ms，静默 POST save_wizard_step
+  // 自动保存：stepDrafts / introSeedText 变化后 debounce 600ms，静默写入 wizard step 文件
   useEffect(() => {
-    if (!activeSessionId || suppressAutoSaveRef.current || isAdvancing || isAutoCompleting || loading) return;
+    if (!activeBookId || loadingDraft || suppressAutoSaveRef.current || navigationLocked) return;
     const content = currentStep === "intro"
       ? introMarkdownDraft
-      : currentStep === "world"
-        ? (stepDrafts.world ?? "")
-        : (stepDrafts[currentStep] ?? "");
+      : currentStepDraft;
     if (currentStep === "intro" && suppressIntroAutoSaveRef.current) return;
     if (!content.trim()) return;
+    if (lastAutoSaveContentRef.current[currentStep] === content) return;
     clearAutoSaveTimer();
     autoSaveTimerRef.current = setTimeout(() => {
-      void fetchJson("/interaction/session", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          request: {
-            intent: "save_wizard_step",
-            language: projectLang,
-            stepTitle: currentStepMeta.title,
-            wizardStep: currentStep,
-            title: bookTitle || undefined,
-            genre: selectedGenre?.id ?? draft?.genre ?? undefined,
-            platform: bookPlatform || undefined,
-            targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
-            chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
-            instruction: content,
-          },
-        }),
-      }).catch(() => { /* 静默失败，不影响用户操作 */ });
+      lastAutoSaveContentRef.current[currentStep] = content;
+      void saveWizardStepToFile(activeBookId, currentStep, content);
     }, 600);
     return clearAutoSaveTimer;
-  }, [activeSessionId, bookChapterWords, bookPlatform, bookTargetChapters, bookTitle, clearAutoSaveTimer, currentStep, currentStepMeta.title, draft?.chapterWordCount, draft?.genre, draft?.targetChapters, introMarkdownDraft, isAdvancing, loading, projectLang, selectedGenre?.id, stepDrafts]);
+  }, [activeBookId, clearAutoSaveTimer, currentStep, currentStepDraft, introMarkdownDraft, loadingDraft, navigationLocked, saveWizardStepToFile]);
   const sendCommand = useCallback(async (
     instruction: string,
     wizardStep: BookCreationWizardStep = currentStep,
     options?: {
       readonly refreshDraft?: boolean;
+      readonly forceStream?: boolean;
       readonly wizardAdvance?: Omit<BookCreateWizardControlRequest, "intent">;
     },
   ): Promise<AgentResponse | null> => {
@@ -507,10 +1133,11 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
       return null;
     }
     try {
-      const data = await sendMessage(activeSessionId, instruction, undefined, {
+      const data = await sendMessage(activeSessionId, instruction, activeBookId ?? undefined, {
         skipAutoNewPrefix: true,
         wizardStep,
         ...(options?.wizardAdvance ? { wizardAdvance: options.wizardAdvance } : {}),
+        ...(options?.forceStream !== undefined ? { forceStream: options.forceStream } : {}),
       }) as AgentResponse | null;
       setStatus(projectLang === "zh" ? "操作已完成，已回填当前页。" : "Completed and applied to the current page.");
       if (options?.refreshDraft !== false) {
@@ -521,7 +1148,157 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
       setError(cause instanceof Error ? cause.message : String(cause));
       return null;
     }
-  }, [activeSessionId, currentStep, projectLang, refreshDraft, sendMessage]);
+  }, [activeBookId, activeSessionId, currentStep, projectLang, refreshDraft, sendMessage]);
+
+  const applyIntroGenerationResult = useCallback((response: AgentResponse | null): void => {
+    const savedDraft = response?.session?.creationDraft ?? response?.details?.creationDraft;
+    if (!savedDraft) return;
+    const canonicalIntro = resolveCanonicalIntroMarkdown([
+      resolveLatestAssistantIntroContent(),
+      response?.details?.draftRaw,
+      response?.response,
+      savedDraft.draftFields?.introMarkdown,
+    ]);
+    if (canonicalIntro && hasMeaningfulIntroMarkdown(canonicalIntro)) {
+      // Mark dirty BEFORE setDraft so the draft-change useEffect is blocked
+      // and cannot overwrite the generated body with the skeleton in savedDraft.
+      setIntroBodyDirty(true);
+      setIntroBodyDraft(canonicalIntro);
+      lastAutoSaveContentRef.current.intro = canonicalIntro;
+      setIntroBodySource("generated");
+    } else {
+      setStatus(projectLang === "zh"
+        ? "简介正文已返回，但未识别到足够完整的正文内容，已保留当前编辑内容。"
+        : "Intro content came back, but it was not complete enough to be treated as body text, so the current editor content was kept.");
+    }
+    setDraft(savedDraft);
+    if (savedDraft.title?.trim()) {
+      setBookTitle(savedDraft.title.trim());
+    }
+    if (savedDraft.blurb?.trim() || savedDraft.storyBackground?.trim()) {
+      setIntroSeedText(composeIntroSeedText(savedDraft.blurb ?? "", savedDraft.storyBackground ?? ""));
+    }
+    if (!savedDraft.title?.trim()) {
+      setStatus(projectLang === "zh"
+        ? "简介正文已生成，但未产出书名。请先生成或补录书名，再进入下一步。"
+        : "Intro body was generated, but no title was produced. Generate or fill in the title before continuing.");
+    }
+  }, [projectLang, resolveLatestAssistantIntroContent]);
+
+  const buildIntroStreamInstruction = useCallback((params: {
+    readonly title?: string;
+    readonly platform?: string;
+    readonly language?: string;
+    readonly targetChapters?: number;
+    readonly chapterWordCount?: number;
+    readonly theme?: string;
+    readonly blurb?: string;
+    readonly storyBackground?: string;
+    readonly seed?: string;
+  }) => [
+    "/intro mode=generate",
+    params.theme ? `theme=${encodeURIComponent(params.theme)}` : undefined,
+    params.title ? `title=${encodeURIComponent(params.title)}` : undefined,
+    params.platform ? `platform=${encodeURIComponent(params.platform)}` : undefined,
+    params.language ? `language=${encodeURIComponent(params.language)}` : undefined,
+    typeof params.targetChapters === "number" ? `targetChapters=${params.targetChapters}` : undefined,
+    typeof params.chapterWordCount === "number" ? `chapterWordCount=${params.chapterWordCount}` : undefined,
+    params.blurb ? `blurb=${encodeURIComponent(params.blurb)}` : undefined,
+    params.storyBackground ? `storyBackground=${encodeURIComponent(params.storyBackground)}` : undefined,
+    params.seed
+      ? `instruction=${encodeURIComponent([
+        params.seed,
+        params.title?.trim()
+          ? "已给定书名，必须沿用该书名，并同步写回书籍参数。"
+          : "必须先生成一个明确可用的书名，并把书名写回书籍参数 title。",
+        "输出的正文首行禁止显示书名，不要写成 '# 书名'。",
+      ].join("\n"))}`
+      : undefined,
+  ].filter((item): item is string => Boolean(item)).join(" "), []);
+
+  const runIntroRevision = useCallback(async (request: {
+    readonly title?: string;
+    readonly platform?: string;
+    readonly language?: string;
+    readonly targetChapters?: number;
+    readonly chapterWordCount?: number;
+    readonly seed?: string;
+    readonly blurb?: string;
+    readonly storyBackground?: string;
+    readonly theme?: string;
+  }): Promise<AgentResponse | null> => {
+    const seed = request.seed?.trim() || "";
+    if (!seed) {
+      setError(projectLang === "zh" ? "请先输入简介或卖点。" : "Please enter a hook or blurb first.");
+      return null;
+    }
+    if (!activeSessionId) {
+      setError(projectLang === "zh" ? "右侧 AI 工作台尚未就绪。" : "The AI workbench is not ready yet.");
+      return null;
+    }
+
+    let response: AgentResponse | null = null;
+    await pauseAutoSaveDuring(async () => {
+      suppressIntroAutoSave(true);
+      try {
+        const resolvedBookId = await resolveIntroRevisionBookId(activeBookId, ensureBookShell);
+        if (!resolvedBookId) {
+          setError(projectLang === "zh" ? "简介正文已生成前未能创建书稿目录，无法继续。" : "The book shell could not be created before intro generation.");
+          return;
+        }
+        const instruction = buildIntroStreamInstruction({
+          title: request.title,
+          platform: request.platform,
+          language: request.language,
+          targetChapters: request.targetChapters,
+          chapterWordCount: request.chapterWordCount,
+          theme: request.theme,
+          blurb: request.blurb,
+          storyBackground: request.storyBackground,
+          seed,
+        });
+        response = await sendMessage(activeSessionId, instruction, resolvedBookId, {
+          skipAutoNewPrefix: true,
+          wizardStep: currentStep,
+          forceStream: true,
+        }) as AgentResponse | null;
+        applyIntroGenerationResult(response);
+        const canonicalIntro = resolveCanonicalIntroMarkdown([
+          resolveLatestAssistantIntroContent(),
+          response?.details?.draftRaw,
+          response?.response,
+          response?.session?.creationDraft?.draftFields?.introMarkdown,
+          response?.details?.creationDraft?.draftFields?.introMarkdown,
+        ]);
+        if (!canonicalIntro || !hasMeaningfulIntroMarkdown(canonicalIntro)) {
+          setError(projectLang === "zh" ? "简介生成成功，但未返回可保存的 Markdown 正文，请重试。" : "Intro generation completed but did not return savable Markdown body. Please retry.");
+          return;
+        }
+        const saved = await saveWizardStepToFile(resolvedBookId, "intro", canonicalIntro);
+        if (!saved) {
+          setError(projectLang === "zh" ? "简介正文已生成，但保存到 wizard/intro.md 失败。" : "Intro body was generated, but saving to wizard/intro.md failed.");
+          return;
+        }
+        applyWizardStepFileContent("intro", canonicalIntro);
+        syncDisplayedStepDraft("intro");
+        setIntroPanelTab("body");
+        setStatus(projectLang === "zh" ? "简介正文已生成并保存到 wizard/intro.md。" : "Intro body generated and saved to wizard/intro.md.");
+      } catch (cause) {
+        if (cause instanceof ApiRequestError && cause.status === 409) {
+          setBlockedPrompt({
+            title: projectLang === "zh" ? "操作被阻挡" : "Operation blocked",
+            message: cause.message,
+          });
+          return;
+        }
+        throw cause;
+      } finally {
+        suppressIntroAutoSave(false);
+      }
+    });
+
+    return response;
+  }, [activeBookId, activeSessionId, applyIntroGenerationResult, applyWizardStepFileContent, buildIntroStreamInstruction, currentStep, ensureBookShell, loadWizardStepFromFile, pauseAutoSaveDuring, projectLang, resolveLatestAssistantIntroContent, saveWizardStepToFile, sendMessage, suppressIntroAutoSave, syncDisplayedStepDraft]);
 
   const sendWizardControlRequest = useCallback(async (request: BookCreateWizardControlRequest, successStatus: string): Promise<boolean> => {
     if (!activeSessionId) {
@@ -555,6 +1332,45 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
     }
   }, [activeSessionId, projectLang, visibleWizardStep, wizardStepOrder]);
 
+  const saveDraftParams = useCallback(async (params: {
+    readonly title?: string;
+    readonly platform?: string;
+    readonly language?: "zh" | "en";
+    readonly targetChapters?: number;
+    readonly chapterWordCount?: number;
+  }, successStatus?: string): Promise<boolean> => {
+    try {
+      const response = await fetchJson<AgentResponse>("/interaction/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          request: {
+            intent: "set_book_draft_params",
+            title: params.title,
+            platform: params.platform,
+            language: params.language,
+            targetChapters: params.targetChapters,
+            chapterWordCount: params.chapterWordCount,
+          } satisfies BookCreateSessionRequest,
+        }),
+      });
+      const nextDraft = response.session?.creationDraft ?? response.details?.creationDraft;
+      if (nextDraft) {
+        setDraft(nextDraft);
+        if (nextDraft.title?.trim()) {
+          setBookTitle(nextDraft.title.trim());
+        }
+      }
+      if (successStatus) {
+        setStatus(successStatus);
+      }
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    }
+  }, []);
+
   const handleAdvance = useCallback(async () => {
     if (!nextStepMeta) return;
     setValidationPanelStep(currentStep);
@@ -576,37 +1392,73 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
       : `Saving and moving to ${nextStepMeta.title}...`);
 
     try {
-      patchWizardStep(targetStep, currentStep);
-      const draftContext = draft
-        ? buildCreationDraftSummary(draft, projectLang)
-            .map((row) => `${row.label}：${row.value}`)
-            .join("\n")
-        : "";
-      const generationRequest = projectLang === "zh"
-        ? `你现在在处理"${nextStepMeta.title}"页。请根据已有草案和以下${currentStepMeta.title}内容，生成${nextStepMeta.title}页草案，只补当前页允许的字段，不要扩写其他页面，也不要创建新书。\n\n【已有草案】\n${draftContext || "（空）"}\n\n【${currentStepMeta.title}内容】\n${currentStepContent || "（空）"}`
-        : `You are now working on the "${nextStepMeta.title}" page. Based on the existing draft and the ${currentStepMeta.title} content below, generate a draft for the ${nextStepMeta.title} page. Only fill in fields allowed for this page, do not expand other pages or create a new book.\n\n[Existing Draft]\n${draftContext || "(empty)"}\n\n[${currentStepMeta.title} Content]\n${currentStepContent || "(empty)"}`;
+      const resolvedBookId = await ensureBookShell();
+      if (!resolvedBookId) {
+        setStatus(projectLang === "zh" ? "创建书籍壳失败，请检查标题与参数。" : "Failed to create book shell.");
+        return;
+      }
 
-      await sendCommand(generationRequest, targetStep, {
-        refreshDraft: false,
-        wizardAdvance: {
-          wizardStep: currentStep,
-          language: projectLang,
-          stepTitle: currentStepMeta.title,
-          title: bookTitle || draft?.title || undefined,
-          genre: selectedGenre?.id ?? draft?.genre ?? "",
-          platform: bookPlatform || draft?.platform || undefined,
-          targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
-          chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
-          instruction: currentStepContent,
-        },
-      });
+      const persisted = await saveWizardStepToFile(resolvedBookId, currentStep, currentStepContent ?? "");
+      if (!persisted) return;
+
+      patchWizardStep(targetStep, currentStep);
+      const nextFromFile = await loadWizardStepFromFile(resolvedBookId, targetStep);
+      const hasNextContent = hasMeaningfulWizardStepContent(targetStep, nextFromFile?.content ?? "", draft);
+      if (!hasNextContent) {
+        const draftContext = draft
+          ? buildCreationDraftSummary(draft, projectLang)
+              .map((row) => `${row.label}：${row.value}`)
+              .join("\n")
+          : "";
+      const generationRequest = projectLang === "zh"
+          ? `你现在在处理"${nextStepMeta.title}"页。请根据已有草案从头重写${nextStepMeta.title}页草案，只补当前页允许的字段，不要扩写其他页面，也不要创建新书，也不要参考当前页原文。\n\n【已有草案】\n${draftContext || "（空）"}`
+          : `You are now working on the "${nextStepMeta.title}" page. Rewrite the ${nextStepMeta.title} draft from scratch based on the existing draft. Only fill in fields allowed for this page, do not expand other pages or create a new book, and do not use the current page text as a reference.\n\n[Existing Draft]\n${draftContext || "(empty)"}`;
+
+        const generationResponse = await sendCommand(generationRequest, targetStep, {
+          refreshDraft: false,
+          wizardAdvance: {
+            wizardStep: currentStep,
+            language: projectLang,
+            stepTitle: currentStepMeta.title,
+            title: bookTitle || draft?.title || undefined,
+            genre: selectedGenre?.id ?? draft?.genre ?? "",
+            platform: bookPlatform || draft?.platform || undefined,
+            targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
+            chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
+            nextStep: targetStep,
+            instruction: currentStepContent,
+          },
+        });
+        const generatedDraft = generationResponse?.session?.creationDraft ?? generationResponse?.details?.creationDraft;
+        const generatedContent = extractWizardStepContent(generationResponse, targetStep, projectLang);
+        if (hasMeaningfulWizardStepContent(targetStep, generatedContent, generatedDraft ?? draft)) {
+          const savedGenerated = await saveWizardStepToFile(resolvedBookId, targetStep, generatedContent);
+          if (savedGenerated) {
+            await loadWizardStepFromFile(resolvedBookId, targetStep);
+          }
+        }
+      }
       await refreshDraft();
-      syncDisplayedStepDraft(targetStep);
     } finally {
       pendingWizardStepRef.current = null;
       setIsAdvancing(false);
     }
-  }, [bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, clearAutoSaveTimer, currentStep, currentStepContent, currentStepMeta.title, currentValidationReport.status, currentValidationReport.summary, draft, nextStepMeta, patchWizardStep, projectLang, refreshDraft, selectedGenre?.id, sendCommand, syncDisplayedStepDraft]);
+  }, [bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, clearAutoSaveTimer, currentStep, currentStepContent, currentStepMeta.title, currentValidationReport.status, currentValidationReport.summary, draft, ensureBookShell, loadWizardStepFromFile, nextStepMeta, patchWizardStep, projectLang, refreshDraft, saveWizardStepToFile, selectedGenre?.id, sendCommand, syncDisplayedStepDraft]);
+
+  const handleBookTitleCommit = useCallback(async (value: string): Promise<void> => {
+    const trimmed = value.trim();
+    setBookTitle(trimmed);
+    if (!trimmed || trimmed === (draft?.title?.trim() ?? "")) {
+      return;
+    }
+    await saveDraftParams({
+      title: trimmed,
+      platform: bookPlatform || draft?.platform || undefined,
+      language: bookLanguage,
+      targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
+      chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
+    }, projectLang === "zh" ? "书名已保存。" : "Title saved.");
+  }, [bookChapterWords, bookLanguage, bookPlatform, bookTargetChapters, draft, projectLang, saveDraftParams]);
 
   const handleAutoFixCurrentStep = useCallback(async () => {
     if (!activeSessionId || currentValidationReport.status === "pass") return;
@@ -618,59 +1470,55 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
         ? buildCreationDraftSummary(draft, projectLang).map((row) => `${row.label}：${row.value}`).join("\n")
         : "";
       const instruction = projectLang === "zh"
-        ? `请根据当前页缺失项补全当前${currentStepMeta.title}页内容，只补当前页允许的字段，不要改其他页。\n\n【当前页】${currentStepMeta.title}\n【缺失项】${issueSummary}\n\n【已有草案】\n${draftContext || "（空）"}\n\n【当前页内容】\n${currentStepContent || "（空）"}`
-        : `Please fill the missing items for the current ${currentStepMeta.title} page only. Do not modify other pages.\n\n[Current Step] ${currentStepMeta.title}\n[Missing Items] ${issueSummary}\n\n[Existing Draft]\n${draftContext || "(empty)"}\n\n[Current Page Content]\n${currentStepContent || "(empty)"}`;
-      await sendCommand(instruction, currentStep, { refreshDraft: false });
+        ? `请根据当前页缺失项重写当前${currentStepMeta.title}页内容，只补当前页允许的字段，不要改其他页，也不要参考当前页原文。\n\n【当前页】${currentStepMeta.title}\n【缺失项】${issueSummary}\n\n【已有草案】\n${draftContext || "（空）"}`
+        : `Please rewrite the current ${currentStepMeta.title} page to fill the missing items only. Do not modify other pages, and do not use the current page text as a reference.\n\n[Current Step] ${currentStepMeta.title}\n[Missing Items] ${issueSummary}\n\n[Existing Draft]\n${draftContext || "(empty)"}`;
+      const resolvedBookId = activeBookId ?? wizardBookId ?? await ensureBookShell();
+      if (resolvedBookId && currentStep !== "intro") {
+        const contentToSave = await generateWizardStepBody(currentStep as Exclude<BookCreationWizardStep, "intro">, instruction);
+        if (contentToSave.trim()) {
+          await saveWizardStepToFile(resolvedBookId, currentStep, contentToSave);
+          applyWizardStepFileContent(currentStep, contentToSave);
+          await loadWizardStepFromFile(resolvedBookId, currentStep);
+        }
+      }
       await refreshDraft();
-      syncDisplayedStepDraft(currentStep);
     } finally {
       setIsAutoCompleting(false);
     }
-  }, [activeSessionId, currentStep, currentStepContent, currentStepMeta.title, currentValidationReport.status, currentValidationReport.issues, draft, projectLang, refreshDraft, sendCommand, syncDisplayedStepDraft]);
+  }, [activeBookId, activeSessionId, applyWizardStepFileContent, bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, currentStep, currentStepMeta.title, currentValidationReport.status, currentValidationReport.issues, draft, ensureBookShell, generateWizardStepBody, loadWizardStepFromFile, projectLang, refreshDraft, saveWizardStepToFile, selectedGenre?.id, wizardBookId]);
 
   const handleBack = useCallback(async () => {
     if (!canGoBack) return;
     await pauseAutoSaveDuring(async () => {
-      const saved = await sendWizardControlRequest({
-        intent: "save_wizard_step",
-        language: projectLang,
-        stepTitle: currentStepMeta.title,
-        wizardStep: currentStep,
-        title: bookTitle || draft?.title || undefined,
-        genre: selectedGenre?.id ?? draft?.genre ?? undefined,
-        platform: bookPlatform || draft?.platform || undefined,
-        targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
-        chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
-        instruction: currentStepContent,
-      }, projectLang === "zh" ? "已保存当前页草稿。" : "Saved the current page draft.");
-      if (!saved) return;
-      await sendWizardControlRequest({
-        intent: "retreat_book_wizard",
-        language: projectLang,
-        stepTitle: currentStepMeta.title,
-        wizardStep: currentStep,
-      }, projectLang === "zh" ? "已返回上一步。" : "Moved back to the previous step.");
+      const previous = WIZARD_STEPS[currentStepIndex - 1];
+      if (!previous) return;
+      const resolvedBookId = activeBookId ?? await ensureBookShell();
+      if (!resolvedBookId) return;
+      const persisted = await saveWizardStepToFile(
+        resolvedBookId,
+        currentStep,
+        currentStepContent ?? "",
+      );
+      if (!persisted) return;
+      await loadWizardStepFromFile(resolvedBookId, previous.id);
+      patchWizardStep(previous.id);
+      setStatus(projectLang === "zh" ? `已返回 ${previous.title}。` : `Moved back to ${previous.title}.`);
     });
-  }, [bookChapterWords, bookPlatform, bookTitle, canGoBack, currentStep, currentStepContent, currentStepMeta.title, draft?.genre, draft?.platform, draft?.targetChapters, projectLang, pauseAutoSaveDuring, sendWizardControlRequest, selectedGenre?.id]);
+  }, [activeBookId, canGoBack, currentStep, currentStepContent, currentStepIndex, ensureBookShell, loadWizardStepFromFile, patchWizardStep, pauseAutoSaveDuring, projectLang, saveWizardStepToFile]);
 
   const handleCreate = useCallback(async () => {
     if (!canCreate) return;
     setCreating(true);
     try {
-      const data = await sendCommand(buildBookCreateCommand({
-        kind: "create",
-        language: projectLang,
-        stepTitle: currentStepMeta.title,
-        currentStep,
-        title: bookTitle || draft?.title || undefined,
-        genre: selectedGenre?.id ?? draft?.genre ?? "",
-        platform: bookPlatform || draft?.platform || undefined,
-        targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
-        chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
-      }).instruction);
-      const bookId = data?.session?.activeBookId ?? data?.details?.activeBookId;
-      if (!bookId) throw new Error(projectLang === "zh" ? "创建完成但未返回书籍 ID。" : "Create succeeded but no book id was returned.");
-      await waitForBookReady(bookId);
+      const resolvedBookId = activeBookId ?? await ensureBookShell();
+      if (!resolvedBookId) {
+        setStatus(projectLang === "zh" ? "创建书籍壳失败，请检查标题与参数。" : "Failed to create book shell.");
+        return;
+      }
+      const introMarkdown = introBodyDraft || buildIntroMarkdownDraft(draft ?? {}, projectLang);
+      const introSaved = await saveWizardStepToFile(resolvedBookId, "intro", introMarkdown);
+      if (!introSaved) return;
+      await postApi(`/books/${encodeURIComponent(resolvedBookId)}/wizard/complete`);
       const nextTitle = bookTitle.trim();
       const currentTitle = activeSession?.title?.trim() ?? "";
       if (activeSessionId && nextTitle && nextTitle !== currentTitle) {
@@ -679,16 +1527,18 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
       setDraft(undefined);
       setWizard(undefined);
       setVisibleWizardStep("intro");
+      setResumeDraftSessionId(null);
+      clearBookCreateSessionId();
       void loadSessionList(null);
-      nav.toBook(bookId);
+      nav.toBook(resolvedBookId);
     } finally {
       setCreating(false);
     }
-  }, [activeSession?.title, activeSessionId, bookChapterWords, bookPlatform, bookTitle, canCreate, currentStepMeta.title, draft, loadSessionList, nav, projectLang, renameSession, selectedGenre?.id, sendCommand, bookTargetChapters]);
+  }, [activeBookId, activeSession?.title, activeSessionId, bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, canCreate, draft, ensureBookShell, introBodyDraft, loadSessionList, nav, projectLang, renameSession, saveWizardStepToFile]);
 
   const handleAutoComplete = useCallback(async () => {
     if (isAutoCompleting || isAdvancing) return;
-    const stepsToRun = WIZARD_STEPS.filter((s) => s.id !== "review" && s.id !== "intro").slice(
+    const stepsToRun = WIZARD_STEPS.filter((s) => s.id !== "intro").slice(
       Math.max(0, WIZARD_STEPS.findIndex((s) => s.id === currentStep)),
     );
     if (stepsToRun.length === 0) return;
@@ -696,85 +1546,163 @@ export function BookCreate({ nav, theme, t, draftSessionId }: { nav: Nav; theme:
     setStatus(projectLang === "zh" ? "全自动模式：依次生成各步骤内容..." : "Auto mode: generating all steps...");
     try {
       for (const stepMeta of stepsToRun) {
-        if (stepMeta.id === "review") break;
         const nextStepIndex = WIZARD_STEPS.findIndex((s) => s.id === stepMeta.id) + 1;
         const nextMeta = WIZARD_STEPS[nextStepIndex];
-        if (!nextMeta) break;
+        if (!nextMeta) {
+          if (canCreateFromDraft(useChatStore.getState().sessions[activeSessionId ?? ""]?.creationDraft ?? draft)) {
+            await handleCreate();
+          }
+          break;
+        }
         if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
         setStatus(projectLang === "zh" ? `全自动：正在保存并生成 ${nextMeta.title}...` : `Auto: saving and generating ${nextMeta.title}...`);
         const draftContext = draft
           ? buildCreationDraftSummary(draft, projectLang).map((row) => `${row.label}：${row.value}`).join("\n")
           : "";
-        const saved = await sendWizardControlRequest({
-          intent: "advance_book_wizard",
-          language: projectLang,
-          stepTitle: stepMeta.title,
-          wizardStep: stepMeta.id,
-          title: bookTitle || draft?.title || undefined,
-          genre: selectedGenre?.id ?? draft?.genre ?? "",
-          platform: bookPlatform || draft?.platform || undefined,
-          targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
-          chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
-          instruction: currentStep === "intro" ? introSeedText : (stepDrafts[stepMeta.id] ?? ""),
-        }, projectLang === "zh" ? `已进入 ${nextMeta.title}。` : `Moved to ${nextMeta.title}.`);
-        if (!saved) break;
-        patchWizardStep(nextMeta.id, stepMeta.id);
-        if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
         const generationRequest = projectLang === "zh"
           ? `你现在在处理"${nextMeta.title}"页（全自动模式）。请根据已有草案生成${nextMeta.title}页草案，只补当前页允许的字段，不要扩写其他页面，也不要创建新书。\n\n【已有草案】\n${draftContext || "（空）"}`
           : `You are now working on the "${nextMeta.title}" page (auto mode). Based on the existing draft, generate a draft for the ${nextMeta.title} page. Only fill in fields allowed for this page.\n\n[Existing Draft]\n${draftContext || "(empty)"}`;
-        await sendCommand(generationRequest, nextMeta.id, { refreshDraft: false });
+        const resolvedBookId = activeBookId ?? await ensureBookShell();
+        if (!resolvedBookId) break;
+        if (nextMeta.id === "intro") break;
+        const generatedContent = await generateWizardStepBody(nextMeta.id, generationRequest);
+        if (!generatedContent) break;
+        const savedGenerated = await saveWizardStepToFile(resolvedBookId, nextMeta.id, generatedContent);
+        if (savedGenerated) {
+          applyWizardStepFileContent(nextMeta.id, generatedContent);
+          patchWizardStep(nextMeta.id, stepMeta.id);
+          await refreshDraft();
+          await loadWizardStepFromFile(resolvedBookId, nextMeta.id);
+        }
         await refreshDraft();
-        syncDisplayedStepDraft(nextMeta.id);
       }
-      setStatus(projectLang === "zh" ? "全自动完成，请在收尾校验页确认后创建。" : "Auto complete. Please review and create.");
+      setStatus(projectLang === "zh" ? "全自动完成，已进入最终创建。" : "Auto complete. Proceeding to final creation.");
     } finally {
       setIsAutoCompleting(false);
     }
-  }, [bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, currentStep, draft, isAdvancing, isAutoCompleting, patchWizardStep, projectLang, refreshDraft, selectedGenre?.id, sendCommand, sendWizardControlRequest, stepDrafts, introSeedText, syncDisplayedStepDraft]);
+  }, [activeBookId, activeSessionId, applyWizardStepFileContent, bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, currentStep, draft, ensureBookShell, generateWizardStepBody, handleCreate, isAdvancing, isAutoCompleting, patchWizardStep, projectLang, refreshDraft, selectedGenre?.id, saveWizardStepToFile, stepDrafts, introSeedText]);
 
   const handleDiscard = useCallback(async () => {
     setDiscardConfirmOpen(true);
   }, []);
 
+  const handleContinueDraft = useCallback(async () => {
+    if (!resumeDraftSessionId) return;
+    await loadSessionDetail(resumeDraftSessionId);
+    const state = useChatStore.getState();
+    const session = state.sessions[resumeDraftSessionId];
+    if (!session) return;
+    setDraft(session.creationDraft);
+    setWizard(session.creationWizard);
+    setVisibleWizardStep(resolveBookCreationResumeStep(session.creationWizard));
+    activateSession(resumeDraftSessionId);
+  }, [activateSession, loadSessionDetail, resumeDraftSessionId]);
+
   const handleGenerateIntroBody = useCallback(async () => {
     const seed = introSeedText.trim() || composeIntroSeedText(draft?.blurb ?? "", draft?.storyBackground ?? "");
-    if (!seed) {
-      setError(projectLang === "zh" ? "请先输入简介或卖点。" : "Please enter a hook or blurb first.");
+    const theme = introThemeText.trim() || selectedGenre?.name?.trim() || draft?.genre?.trim() || "";
+    const response = await runIntroRevision({
+      theme,
+      title: bookTitle || draft?.title || undefined,
+      platform: bookPlatform || draft?.platform || undefined,
+      language: bookLanguage,
+      targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
+      chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
+      seed,
+      blurb: introBlurb || draft?.blurb || undefined,
+      storyBackground: introStoryBackground || draft?.storyBackground || undefined,
+      // 统一把手工输入的主题/卖点和候选池来源都归到同一条简介正文生成链路。
+    });
+    if (response?.session?.creationDraft || response?.details?.creationDraft) {
+      setIntroPanelTab("body");
+    }
+  }, [bookChapterWords, bookLanguage, bookPlatform, bookTitle, draft?.blurb, draft?.genre, draft?.genreAlias, draft?.platform, draft?.storyBackground, introBlurb, introSeedText, introStoryBackground, introThemeText, runIntroRevision, selectedGenre?.id, selectedGenre?.name, selectedGenre?.source]);
+
+  const handleGenerateCandidateBody = useCallback(async (candidate: IntroCandidateLike, index: number) => {
+    const seed = buildIntroExpansionSeedText(candidate);
+    if (!seed.trim()) return;
+    const theme = introThemeText.trim() || selectedGenre?.name?.trim() || candidate.style || candidate.title;
+    setSelectedIntroCandidateIndex(index);
+    setIntroMode("manual");
+    setIntroSeedText(composeIntroSeedText(candidate.blurb, candidate.storyBackground));
+    setIntroTheme(theme);
+    await runIntroRevision({
+      theme,
+      title: resolveIntroCandidateTitle(candidate) || bookTitle || draft?.title || undefined,
+      platform: bookPlatform || draft?.platform || undefined,
+      language: bookLanguage,
+      targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
+      chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
+      seed,
+      blurb: candidate.blurb,
+      storyBackground: candidate.storyBackground,
+    });
+  }, [bookChapterWords, bookLanguage, bookPlatform, bookTitle, draft?.genre, draft?.genreAlias, draft?.platform, introThemeText, runIntroRevision, selectedGenre?.id, selectedGenre?.name, selectedGenre?.source]);
+
+  const handleIntroAiModify = useCallback(async (note: string, mode: "revise" | "polish"): Promise<void> => {
+    const aiNote = note.trim();
+    if (!aiNote) {
+      setError(projectLang === "zh" ? "请先填写修改要求。" : "Please provide edit instructions first.");
       return;
     }
-    const theme = introTheme.trim() || selectedGenre?.name?.trim() || draft?.genre?.trim() || "";
-    const instruction = projectLang === "zh"
-      ? `请根据以下输入生成可直接落库的简介正文，只输出正文内容，不要附加说明。
+    const currentIntroMarkdown = resolveIntroMarkdownEditorContent({
+      draft: draft ?? {},
+      language: projectLang,
+      persistedIntroMarkdown: persistedStepDrafts.intro,
+      currentIntroMarkdown: introBodyDraft,
+      currentSource: introBodySource,
+      dirty: introBodyDirty,
+    });
+    const seed = mode === "polish"
+      ? (projectLang === "zh"
+        ? `请基于当前简介正文进行润色，保留核心设定与题材一致性，并只输出可直接保存的 Markdown 正文。\n\n【修改要求】${aiNote}\n\n【当前正文】\n${currentIntroMarkdown}`
+        : `Polish the current intro body, preserve the core setup and genre consistency, and output only Markdown body that can be saved directly.\n\n[Instructions] ${aiNote}\n\n[Current Body]\n${currentIntroMarkdown}`)
+      : (projectLang === "zh"
+        ? `请基于当前简介正文进行修改，只输出可直接保存的 Markdown 正文。\n\n【修改要求】${aiNote}\n\n【当前正文】\n${currentIntroMarkdown}`
+        : `Revise the current intro body and output only Markdown body that can be saved directly.\n\n[Instructions] ${aiNote}\n\n[Current Body]\n${currentIntroMarkdown}`);
 
-【书名】${bookTitle || "未填"}
-【题材】${selectedGenre?.name ?? selectedGenre?.id ?? draft?.genre ?? "未选"}
-【主题】${theme || "未填"}
-【平台】${bookPlatform || draft?.platform || "未选"}
-【输入简介/卖点】${seed}
+    const response = await runIntroRevision({
+      theme: introThemeText.trim() || selectedGenre?.name?.trim() || draft?.genre?.trim() || "",
+      title: bookTitle || draft?.title || undefined,
+      platform: bookPlatform || draft?.platform || undefined,
+      language: bookLanguage,
+      targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
+      chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
+      seed,
+      blurb: introBlurb || draft?.blurb || undefined,
+      storyBackground: introStoryBackground || draft?.storyBackground || undefined,
+    });
 
-要求：
-1. 只生成正文，不要输出候选池。
-2. 正文需覆盖一句话卖点与故事背景。
-3. 不要输出生成说明、分析过程、结尾总结。
-4. 输出需直接作为简介页正文。`
-      : `Please generate the final intro body from the following input. Output body only, no commentary.
-
-[Title] ${bookTitle || "unset"}
-[Genre] ${selectedGenre?.name ?? selectedGenre?.id ?? draft?.genre ?? "unset"}
-[Theme] ${theme || "unset"}
-[Platform] ${bookPlatform || draft?.platform || "unset"}
-[Input Hook/Blurb] ${seed}
-
-Requirements:
-1. Generate body only, not candidate pool.
-2. Cover both hook/blurb and story background.
-3. No process notes, analysis, or closing summary.
-4. Output must be ready to store as the intro page body.`;
-    await sendCommand(instruction, currentStep, { refreshDraft: false });
-    await refreshDraft();
-    syncDisplayedStepDraft("intro");
-  }, [bookPlatform, bookTitle, currentStep, draft?.blurb, draft?.genre, draft?.platform, draft?.storyBackground, introSeedText, introTheme, projectLang, refreshDraft, sendCommand, selectedGenre?.id, selectedGenre?.name, syncDisplayedStepDraft]);
+    const resolvedBookId = activeBookId ?? await ensureBookShell();
+    const canonicalIntro = response?.session?.creationDraft?.draftFields?.introMarkdown?.trim()
+      || response?.details?.creationDraft?.draftFields?.introMarkdown?.trim()
+      || introBodyDraft.trim();
+    if (resolvedBookId && canonicalIntro) {
+      const saved = await saveWizardStepToFile(resolvedBookId, "intro", canonicalIntro);
+      if (saved) {
+        applyWizardStepFileContent("intro", canonicalIntro);
+        setStatus(projectLang === "zh" ? "简介正文已修改并落库。" : "Intro body revised and saved.");
+      }
+    }
+  }, [
+    activeBookId,
+    applyWizardStepFileContent,
+    bookChapterWords,
+    bookLanguage,
+    bookPlatform,
+    bookTitle,
+    bookTargetChapters,
+    draft,
+    ensureBookShell,
+    introBlurb,
+    introBodyDraft,
+    introStoryBackground,
+    introThemeText,
+    projectLang,
+    runIntroRevision,
+    saveWizardStepToFile,
+    selectedGenre?.name,
+  ]);
 
   const confirmDiscard = useCallback(async () => {
     setDiscardConfirmOpen(false);
@@ -792,30 +1720,175 @@ Requirements:
     setIntroTheme("");
     setStepDrafts({});
     setStepEditing({});
+    setResumeDraftSessionId(null);
+    clearBookCreateSessionId();
     if (activeSessionId) {
       await deleteSession(activeSessionId);
     }
     nav.toDashboard();
   }, [activeSessionId, currentStep, currentStepMeta.title, deleteSession, nav, projectLang, sendWizardControlRequest]);
 
-  const handleMarkdownAiModify = useCallback(async (note: string, mode: "revise" | "polish", step?: Exclude<BookCreationWizardStep, "intro" | "review">) => {
-    const targetStep = step ?? (currentStep as Exclude<BookCreationWizardStep, "intro" | "review">);
-    if (!currentMarkdownSpec || currentStep === "intro" || currentStep === "review") return;
+  const handleMarkdownAiModify = useCallback(async (note: string, mode: "revise" | "polish", step?: Exclude<BookCreationWizardStep, "intro">) => {
+    const targetStep = step ?? (currentStep as Exclude<BookCreationWizardStep, "intro">);
+    if (!currentMarkdownSpec) return;
     const aiNote = note.trim();
     if (!aiNote.trim()) {
       setError(projectLang === "zh" ? "请先填写修改要求。" : "Please provide edit instructions first.");
       return;
     }
     const instruction = projectLang === "zh"
-      ? `请修改当前${currentMarkdownSpec.title}页内容，只改这一页，保持 Markdown 结构清晰。\n\n【当前页】${currentMarkdownSpec.title}\n【修改方式】${mode === "polish" ? "润色" : "修改"}\n【修改要求】${aiNote}\n\n【当前内容】\n${currentStepDraft || "（空）"}`
-      : `Please modify the current ${currentMarkdownSpec.title} page only. Keep the Markdown structure clear.\n\n[Current Page] ${currentMarkdownSpec.title}\n[Mode] ${mode === "polish" ? "polish" : "revise"}\n[Instructions] ${aiNote}\n\n[Current Content]\n${currentStepDraft || "(empty)"}`;
-    await sendCommand(instruction, currentStep, { refreshDraft: false });
-    await refreshDraft();
-    syncDisplayedStepDraft(targetStep);
-  }, [currentMarkdownSpec, currentStep, currentStepDraft, projectLang, refreshDraft, sendCommand, syncDisplayedStepDraft]);
+      ? `请修改当前${currentMarkdownSpec.title}页内容，只改这一页，保持 Markdown 结构清晰，不要参考当前页原文。\n\n【当前页】${currentMarkdownSpec.title}\n【修改方式】${mode === "polish" ? "润色" : "修改"}\n【修改要求】${aiNote}`
+      : `Please modify the current ${currentMarkdownSpec.title} page only. Keep the Markdown structure clear and do not use the current page text as a reference.\n\n[Current Page] ${currentMarkdownSpec.title}\n[Mode] ${mode === "polish" ? "polish" : "revise"}\n[Instructions] ${aiNote}`;
+    const resolvedBookId = activeBookId ?? await ensureBookShell();
+    if (!resolvedBookId) return;
+    const content = await generateWizardStepBody(targetStep, instruction);
+    if (!content) return;
+    const saved = await saveWizardStepToFile(resolvedBookId, targetStep, content);
+    if (saved) {
+      applyWizardStepFileContent(targetStep, content);
+      await loadWizardStepFromFile(resolvedBookId, targetStep);
+      await refreshDraft();
+    }
+  }, [activeBookId, activeSessionId, applyWizardStepFileContent, bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, currentMarkdownSpec, currentStep, draft, ensureBookShell, generateWizardStepBody, loadWizardStepFromFile, projectLang, refreshDraft, saveWizardStepToFile, selectedGenre?.id, wizardBookId]);
+
+  const ensureWizardStepSynced = useCallback(async (step: BookCreationWizardStep): Promise<boolean> => {
+    const needsSync = shouldSyncWizardStep({
+      targetStep: step,
+      visibleStep: visibleWizardStep,
+      localWizard: wizard,
+      sessionWizard: activeSession?.creationWizard,
+    });
+    if (!needsSync) return true;
+    return sendWizardControlRequest({
+      intent: "goto_book_wizard",
+      language: projectLang,
+      stepTitle: WIZARD_STEPS.find((item) => item.id === step)?.title ?? step,
+      wizardStep: step,
+      title: bookTitle || draft?.title || undefined,
+      genre: selectedGenre?.id ?? draft?.genre ?? undefined,
+      platform: bookPlatform || draft?.platform || undefined,
+      targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
+      chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
+    }, projectLang === "zh" ? `已切换到 ${WIZARD_STEPS.find((item) => item.id === step)?.title ?? step}。` : `Moved to ${WIZARD_STEPS.find((item) => item.id === step)?.title ?? step}.`);
+  }, [activeSession?.creationWizard, bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, draft, projectLang, selectedGenre?.id, sendWizardControlRequest, visibleWizardStep, wizard]);
+
+  const handleRegenerateCurrentStep = useCallback(async (): Promise<void> => {
+    if (isRegenerating || isAdvancing || isAutoCompleting) return;
+    setIsRegenerating(true);
+    try {
+      if (currentStep === "intro") {
+        const seed = introSeedText.trim() || composeIntroSeedText(draft?.blurb ?? "", draft?.storyBackground ?? "");
+        const theme = introThemeText.trim() || selectedGenre?.name?.trim() || draft?.genre?.trim() || "";
+        const response = await runIntroRevision({
+          theme,
+          title: bookTitle || draft?.title || undefined,
+          platform: bookPlatform || draft?.platform || undefined,
+          language: bookLanguage,
+          targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
+          chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
+          seed,
+          blurb: introBlurb || draft?.blurb || undefined,
+          storyBackground: introStoryBackground || draft?.storyBackground || undefined,
+        });
+        if (response?.session?.creationDraft || response?.details?.creationDraft) {
+          setIntroPanelTab("body");
+        }
+        return;
+      }
+
+      if (!currentMarkdownSpec) return;
+      const targetStep = currentStep as Exclude<BookCreationWizardStep, "intro">;
+      const synced = await ensureWizardStepSynced(targetStep);
+      if (!synced) return;
+      const instruction = buildWizardStepRegenerationInstruction({
+        step: targetStep,
+        title: currentMarkdownSpec.title,
+        language: projectLang,
+      });
+      const resolvedBookId = activeBookId ?? wizardBookId;
+      if (resolvedBookId) {
+        const contentToSave = await generateWizardStepBody(targetStep, instruction);
+        if (!contentToSave.trim() || isEmptyWizardBody(contentToSave)) {
+          setStatus(projectLang === "zh" ? "重生成结果不是当前页有效正文，已拦截保存，请重试。" : "Regeneration result was not valid page body text, so saving was blocked.");
+          return;
+        }
+        await saveWizardStepToFile(resolvedBookId, targetStep, contentToSave);
+        applyWizardStepFileContent(targetStep, contentToSave);
+        await refreshDraft();
+        await loadWizardStepFromFile(resolvedBookId, targetStep);
+      }
+    } finally {
+      setIsRegenerating(false);
+    }
+  }, [activeBookId, activeSession, activeSessionId, applyWizardStepFileContent, bookChapterWords, bookLanguage, bookPlatform, bookTitle, bookTargetChapters, currentMarkdownSpec, currentStep, draft, ensureWizardStepSynced, generateWizardStepBody, introBlurb, introSeedText, introStoryBackground, introThemeText, isAdvancing, isAutoCompleting, isRegenerating, loadWizardStepFromFile, projectLang, refreshDraft, runIntroRevision, saveWizardStepToFile, selectedGenre?.name, selectedGenre?.id, wizardBookId]);
+
+  const handleSaveCurrentStep = useCallback(async (): Promise<boolean> => {
+    const resolvedBookId = activeBookId ?? await ensureBookShell();
+    if (!resolvedBookId) return false;
+    setIsStepSaving(true);
+    try {
+      const content = (() => {
+        if (currentStep === "intro") {
+          return introBodyDraft;
+        }
+        if (currentStep === "world") {
+          return stepDrafts.world ?? buildStepMarkdownDraft("world", draft ?? {}, projectLang);
+        }
+        return stepDrafts[currentStep] ?? buildStepMarkdownDraft(currentStep as Exclude<BookCreationWizardStep, "intro">, draft ?? {}, projectLang);
+      })();
+      const manualIssue = explainManualWizardStepContentIssue(currentStep, content, draft);
+      if (manualIssue) {
+        const message = projectLang === "zh"
+          ? (() => {
+              switch (manualIssue) {
+                case "empty":
+                  return "当前页内容为空，未保存。";
+                case "summary":
+                  return "当前页内容更像说明或汇报，不是可落库正文，未保存。";
+                case "scaffold":
+                  return "当前页内容仍以框架或占位符为主，未保存。";
+                case "too_short":
+                  return "当前页内容过短，缺少足够正文信息，未保存。";
+                default:
+                  return "当前页内容校验未通过，未保存。";
+              }
+            })()
+          : (() => {
+              switch (manualIssue) {
+                case "empty":
+                  return "Current page content is empty, so it was not saved.";
+                case "summary":
+                  return "Current page content looks like summary/status text instead of body content, so it was not saved.";
+                case "scaffold":
+                  return "Current page content is still mostly scaffold/placeholders, so it was not saved.";
+                case "too_short":
+                  return "Current page content is too short to be treated as valid body text, so it was not saved.";
+                default:
+                  return "Current page content did not pass validation, so it was not saved.";
+              }
+            })();
+        setStatus(message);
+        return false;
+      }
+      const saved = await saveWizardStepToFile(resolvedBookId, currentStep, content);
+      if (saved) {
+        applyWizardStepFileContent(currentStep, content);
+        await loadWizardStepFromFile(resolvedBookId, currentStep);
+        setStatus(projectLang === "zh" ? "当前页已保存。" : "Current step saved.");
+        setStepEditing((current) => ({
+          ...current,
+          [currentStep]: false,
+        }));
+        return true;
+      }
+      return false;
+    } finally {
+      setIsStepSaving(false);
+    }
+  }, [activeBookId, currentStep, draft, ensureBookShell, introBodyDraft, loadWizardStepFromFile, projectLang, saveWizardStepToFile, stepDrafts, syncDisplayedStepDraft, wizardBookId]);
 
   const handleSelectCandidate = useCallback(async (candidate: IntroCandidateLike, index: number, candidateCountOverride?: number) => {
-    const theme = introTheme.trim() || selectedGenre?.name?.trim() || candidate.style || candidate.title;
+    const theme = introThemeText.trim() || selectedGenre?.name?.trim() || candidate.style || candidate.title;
     if (!theme) return;
     const expansionSeed = buildIntroExpansionSeedText(candidate);
     const candidateCount = candidateCountOverride ?? introCandidates.length;
@@ -868,10 +1941,10 @@ Requirements:
         suppressIntroAutoSave(false);
       }
     });
-  }, [bookChapterWords, bookLanguage, bookPlatform, draft?.genre, fetchJson, introCandidates.length, introTheme, pauseAutoSaveDuring, projectLang, refreshDraft, selectedGenre?.id, selectedGenre?.name, selectedGenre?.source, suppressIntroAutoSave, syncDisplayedStepDraft]);
+  }, [bookChapterWords, bookLanguage, bookPlatform, draft?.genre, fetchJson, introCandidates.length, introThemeText, pauseAutoSaveDuring, projectLang, refreshDraft, selectedGenre?.id, selectedGenre?.name, selectedGenre?.source, suppressIntroAutoSave, syncDisplayedStepDraft]);
 
   const handleGenerateCandidates = useCallback(async () => {
-    const theme = introTheme.trim() || selectedGenre?.name?.trim() || "";
+    const theme = introThemeText.trim() || selectedGenre?.name?.trim() || "";
     if (!theme) {
       setError(projectLang === "zh" ? "请先输入主题或选择题材。" : "Please enter a theme or pick a genre first.");
       return;
@@ -883,20 +1956,28 @@ Requirements:
       if (!activeSessionId) {
         throw new Error(projectLang === "zh" ? "右侧 AI 工作台尚未就绪。" : "The AI workbench is not ready yet.");
       }
+      const candidateInstruction = buildIntroCandidateGenerationInstruction({
+        language: projectLang,
+        title: bookTitle || "未填",
+        genre: themeLabel,
+        platform: bookPlatform || "未选",
+        theme: theme || selectedGenre?.name || "未填",
+        introBlurb: introBlurb || "",
+        introStoryBackground: introStoryBackground || "",
+        candidateCount: parsePositiveIntegerInput(introCandidateCount) ?? 3,
+      });
       const data = await sendMessage(
         activeSessionId,
-        `请按题材和主题生成${parsePositiveIntegerInput(introCandidateCount) ?? 3} 套简介候选，只输出候选池，不要直接进入建书。\n\n书名：${bookTitle || "未填"}\n题材：${themeLabel}\n主题：${theme || selectedGenre?.name || "未填"}\n平台：${bookPlatform || "未选"}\n当前简介：${introBlurb || "（空）"}\n当前故事背景：${introStoryBackground || "（空）"}\n\n要求：\n1. 每套都要包含 title、blurb、storyBackground、style、reason。\n2. 候选之间风格要有差异。\n3. 请尽量用 JSON 数组输出；如果无法严格 JSON，也要按清晰分隔的多方案格式输出。\n4. 输出后只提示我可以在左侧候选池选择第几套，不要触发建书流程。`,
-        undefined,
-        { wizardStep: currentStep, forceStream: true },
+        candidateInstruction,
+        activeBookId ?? undefined,
+        { wizardStep: currentStep, forceStream: true, responseFormat: "json_object" },
       ) as AgentResponse | null;
       const raw = data?.response ?? data?.details?.draftRaw ?? "";
       const parsed = parseIntroCandidateResponse(raw);
-      const latestMessages = activeSessionId ? (useChatStore.getState().sessions[activeSessionId]?.messages ?? []) : [];
-      const sessionParsed = parseLatestIntroCandidates(latestMessages.filter((message) => message.wizardStep === currentStep));
       const fallback = raw.trim()
         ? [{ title: selectedGenre?.name ?? theme, blurb: raw.trim(), storyBackground: raw.trim(), style: selectedGenre?.name ?? theme, reason: "模型未返回结构化候选，已用单条结果兜底。" }]
         : [];
-      const ranked = rankIntroCandidates(parsed.length > 0 ? parsed : sessionParsed.length > 0 ? sessionParsed : fallback, selectedGenre?.id ?? theme);
+      const ranked = rankIntroCandidates(parsed.length > 0 ? parsed : fallback, selectedGenre?.id ?? theme);
       setIntroCandidates(ranked);
       if (ranked.length > 0) {
         await handleSelectCandidate(ranked[0]!, 0, ranked.length);
@@ -907,45 +1988,39 @@ Requirements:
     } finally {
       setIntroCandidateLoading(false);
     }
-  }, [activeSessionId, bookPlatform, bookTitle, currentStep, handleSelectCandidate, introCandidateCount, introBlurb, introStoryBackground, introTheme, projectLang, refreshDraft, sendMessage, selectedGenre]);
+  }, [activeBookId, activeSessionId, bookPlatform, bookTitle, currentStep, handleSelectCandidate, introCandidateCount, introBlurb, introStoryBackground, introThemeText, projectLang, refreshDraft, sendMessage, selectedGenre]);
 
-  const handleJumpToStep = useCallback(async (step: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation" | "review") => {
-    await sendWizardControlRequest({
-      intent: "goto_book_wizard",
-      language: projectLang,
-      stepTitle: currentStepMeta.title,
-      wizardStep: step,
-      title: bookTitle || draft?.title || undefined,
-      genre: selectedGenre?.id ?? draft?.genre ?? undefined,
-      platform: bookPlatform || draft?.platform || undefined,
-      targetChapters: parsePositiveIntegerInput(bookTargetChapters) ?? draft?.targetChapters,
-      chapterWordCount: parsePositiveIntegerInput(bookChapterWords) ?? draft?.chapterWordCount,
-    }, projectLang === "zh" ? `已切换到 ${step}。` : `Moved to ${step}.`);
-  }, [bookChapterWords, bookPlatform, bookTitle, bookTargetChapters, currentStepMeta.title, draft?.genre, draft?.platform, draft?.targetChapters, draft?.chapterWordCount, projectLang, selectedGenre?.id, sendWizardControlRequest]);
+  const handleJumpToStep = useCallback(async (step: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation") => {
+    if (step === currentStep) return;
+    if (navigationLocked) {
+      setStatus(projectLang === "zh"
+        ? "当前页正在生成中，请先完成或停止后再切换向导页。"
+        : "The current page is still generating. Please finish or stop it before switching steps.");
+      return;
+    }
+    await pauseAutoSaveDuring(async () => {
+      const resolvedBookId = activeBookId ?? await ensureBookShell();
+      if (!resolvedBookId) return;
+      const persisted = await saveWizardStepToFile(
+        resolvedBookId,
+        currentStep,
+        currentStepContent ?? "",
+      );
+      if (!persisted) return;
+      await loadWizardStepFromFile(resolvedBookId, step);
+      patchWizardStep(step);
+      const targetMeta = WIZARD_STEPS.find((item) => item.id === step);
+      setStatus(projectLang === "zh"
+        ? `已切换到 ${targetMeta?.title ?? step}。`
+        : `Moved to ${targetMeta?.title ?? step}.`);
+    });
+  }, [activeBookId, currentStep, currentStepContent, ensureBookShell, loadWizardStepFromFile, navigationLocked, patchWizardStep, pauseAutoSaveDuring, projectLang, saveWizardStepToFile]);
 
-  const { visibleMessages: messages, legacyMessageCount } = useMemo(
+  const { visibleMessages: rawStepMessages, legacyMessageCount } = useMemo(
     () => selectBookCreateDockMessages(allMessages, currentStep),
     [allMessages, currentStep],
   );
-
-  const introPageCandidateMessages = useMemo(() => {
-    if (currentStep !== "intro") return [];
-    return parseLatestIntroCandidates(messages);
-  }, [currentStep, messages]);
-
-  useEffect(() => {
-    if (currentStep !== "intro") return;
-    if (introPageCandidateMessages.length === 0) return;
-    const query = introTheme.trim() || selectedGenre?.name?.trim() || selectedGenre?.id || "";
-    const ranked = rankIntroCandidates(introPageCandidateMessages, query);
-    setIntroCandidates((current) => {
-      const currentSignature = JSON.stringify(current);
-      const nextSignature = JSON.stringify(ranked);
-      if (currentSignature === nextSignature) return current;
-      return ranked;
-    });
-    setSelectedIntroCandidateIndex((current) => (current < ranked.length ? current : 0));
-  }, [currentStep, introPageCandidateMessages, introTheme, selectedGenre?.id, selectedGenre?.name]);
+  const messages = rawStepMessages;
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -954,10 +2029,6 @@ Requirements:
   }, [messages]);
 
   const chatGuide = buildChatGuide(currentStep as never, projectLang);
-  const creationReviewChecklist = useMemo(() => {
-    if (!draft || currentStep !== "review") return [];
-    return buildCreationReviewChecklist(draft, projectLang);
-  }, [currentStep, draft, projectLang]);
   const hardParams = buildHardParamsSummary({
     title: draft?.title,
     platform: draft?.platform,
@@ -977,11 +2048,20 @@ Requirements:
     suppressIntroAutoSave(false);
     setIntroSeedText(value);
   }, [suppressIntroAutoSave]);
+  const setIntroBodyDraftWithTouch = useCallback((value: string) => {
+    setIntroBodyDirty(true);
+    setIntroBodyDraft(value);
+  }, []);
   const onSend = useCallback((text: string) => {
     if (loading || stopping) return;
     if (!activeSessionId) return;
-    void sendMessage(activeSessionId, text, undefined, { skipAutoNewPrefix: true, wizardStep: currentStep });
-  }, [activeSessionId, currentStep, loading, sendMessage, stopping]);
+    void sendMessage(activeSessionId, text, activeBookId ?? undefined, { skipAutoNewPrefix: true, wizardStep: currentStep });
+  }, [activeBookId, activeSessionId, currentStep, loading, sendMessage, stopping]);
+
+  const handleSelectGenreId = useCallback((value: string) => {
+    setGenreSelectionTouched(true);
+    setSelectedGenreId(value);
+  }, []);
 
   return (
     <div className="flex min-h-full min-w-0 flex-1 overflow-hidden">
@@ -996,16 +2076,33 @@ Requirements:
           <WizardHeader
             wizardIndex={wizardIndex}
             onJumpToStep={handleJumpToStep}
+            navigationLocked={navigationLocked}
           />
+          {navigationLocked ? (
+            <div className="rounded-md border border-amber-400/40 bg-amber-50/70 px-4 py-3 text-sm text-amber-900">
+              {projectLang === "zh"
+                ? "当前页正在生成或保存中，已暂时锁定向导页切换。请等待完成，或先停止当前任务。"
+                : "The current page is generating or saving. Wizard navigation is temporarily locked. Wait for completion or stop the current task first."}
+            </div>
+          ) : null}
           {error && <div className={`rounded-md border ${c.error} px-4 py-3`}>{error}</div>}
           {status && <div className="rounded-md border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">{status}</div>}
+          {currentStep === "intro" && !((draft?.title ?? bookTitle).trim()) ? (
+            <div className="rounded-md border border-amber-400/50 bg-amber-50/70 px-4 py-3 text-sm text-amber-900">
+              {projectLang === "zh"
+                ? "当前未生成书名。生成正文后请确认书名已回填，或在书名框手工录入并失焦保存；未补齐前不能进入下一步。"
+                : "No title has been generated yet. Confirm the title was filled after intro generation, or enter it manually and save it by blurring the field before continuing."}
+            </div>
+          ) : null}
           {shouldShowValidationPanel && currentValidationReport ? (
             <StepValidationBanner
               report={currentValidationReport}
               onAutoFix={handleAutoFixCurrentStep}
-              onAdvance={handleAdvance}
+              onAdvance={currentStep === "relation" ? handleCreate : handleAdvance}
               isAutoFixing={isAutoCompleting}
-              canAdvance={Boolean(nextStepMeta) && !creating && !isAdvancing && !isAutoCompleting}
+              canAdvance={currentStep === "relation"
+                ? canCreate && !creating && !isAdvancing && !isAutoCompleting
+                : Boolean(nextStepMeta) && !creating && !isAdvancing && !isAutoCompleting}
             />
           ) : null}
           <div className="flex min-h-0 min-w-0 w-full flex-1 flex-col gap-6 xl:flex-row xl:items-stretch">
@@ -1026,11 +2123,12 @@ Requirements:
                     introPanelTab={introPanelTab}
                     genres={genresData?.genres ?? []}
                     selectedGenreId={selectedGenreId}
-                    selectedGenreLabel={selectedGenre?.name ?? introTheme.trim() ?? "未选择"}
+                    selectedGenreLabel={selectedGenre?.name ?? introThemeText.trim() ?? "未选择"}
+                    genreBindingLabel={genreBindingLabel}
                     introMode={introMode}
                     introSeedText={introSeedText}
                     introBodyDraft={introBodyDraft}
-                    introTheme={introTheme}
+                    introTheme={introThemeText}
                     introCandidateCount={introCandidateCount}
                     introCandidates={introCandidates}
                     selectedIntroCandidateIndex={selectedIntroCandidateIndex}
@@ -1041,21 +2139,24 @@ Requirements:
                     introCandidateLoading={introCandidateLoading}
                     autoGenerateAllowed={autoGenerateAllowed}
                     introBodyEditing={introBodyEditing}
+                    introBodySaving={isStepSaving && currentStep === "intro"}
                     bookTitle={bookTitle}
                     bookLanguage={bookLanguage}
                     bookPlatform={bookPlatform}
                     bookTargetChapters={bookTargetChapters}
                     bookChapterWords={bookChapterWords}
+                    titleReady={Boolean((draft?.title ?? bookTitle).trim())}
                     hardParams={hardParams}
-                    setSelectedGenreId={setSelectedGenreId}
+                    setSelectedGenreId={handleSelectGenreId}
                     setIntroPanelTab={setIntroPanelTab}
                     setIntroMode={setIntroMode}
                     setIntroSeedText={setIntroSeedTextWithAutoSaveReset}
-                    setIntroBodyDraft={setIntroBodyDraft}
+                    setIntroBodyDraft={setIntroBodyDraftWithTouch}
                     setIntroTheme={setIntroTheme}
                     setIntroCandidateCount={setIntroCandidateCount}
                     setIntroBodyEditing={setIntroBodyEditing}
                     setBookTitle={setBookTitle}
+                    commitBookTitle={handleBookTitleCommit}
                     setBookLanguage={setBookLanguage}
                     setBookPlatform={setBookPlatform}
                     setBookTargetChapters={setBookTargetChapters}
@@ -1065,6 +2166,9 @@ Requirements:
                     handleGenerateIntroBody={handleGenerateIntroBody}
                     handleGenerateCandidates={handleGenerateCandidates}
                     handleSelectCandidate={handleSelectCandidate}
+                    handleGenerateCandidateBody={handleGenerateCandidateBody}
+                    handleIntroAiModify={handleIntroAiModify}
+                    handleSaveIntroBody={handleSaveCurrentStep}
                   />
                 ) : isMarkdownStep && currentMarkdownSpec ? (
                   <StepMarkdownEditor
@@ -1077,14 +2181,10 @@ Requirements:
                         [currentStep]: !(current[currentStep as keyof typeof current] ?? false),
                       }));
                     }}
+                    onSave={handleSaveCurrentStep}
                     onValueChange={(value) => setStepDrafts((current) => ({ ...current, [currentStep]: value }))}
-                    onAiModify={(note, mode) => void handleMarkdownAiModify(note, mode, currentStep as Exclude<BookCreationWizardStep, "intro" | "review">)}
-                  />
-                ) : currentStep === "review" ? (
-                  <ReviewPanel
-                    creationReviewChecklist={creationReviewChecklist}
-                    canCreate={canCreate}
-                    onJumpToStep={handleJumpToStep}
+                    onAiModify={(note, mode) => void handleMarkdownAiModify(note, mode, currentStep as Exclude<BookCreationWizardStep, "intro">)}
+                    saving={isStepSaving}
                   />
                 ) : null}
                 <WizardActions
@@ -1093,13 +2193,14 @@ Requirements:
                   creating={creating}
                   isAdvancing={isAdvancing}
                   isAutoCompleting={isAutoCompleting}
+                  isRegenerating={isRegenerating}
                   currentStep={currentStep}
-                  isReview={currentStep === "review"}
                   canCreate={canCreate}
-                  showAutoComplete={currentStep !== "review" && currentStep !== "intro"}
+                  showAutoComplete={currentStep !== "intro"}
                   handleDiscard={handleDiscard}
                   handleBack={handleBack}
                   handleAdvance={handleAdvance}
+                  handleRegenerate={handleRegenerateCurrentStep}
                   handleCreate={handleCreate}
                   handleAutoComplete={handleAutoComplete}
                 />
@@ -1156,4 +2257,3 @@ Requirements:
     </div>
   );
 }
-

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createLogger, type LogSink } from "../index.js";
+import * as coreIndex from "../index.js";
 import {
   buildChapterFileLookup,
   createInteractionToolsFromDeps,
@@ -72,6 +73,72 @@ describe("interaction tools", () => {
     expect(pipeline.reviseDraft).toHaveBeenCalledWith("harbor", 3, "rewrite");
     expect((writeResult as { __interaction?: { activeChapterNumber?: number } }).__interaction?.activeChapterNumber).toBe(1);
     expect(events).toEqual([]);
+  });
+
+  it("emits thinking and draft callbacks for wizard step generation", async () => {
+    const chatWithToolsMock = vi.spyOn(coreIndex, "chatWithTools");
+    chatWithToolsMock.mockResolvedValueOnce({
+      content: "# 世界观\n\n正文内容",
+      toolCalls: [{
+        id: "tool-1",
+        name: "save_book_wizard_step",
+        arguments: JSON.stringify({
+          worldPremise: "近未来港口城",
+          settingNotes: "账本规则",
+        }),
+      }],
+    } as never);
+
+    const thinking: string[] = [];
+    const drafts: string[] = [];
+    const rawDrafts: string[] = [];
+    const tools = createInteractionToolsFromDeps(
+      {
+        config: {
+          client: {},
+          model: "demo-model",
+        },
+        writeNextChapter: vi.fn(async () => ({
+          chapterNumber: 1,
+          title: "Draft",
+          wordCount: 1000,
+          revised: false,
+          status: "ready-for-review" as const,
+          auditResult: { passed: true, issues: [], summary: "ok" },
+        })),
+        reviseDraft: vi.fn(async () => ({
+          chapterNumber: 3,
+          wordCount: 1200,
+          fixedIssues: [],
+          applied: true,
+          status: "ready-for-review" as const,
+        })),
+      } as any,
+      {
+        ensureControlDocuments: vi.fn(async () => {}),
+        bookDir: vi.fn((bookId: string) => join(projectRoot, "books", bookId)),
+        loadBookConfig: vi.fn(),
+        loadChapterIndex: vi.fn(),
+        saveChapterIndex: vi.fn(),
+        listBooks: vi.fn(async () => ["harbor"]),
+      },
+      {
+        onThinkingDelta: (text: string) => thinking.push(text),
+        onDraftTextDelta: (text: string) => drafts.push(text),
+        onDraftRawDelta: (text: string) => rawDrafts.push(text),
+      } as any,
+    );
+
+    await tools.saveBookWizardStep?.("生成世界观", {
+      concept: "港城账本",
+      missingFields: [],
+      readyToCreate: false,
+    } as any, "world");
+
+    expect(thinking.length).toBeGreaterThan(0);
+    expect(drafts.join("")).toContain("正文内容");
+    expect(rawDrafts.join("")).toContain("正文内容");
+    chatWithToolsMock.mockRestore();
   });
 
   it("captures pipeline stage logs into interaction events", async () => {
@@ -227,15 +294,8 @@ describe("interaction tools", () => {
       title: "Night Harbor",
       genre: "urban",
       platform: "tomato",
-      chapterWordCount: 2800,
-      targetChapters: 120,
       blurb: "一个做灰产生意的人，准备在夜港洗白，却先被旧账拖回去。",
-      worldPremise: "近未来架空香港，港口账本牵出多方势力。",
-      protagonist: "林砚，水货账房出身，聪明克制，不轻易信人。",
-      conflictCore: "洗白与旧债回潮的对撞。",
-      volumeOutline: "卷一先查账，再暴露港口旧案。",
-      authorIntent: "# 作者意图\n\n写成冷硬、克制、利益驱动的商战悬疑。\n",
-      currentFocus: "# 当前聚焦\n\n先把旧账线和港口势力网立住。\n",
+      storyBackground: "港城风雨欲来，旧账开始回潮。",
     });
 
     expect(pipeline.initBook).toHaveBeenCalledWith(
@@ -243,13 +303,11 @@ describe("interaction tools", () => {
         title: "Night Harbor",
         genre: "urban",
         platform: "tomato",
-        targetChapters: 120,
-        chapterWordCount: 2800,
+        creationState: "ready",
       }),
       expect.objectContaining({
-        externalContext: expect.stringContaining("近未来架空香港"),
-        authorIntent: expect.stringContaining("冷硬、克制"),
-        currentFocus: expect.stringContaining("旧账线"),
+        foundationBrief: expect.stringContaining("港城风雨欲来"),
+        externalContext: expect.stringContaining("港城风雨欲来"),
       }),
     );
   });

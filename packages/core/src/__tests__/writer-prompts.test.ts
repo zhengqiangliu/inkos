@@ -3,6 +3,7 @@ import type { BookConfig } from "../models/book.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { LengthSpecSchema } from "../models/length-governance.js";
 import { buildWriterSystemPrompt } from "../agents/writer-prompts.js";
+import { WriterAgent } from "../agents/writer.js";
 
 const BOOK: BookConfig = {
   id: "prompt-book",
@@ -335,5 +336,51 @@ describe("buildWriterSystemPrompt", () => {
     expect(prompt).toContain("章节号");
     expect(prompt).toContain("仿佛");
     expect(prompt).toContain("全场震惊");
+  });
+});
+
+describe("WriterAgent legacy prompt context", () => {
+  it("injects character arc and relationship map into the chapter writing prompt", () => {
+    const agent = new WriterAgent({
+      client: { provider: "openai", apiFormat: "chat", stream: false, defaults: { temperature: 0.7, maxTokens: 8192, maxTokensCap: null, thinkingBudget: 0, extra: {} } },
+      model: "gpt-5.4",
+      projectRoot: "/tmp/project",
+      bookId: "prompt-book",
+    });
+
+    const prompt = (agent as unknown as {
+      buildUserPrompt: (params: Record<string, unknown>) => string;
+    }).buildUserPrompt({
+      chapterNumber: 12,
+      storyBible: "# 世界观设定\n港城金融寡头统治码头。",
+      volumeOutline: "# 卷纲\n第12章推进主角与旧盟友决裂。",
+      currentState: "# 当前状态\n主角刚拿到账本。",
+      foundationBrief: "",
+      ledger: "",
+      hooks: "# 伏笔池\nH-12 账本真假未明。",
+      recentChapters: "第11章，主角发现账本被动过。",
+      lengthSpec: LengthSpecSchema.parse({
+        target: 3000,
+        softMin: 2600,
+        softMax: 3400,
+        hardMin: 2200,
+        hardMax: 3800,
+        countingMode: "zh_chars",
+        normalizeMode: "none",
+      }),
+      chapterSummaries: "# 章节摘要\n第11章，主角拿到账本。",
+      subplotBoard: "# 支线进度板\n旧债线即将爆炸。",
+      emotionalArcs: "# 情感弧线\n主角对旧盟友由信任转为猜疑。",
+      characterMatrix: "# 角色交互矩阵\n主角 vs 旧盟友：表面合作，暗中试探。",
+      characterArc: "# 人物弧光\n## 主角\n### 核心弧光\n从自保转向主动反击。",
+      relationshipMap: "# 人物关系\n## 对立关系\n主角 → 旧盟友：旧情未断，但利益已经对撞。",
+      language: "zh",
+    });
+
+    expect(prompt).toContain("## 人物弧光");
+    expect(prompt).toContain("从自保转向主动反击");
+    expect(prompt).toContain("## 人物关系");
+    expect(prompt).toContain("旧情未断，但利益已经对撞");
+    expect(prompt).toContain("人物弧光与人物关系");
   });
 });

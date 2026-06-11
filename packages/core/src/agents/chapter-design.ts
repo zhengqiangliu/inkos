@@ -17,7 +17,7 @@ import {
   formatRecentSummaries,
 } from "./planner-context.js";
 import { parsePendingHooksMarkdown } from "../utils/story-markdown.js";
-import { readStoryFrame } from "../utils/outline-paths.js";
+import { readCharacterArc, readRelationshipMap, readStoryFrame } from "../utils/outline-paths.js";
 import { extractChapterLimitFromOutline } from "../utils/chapter-limit.js";
 import { deriveHookDebtBudget } from "../utils/hook-agenda.js";
 
@@ -259,14 +259,19 @@ export class ChapterDesignAgent extends BaseAgent {
     }
 
     const storyDir = join(params.bookDir, "story");
+    const wizardDir = join(params.bookDir, "wizard");
     const [
       characterMatrix,
+      characterArc,
+      relationshipMap,
       storyBible,
       emotionalArcs,
       pendingHooks,
       chapterSummaries,
     ] = await Promise.all([
       readCharacterMatrix(storyDir),
+      readCharacterArc(params.bookDir, ""),
+      readRelationshipMap(params.bookDir, ""),
       readStoryFrame(params.bookDir, ""),
       readEmotionalArcs(storyDir),
       readPendingHooks(storyDir),
@@ -287,6 +292,8 @@ export class ChapterDesignAgent extends BaseAgent {
     return {
       volumeOutline: normalizedVolumeOutline,
       characterMatrix,
+      characterArc: characterArc.trim() || undefined,
+      relationshipMap: relationshipMap.trim() || undefined,
       storyBible: storyBible || undefined,
       emotionalArcs,
       pendingHooks,
@@ -654,6 +661,18 @@ Output JSON with: chapterName, highlight, coreConflict, plotAndConflict, emotion
     if (context.characterMatrix.trim()) {
       parts.push(isZh ? "## 角色设定（参考）" : "## Character Settings (reference)");
       parts.push(context.characterMatrix.trim().slice(0, 1000));
+      parts.push("");
+    }
+
+    if (context.characterArc?.trim()) {
+      parts.push(isZh ? "## 人物弧光（Character Arc）" : "## Character Arc");
+      parts.push(context.characterArc.trim().slice(0, 1200));
+      parts.push("");
+    }
+
+    if (context.relationshipMap?.trim()) {
+      parts.push(isZh ? "## 人物关系（Relationship Map）" : "## Relationship Map");
+      parts.push(context.relationshipMap.trim().slice(0, 1200));
       parts.push("");
     }
 
