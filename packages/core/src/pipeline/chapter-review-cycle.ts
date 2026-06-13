@@ -604,6 +604,64 @@ function buildHookDebtReviseBlock(ctx: {
   return lines.join("\n");
 }
 
+/**
+ * W1: Build a structured revision brief injected as `userBrief` into the reviser
+ * during each review-cycle round. Makes the revision target explicit and highlights
+ * issues that have persisted across rounds (convergence pressure).
+ */
+export function buildReviewCycleRevisionBrief(args: {
+  readonly reviseRound: number;
+  readonly maxReviseRounds: number;
+  readonly score: number;
+  readonly threshold: number;
+  readonly issues: ReadonlyArray<AuditIssue>;
+  readonly unresolvedIssues: ReadonlyArray<AuditIssue>;
+}): string {
+  const shortfall = Math.max(0, args.threshold - args.score);
+  const criticalIssues = args.issues.filter((i) => i.severity === "critical");
+  const warningIssues = args.issues.filter((i) => i.severity === "warning");
+  const topIssues = [...criticalIssues, ...warningIssues];
+
+  const issueLines = topIssues.map((issue, index) => {
+    const sev = issue.severity ?? "info";
+    const cat = (issue.category ?? "未分类").trim();
+    const desc = (issue.description ?? "未提供描述").trim();
+    const sugg = issue.suggestion?.trim() ? `；建议：${issue.suggestion.trim().slice(0, 150)}` : "";
+    const tag = args.unresolvedIssues.some(
+      (u) => u.category === issue.category && (u.description ?? "").slice(0, 60) === (issue.description ?? "").slice(0, 60),
+    ) ? "[持续未收敛] " : "";
+    return `${index + 1}. [${sev}]${tag} ${cat}: ${desc.slice(0, 250)}${sugg}`;
+  });
+
+  const unresolvedBlock = args.unresolvedIssues.length > 0 && args.reviseRound > 1
+    ? [
+        "## 上轮未收敛问题（本轮必须换思路处理）",
+        ...args.unresolvedIssues.map((issue, index) => {
+          const cat = (issue.category ?? "未分类").trim();
+          const desc = (issue.description ?? "未提供描述").trim();
+          return `  ${index + 1}. [${issue.severity ?? "info"}] ${cat}: ${desc.slice(0, 200)}`;
+        }),
+      ].join("\n")
+    : "";
+
+  return [
+    "## 自动审计修订约束",
+    `- 修订轮次：第 ${args.reviseRound}/${args.maxReviseRounds} 轮`,
+    `- 当前评分：${args.score}/100（通过阈值 ${args.threshold}，还差 ${shortfall} 分）`,
+    `- 严重问题：${criticalIssues.length}，警告：${warningIssues.length}`,
+    "## 本轮必修项",
+    ...(issueLines.length > 0 ? issueLines : ["- 审计未提供结构化问题，请基于整体质量收敛。"]),
+    "## 修订原则",
+    "- 优先清除 critical，再处理 warning，不扩写无关情节。",
+    ...(args.reviseRound >= args.maxReviseRounds
+      ? ["- 本轮为最后一轮，必须执行结构级重构，不允许仅做措辞微调。"]
+      : []),
+    unresolvedBlock,
+  ]
+    .filter((line) => typeof line === "string" && line.length > 0)
+    .join("\n");
+}
+
 export async function runChapterReviewCycle(params: {
   readonly book: Pick<{ genre: string }, "genre">;
   readonly bookDir: string;
@@ -622,6 +680,7 @@ export async function runChapterReviewCycle(params: {
       mode: ReviseMode,
       genre?: string,
       options?: {
+        userBrief?: string;
         externalContext?: string;
         chapterIntent?: string;
         contextPackage?: ContextPackage;
@@ -635,6 +694,18 @@ export async function runChapterReviewCycle(params: {
       },
     ) => Promise<ReviseOutput>;
   };
+  /**
+   * W1: Optional callback to build a structured revision brief for each revise round.
+   * Returned string is injected as `userBrief` into the reviser, giving it explicit
+   * score/issue/convergence context that the reviseContext alone doesn't convey.
+   */
+  readonly buildRevisionBrief?: (args: {
+    readonly reviseRound: number;
+    readonly maxReviseRounds: number;
+    readonly score: number;
+    readonly issues: ReadonlyArray<AuditIssue>;
+    readonly unresolvedIssues: ReadonlyArray<AuditIssue>;
+  }) => string | undefined;
   readonly onThinkingDelta?: (text: string) => void;
   readonly onThinkingEnd?: () => void;
   readonly onRevisedContentDelta?: (text: string) => void;
@@ -654,11 +725,26 @@ export async function runChapterReviewCycle(params: {
         ruleStack?: RuleStack;
         previousAuditIssues?: ReadonlyArray<AuditIssue>;
         revisionClaims?: ReadonlyArray<string>;
+        truthFileOverrides?: {
+          currentState?: string;
+          ledger?: string;
+          hooks?: string;
+        };
         onThinkingDelta?: (text: string) => void;
         onThinkingEnd?: () => void;
       },
     ) => Promise<AuditResult>;
   };
+  /**
+   * W3: Optional callback to extract truth-file overrides from a revise output.
+   * When provided, re-audit uses the reviser's latest state/hooks output instead
+   * of stale on-disk files, reducing false failures from outdated truth files.
+   */
+  readonly resolveTruthFileOverrides?: (reviseOutput: ReviseOutput) => {
+    currentState?: string;
+    ledger?: string;
+    hooks?: string;
+  } | undefined;
   readonly normalizeDraftLengthIfNeeded: (chapterContent: string) => Promise<{
     content: string;
     wordCount: number;
@@ -1041,6 +1127,13 @@ export async function runChapterReviewCycle(params: {
         externalContext: params.externalContext,
         lengthSpec: params.lengthSpec,
         reviseContext,
+        userBrief: params.buildRevisionBrief?.({
+          reviseRound,
+          maxReviseRounds,
+          score: priorAuditScore,
+          issues: unresolvedPrioritizedIssues,
+          unresolvedIssues: persistentIssues,
+        }),
         onRevisedContentDelta: params.onRevisedContentDelta,
         onSpotFixPatchDelta: params.onSpotFixPatchDelta,
         onThinkingDelta: params.onReviserThinkingDelta,
@@ -1085,14 +1178,17 @@ export async function runChapterReviewCycle(params: {
 
     auditRound = reviseRound + 1;
     await params.onAuditStart?.({ round: auditRound, maxReviseRounds, unboundedReview });
+    // W3: resolve truth-file overrides from revise output so re-audit uses the
+    // reviser's latest state/hooks instead of potentially stale on-disk files.
+    const reAuditTruthOverrides = params.resolveTruthFileOverrides?.(reviseOutput);
     const reAudit = await params.auditor.auditChapter(
       params.bookDir,
       finalContent,
       params.chapterNumber,
       params.book.genre,
       params.reducedControlInput
-        ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd, previousAuditIssues: priorRoundIssues, revisionClaims: reviseOutput.fixedIssues.length > 0 ? reviseOutput.fixedIssues : undefined }
-        : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}), previousAuditIssues: priorRoundIssues, revisionClaims: reviseOutput.fixedIssues.length > 0 ? reviseOutput.fixedIssues : undefined },
+        ? { ...params.reducedControlInput, temperature: 0, onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd, previousAuditIssues: priorRoundIssues, revisionClaims: reviseOutput.fixedIssues.length > 0 ? reviseOutput.fixedIssues : undefined, ...(reAuditTruthOverrides ? { truthFileOverrides: reAuditTruthOverrides } : {}) }
+        : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}), previousAuditIssues: priorRoundIssues, revisionClaims: reviseOutput.fixedIssues.length > 0 ? reviseOutput.fixedIssues : undefined, ...(reAuditTruthOverrides ? { truthFileOverrides: reAuditTruthOverrides } : {}) },
     );
     totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
     const reAuditReturnedNoIssues = Array.isArray(reAudit.issues) && reAudit.issues.length === 0;

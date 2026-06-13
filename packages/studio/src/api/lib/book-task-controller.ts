@@ -1,6 +1,8 @@
 import type { AuditIssue, OnStreamProgress, PipelineConfig, ProjectConfig, StateManager } from "@actalk/inkos-core";
 import type { ReviseMode } from "@actalk/inkos-core";
 import { countAuditIssueClasses, isStructuralAuditIssue, resolvePrimaryIssueClass } from "@actalk/inkos-core";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ApiError } from "../errors.js";
 import { persistChapterAuditSummary } from "./chapter-audit-index.js";
 import type { BookTask, BookTaskCreatePayload, BookTaskPatchPayload, BookTaskStatus, BookTaskType, RunLogEntry } from "../../shared/contracts.js";
@@ -106,7 +108,7 @@ function nowIso(): string {
 
 const MIN_AUDIT_PASS_SCORE = 80;
 const TASK_CENTER_AUDIT_MIN_PASS_SCORE = AUDIT_PASS_SCORE_THRESHOLD;
-const TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS = 3;
+const TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS = 4;
 
 function normalizeChapterCount(value: unknown, fallback: number): number {
   const numeric = typeof value === "number" ? value : Number(value);
@@ -288,10 +290,12 @@ function resolveWriteTaskMode(task: BookTask): { readonly unboundedReview: boole
   };
 }
 
-function taskTypeStartLog(type: BookTaskType, requestedChapters: number): string {
+function taskTypeStartLog(type: BookTaskType, requestedChapters: number, startChapter?: number): string {
   return type === "audit"
     ? `开始审计任务：${requestedChapters} 章。`
-    : `开始自动写作：${requestedChapters} 章。`;
+    : startChapter !== undefined
+      ? `开始自动写作：从第 ${startChapter} 章开始，共 ${requestedChapters} 章。`
+      : `开始自动写作：${requestedChapters} 章。`;
 }
 
 function normalizeNullableNumber(value: unknown): number | null {
@@ -484,6 +488,14 @@ function buildTaskCenterRevisionBrief(args: {
     readonly description?: string;
     readonly suggestion?: string;
   }>;
+  readonly unresolvedIssues?: ReadonlyArray<{
+    readonly severity?: string;
+    readonly category?: string;
+    readonly description?: string;
+    readonly suggestion?: string;
+  }>;
+  readonly requiredRecoverHooks?: ReadonlyArray<string>;
+  readonly endingHook?: string | null;
 }): string {
   const scoreLine = typeof args.score === "number" ? `${args.score}/100` : "未知";
   const shortfall = typeof args.score === "number"
@@ -491,7 +503,7 @@ function buildTaskCenterRevisionBrief(args: {
     : null;
   const topIssues = (() => {
     const criticalIssues = args.issues.filter((issue) => issue && issue.severity === "critical");
-    const warningIssues = args.issues.filter((issue) => issue && issue.severity === "warning").slice(0, 5);
+    const warningIssues = args.issues.filter((issue) => issue && issue.severity === "warning");
     const selected = [...criticalIssues, ...warningIssues];
     return selected.map((issue, index) => {
       const severity = issue.severity ?? "info";
@@ -505,8 +517,37 @@ function buildTaskCenterRevisionBrief(args: {
   })();
 
   const reportBlock = args.report?.trim()
-    ? `\n## 审计报告摘要\n${clipText(args.report.trim(), 1200)}`
+    ? `\n## 审计报告摘要\n${clipText(args.report.trim(), 3000)}`
     : "";
+
+  // R1a+R3: 上轮未收敛问题块（第2轮起注入）
+  const unresolvedBlock = (args.unresolvedIssues && args.unresolvedIssues.length > 0)
+    ? [
+        "\n## 上轮未收敛问题（已宣称修复但复审仍失败）",
+        "- **以下问题在上轮修订后复审时仍然存在，说明修复方案无效，本轮必须换思路重新处理：**",
+        ...args.unresolvedIssues.map((issue, index) => {
+          const severity = issue.severity ?? "info";
+          const category = issue.category?.trim() || "未分类";
+          const description = issue.description?.trim() || "未提供描述";
+          const suggestion = issue.suggestion?.trim()
+            ? `；建议：${clipText(issue.suggestion.trim(), 200)}`
+            : "";
+          return `  ${index + 1}. [${severity}][持续未收敛] ${category}: ${clipText(description, 300)}${suggestion}`;
+        }),
+      ].join("\n")
+    : "";
+
+  // R2: 伏笔回收硬约束块
+  const hookConstraintBlock = (args.requiredRecoverHooks && args.requiredRecoverHooks.length > 0)
+    ? [
+        "\n## 伏笔回收硬约束",
+        "- **以下伏笔在本章必须完成回收，遗漏将触发 critical 扣分（−35分/条），直接导致审计不通过：**",
+        ...args.requiredRecoverHooks.map((hook, index) => `  ${index + 1}. 【强制回收】${hook}`),
+        ...(args.endingHook?.trim() ? [`- **章末强制伏笔**：${args.endingHook.trim()}（必须在章节末段埋设）`] : []),
+      ].join("\n")
+    : (args.endingHook?.trim()
+        ? `\n## 伏笔回收硬约束\n- **章末强制伏笔**：${args.endingHook.trim()}（必须在章节末段埋设）`
+        : "");
 
   return [
     "## 任务中心自动修订约束",
@@ -527,6 +568,8 @@ function buildTaskCenterRevisionBrief(args: {
     ...(args.reviseRound >= args.maxReviseRounds ? [
       "- 本轮是最后一次自动修订，必须执行结构级重构，不允许继续做局部措辞微调。",
     ] : []),
+    unresolvedBlock,
+    hookConstraintBlock,
     reportBlock,
   ]
     .filter((line) => typeof line === "string" && line.length > 0)
@@ -597,12 +640,20 @@ function selectReviseMode(
   severityCounts: { critical: number; warning: number },
   round: number,
   primaryIssueClass: "none" | "structural" | "textual" | "mixed",
+  previousWasNoop?: boolean,
 ): "polish" | "rewrite" | "rework" {
   if (round >= TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS) {
     return "rework";
   }
   if (severityCounts.critical === 0 && severityCounts.warning <= 2) {
     return "polish";
+  }
+  if (primaryIssueClass === "structural" || primaryIssueClass === "mixed") {
+    return "rework";
+  }
+  // A2: if previous revision was a noop (pre-audit skipped it), escalate immediately to rework
+  if (previousWasNoop) {
+    return "rework";
   }
   if (primaryIssueClass === "textual") {
     return "rewrite";
@@ -1293,9 +1344,28 @@ export class BookTaskController {
         continue;
       }
       let currentChapterMeta = chapterMeta;
+      // R2: load chapter plan for hook constraint injection
+      let chapterRequiredRecoverHooks: ReadonlyArray<string> = [];
+      let chapterEndingHook: string | null = null;
+      try {
+        const plansPath = join(this.deps.state.bookDir(bookId), "story", "state", "chapter-plans.json");
+        const plansRaw = await readFile(plansPath, "utf-8").catch(() => "[]");
+        const plans = JSON.parse(plansRaw) as ReadonlyArray<{ chapterNumber?: number; requiredRecoverHooks?: string[]; endingHook?: string }>;
+        const plan = plans.find((p) => p.chapterNumber === chapterNumber);
+        if (plan) {
+          chapterRequiredRecoverHooks = Array.isArray(plan.requiredRecoverHooks) ? plan.requiredRecoverHooks : [];
+          chapterEndingHook = typeof plan.endingHook === "string" ? plan.endingHook : null;
+        }
+      } catch { /* chapter-plans.json not available — proceed without hook constraints */ }
       let auditLoopRound = 0;
       let auditRepairRound = 0;
       let auditUnresolvedIssueIds: string[] = [];
+      // R1a+R3: track full issue objects from previous round for convergence injection
+      let prevRoundIssues: ReadonlyArray<{ severity?: string; category?: string; description?: string; suggestion?: string }> = [];
+      // A2: track consecutive noop revisions (applied===false) for early rework escalation
+      let consecutiveNoopRevisions = 0;
+      // A3: track the previous auditDraft issues for same-type diff (auditDraft vs auditDraft)
+      let prevAuditDraftIssues: ReadonlyArray<{ severity?: string; category?: string; description?: string; suggestion?: string }> = [];
       let chapterFinished = false;
       while (!chapterFinished) {
         auditLoopRound += 1;
@@ -1491,6 +1561,28 @@ export class BookTaskController {
             : `第 ${chapterNumber} 章审计未通过，进入自动修订。`,
         );
 
+        // A3: compute unresolved issues by diffing consecutive auditDraft results
+        // (same LLM call type), giving higher confidence than auditDraft vs post-audit diff.
+        if (prevAuditDraftIssues.length > 0) {
+          const prevSigs = prevAuditDraftIssues
+            .filter((i) => i.severity === "critical" || i.severity === "warning")
+            .map((i) => `${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`);
+          const currSigs = new Set(
+            result.issues
+              .filter((i) => i.severity === "critical" || i.severity === "warning")
+              .map((i) => `${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+          );
+          const unresolvedSigs = new Set(prevSigs.filter((s) => currSigs.has(s)));
+          auditUnresolvedIssueIds = buildIssueIdList(prevAuditDraftIssues).filter(
+            (_id, index) => index < prevSigs.length && unresolvedSigs.has(prevSigs[index]!),
+          );
+          prevRoundIssues = prevAuditDraftIssues.filter(
+            (i) => (i.severity === "critical" || i.severity === "warning")
+              && unresolvedSigs.has(`${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+          );
+        }
+        prevAuditDraftIssues = result.issues;
+
         if (auditRepairRound >= TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS) {
           await this.appendTaskLog(latest, "warn", `第 ${chapterNumber} 章已达最大修订轮次（${TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS}），跳过。`);
           failedChapters += 1;
@@ -1573,16 +1665,55 @@ export class BookTaskController {
           summary: result.summary ?? null,
           report: result.report ?? null,
           severityCounts: reviseSeverityCounts,
-          issues: result.issues,
+          // R1b: sort issues — unresolved (carryover) to top for round 2+
+          issues: auditRepairRound > 1 && auditUnresolvedIssueIds.length > 0
+            ? (() => {
+                const unresolvedSigs = new Set(
+                  result.issues
+                    .filter((i) => i.severity === "critical" || i.severity === "warning")
+                    .filter((_i, idx) => auditUnresolvedIssueIds.some(
+                      (uid) => uid === `ISSUE-${String(idx + 1).padStart(2, "0")}`,
+                    ))
+                    .map((i) => `${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+                );
+                const unresolved = result.issues.filter(
+                  (i) => unresolvedSigs.has(`${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+                );
+                const rest = result.issues.filter(
+                  (i) => !unresolvedSigs.has(`${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+                );
+                return [...unresolved, ...rest];
+              })()
+            : result.issues,
+          // R1a+R3: inject previous round unresolved issues for round 2+
+          unresolvedIssues: auditRepairRound > 1 && prevRoundIssues.length > 0 ? prevRoundIssues : undefined,
+          // R2: inject hook constraints
+          requiredRecoverHooks: chapterRequiredRecoverHooks.length > 0 ? chapterRequiredRecoverHooks : undefined,
+          endingHook: chapterEndingHook ?? undefined,
         });
         const reviseMode = selectReviseMode(
           reviseSeverityCounts,
           auditRepairRound,
           reviseContext.primaryIssueClass ?? "none",
+          consecutiveNoopRevisions > 0,
         );
         const reviseResult = await pipeline.reviseDraft(bookId, chapterNumber, reviseMode, {
           userBrief: revisionBrief,
           reviseContext,
+          // A1: pass auditDraft issues as overrideIssues so reviseDraft's internal
+          // pre-audit cannot replace the confirmed target issue list with a different
+          // LLM call result, preventing silent revision target drift.
+          overrideIssues: result.issues
+            .filter((i): i is typeof i & { severity: "critical" | "warning" | "info" } =>
+              i.severity === "critical" || i.severity === "warning",
+            )
+            .map((i) => ({
+              severity: i.severity,
+              category: i.category ?? "未分类",
+              description: i.description ?? "",
+              suggestion: i.suggestion ?? "",
+              ...(i.dimensionId ? { dimensionId: i.dimensionId } : {}),
+            })),
         }) as {
           readonly status?: string;
           readonly applied?: boolean;
@@ -1616,22 +1747,18 @@ export class BookTaskController {
           && (revisionAuditScore === null || revisionAuditScore >= minPassScore);
         if (revisionPassed) {
           passedChapters += 1;
+          consecutiveNoopRevisions = 0;
         } else {
           failedChapters += 1;
-          // Track unresolved issues for next audit repair round
-          const prevIssueIds = buildIssueIdList(result.issues);
-          const nextIssues = reviseResult?.audit?.issues ?? [];
-          const prevDescriptions = result.issues
-            .filter((i) => i.severity === "critical" || i.severity === "warning")
-            .map((i) => (i.description ?? "").slice(0, 50));
-          const nextDescriptions = new Set(
-            nextIssues
-              .filter((i) => i.severity === "critical" || i.severity === "warning")
-              .map((i) => (i.description ?? "").slice(0, 50)),
-          );
-          auditUnresolvedIssueIds = prevIssueIds.filter(
-            (_id, index) => index < prevDescriptions.length && nextDescriptions.has(prevDescriptions[index]!),
-          );
+          const revisionWasNoop = reviseResult?.applied === false || reviseResult?.status === "unchanged";
+          if (revisionWasNoop) {
+            // A2: pre-audit skipped the revision — don't count this as a repair round,
+            // so the noop doesn't waste the limited repair budget.
+            auditRepairRound -= 1;
+            consecutiveNoopRevisions += 1;
+          } else {
+            consecutiveNoopRevisions = 0;
+          }
         }
         const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
 
@@ -1768,7 +1895,8 @@ export class BookTaskController {
         chapterStartedAt: null,
       });
       await this.appendTaskEvent("book-task:update", task);
-      await this.appendTaskLog(task, "info", taskTypeStartLog(taskType, task.requestedChapters));
+      const startChapter = taskType === "write" ? await this.deps.state.getNextChapterNumber(bookId) : undefined;
+      await this.appendTaskLog(task, "info", taskTypeStartLog(taskType, task.requestedChapters, startChapter));
 
       task = await this.updateStage(task, "resolve_model", "解析当前模型与服务商");
       const selectedRuntime = await this.deps.resolvePipelineClientFromSelection({

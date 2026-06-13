@@ -440,6 +440,9 @@ export function formatAuditPriorityPreview(
   const targetScoreLine = isEnglish
     ? "- Target: pass the first audit on the first attempt, with critical issues at 0 and score at or above 80."
     : "- 目标：首审一次通过，critical=0，分数达到80分及以上。";
+  const outlineCriticalLine = isEnglish
+    ? "- CRITICAL BLOCKER: Only advance the current volume node — consuming future nodes → critical (−35 pts, instant fail)."
+    : "- 【critical 阻断】只推进当前卷纲节点——提前消耗后续节点 → critical（-35分，直接不过）。";
   const scoringLine = isEnglish
     ? "- Scoring: each critical deducts 35 pts; each structural warning deducts 12 pts; each textual/style warning deducts 6 pts. 1 critical = instant fail; 2 structural warnings = −24 pts (near fail line)."
     : "- 扣分规则：每个 critical 扣35分；每个结构性 warning（连续性/偏离/弧线）扣12分；每个文本性 warning（句面/风格）扣6分。1个critical直接不过；2个结构性warning扣24分，接近失败线。";
@@ -459,10 +462,15 @@ export function formatAuditPriorityPreview(
       ? `- Ending hook: ${chapterPlan.endingHook}`
       : `- 结尾钩子：${chapterPlan.endingHook}`
     : "";
+  const hookCriticalLine = (chapterPlan?.requiredRecoverHooks?.length ?? 0) > 0
+    ? isEnglish
+      ? `- CRITICAL BLOCKER: Required hook recovery — ${chapterPlan!.requiredRecoverHooks!.join(", ")}. Missing ANY → critical (−35 pts, instant fail).`
+      : `- 【critical 阻断】强制回收伏笔：${chapterPlan!.requiredRecoverHooks!.join("、")}。漏回收任意一个 → critical（-35分，直接不过）。`
+    : "";
   const driftLine = chapterPlan?.driftFlags.length
     ? isEnglish
-      ? `- Drift flags: ${chapterPlan.driftFlags.map((flag) => flag.code).join(", ")}`
-      : `- 偏离标记：${chapterPlan.driftFlags.map((flag) => flag.code).join("、")}`
+      ? `- Drift flags active: ${chapterPlan.driftFlags.map((flag) => flag.code).join(", ")} — high risk this chapter, verify outline alignment after writing.`
+      : `- 偏离风险标记：${chapterPlan.driftFlags.map((flag) => flag.code).join("、")} → 本章高风险，写完后必须专项复查大纲锚定。`
     : "";
 
   const items = selected.map((dimension, index) => {
@@ -473,6 +481,6 @@ export function formatAuditPriorityPreview(
   });
 
   return isEnglish
-    ? `## Audit Gate\n\n${targetScoreLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\nPriority checks:\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`
-    : `## 审计门禁\n\n${targetScoreLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\n优先检查：\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`;
+    ? `## Audit Gate\n\n${targetScoreLine}\n${outlineCriticalLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${hookCriticalLine ? `\n${hookCriticalLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\nPriority checks:\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`
+    : `## 审计门禁\n\n${targetScoreLine}\n${outlineCriticalLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${hookCriticalLine ? `\n${hookCriticalLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\n优先检查：\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`;
 }

@@ -44,7 +44,7 @@ import {
   retrySettlementAfterValidationFailure,
 } from "./chapter-state-recovery.js";
 import { buildChapterAuditHistoryEntry, persistChapterArtifacts } from "./chapter-persistence.js";
-import { runChapterReviewCycle } from "./chapter-review-cycle.js";
+import { runChapterReviewCycle, buildReviewCycleRevisionBrief } from "./chapter-review-cycle.js";
 import { validateChapterTruthPersistence } from "./chapter-truth-validation.js";
 import { loadPersistedPlan, relativeToBookDir } from "./persisted-governed-plan.js";
 import { ChapterPlanSchema, type ChapterPlan } from "../models/chapter-plan.js";
@@ -1821,7 +1821,9 @@ export class PipelineRunner {
           bookDir,
           targetChapter,
           this.config.externalContext,
-          { reuseExistingIntentWhenContextMissing: true },
+          // A4: always reuse the persisted plan for revision so the reviser works with
+          // the same chapterIntent established at write time, not a freshly re-planned one.
+          { reuseExistingIntentWhenContextMissing: true, alwaysReusePersistedPlan: true },
         );
       const reviseAuditControlInput: ReducedAuditControlInput | undefined = reviseControlInput
         ? {
@@ -2494,16 +2496,33 @@ export class PipelineRunner {
     const activeHookCountForAudit = filterActiveHooks(
       parsePendingHooksMarkdown(hooksMarkdownForAudit),
     ).length;
+    // W2: merge audit-failure history hints into the reviser's externalContext so
+    // the reviser is aware of recurring failure patterns from prior write attempts.
+    const writeReviseAuditFailureHints = await this.buildAuditFailureHints(bookDir);
+    const writeReviseExternalContext = this.mergeExternalContext(
+      writeInput.externalContext, writeReviseAuditFailureHints,
+    );
     const reviewResult = await runChapterReviewCycle({
       book: { genre: book.genre },
       bookDir,
       chapterNumber,
       initialOutput: output,
       reducedControlInput: reducedControlInputWithPreflight,
-      externalContext: writeInput.externalContext,
+      externalContext: writeReviseExternalContext,
       lengthSpec,
       initialUsage: totalUsage,
       createReviser: () => new ReviserAgent(this.agentCtxFor("reviser", bookId)),
+      // W1: inject structured revision brief so the reviser has explicit score/issue/
+      // convergence context beyond what reviseContext provides.
+      buildRevisionBrief: ({ reviseRound, maxReviseRounds, score, issues, unresolvedIssues }) =>
+        buildReviewCycleRevisionBrief({
+          reviseRound,
+          maxReviseRounds,
+          score,
+          threshold: MIN_AUDIT_PASS_SCORE,
+          issues,
+          unresolvedIssues,
+        }),
       auditor,
       onThinkingDelta: (text) => {
         this.config.onAuditorTextDelta?.({ bookId, chapterNumber, text });
@@ -2643,6 +2662,10 @@ export class PipelineRunner {
             : {}),
         });
       },
+      // W3: provide truth-file overrides from revise output so re-audit uses
+      // the reviser's latest state/hooks rather than stale on-disk files.
+      resolveTruthFileOverrides: (reviseOutput) =>
+        this.resolveTruthFileOverridesFromReviseOutput(reviseOutput, false),
     });
     totalUsage = reviewResult.totalUsage;
     let finalContent = reviewResult.finalContent;
@@ -5135,6 +5158,7 @@ ${matrix}`,
     externalContext?: string,
     options?: {
       readonly reuseExistingIntentWhenContextMissing?: boolean;
+      readonly alwaysReusePersistedPlan?: boolean;
     },
   ): Promise<{
     plan: PlanChapterOutput;
@@ -5169,8 +5193,16 @@ ${matrix}`,
     externalContext?: string,
     options?: {
       readonly reuseExistingIntentWhenContextMissing?: boolean;
+      readonly alwaysReusePersistedPlan?: boolean;
     },
   ): Promise<PlanChapterOutput> {
+    // A4: for revision scenarios, always prefer the persisted plan so the reviser
+    // uses the same chapterIntent that was established at write time, rather than
+    // re-planning from scratch with a potentially diverged context.
+    if (options?.alwaysReusePersistedPlan) {
+      const persisted = await loadPersistedPlan(bookDir, chapterNumber);
+      if (persisted) return persisted;
+    }
     if (
       options?.reuseExistingIntentWhenContextMissing &&
       (!externalContext || externalContext.trim().length === 0)
