@@ -154,6 +154,74 @@ describe("StateManager", () => {
       );
       expect(dirStat.isDirectory()).toBe(true);
     });
+
+    it("merges newer chapters when saving from a stale snapshot", async () => {
+      const bookId = "stale-snapshot-book";
+      const now = "2026-06-14T05:52:07.784Z";
+      const initialIndex: ReadonlyArray<ChapterMeta> = [
+        {
+          number: 1,
+          title: "Ch1",
+          status: "ready-for-review",
+          wordCount: 3000,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+        {
+          number: 66,
+          title: "Ch66",
+          status: "ready-for-review",
+          wordCount: 3000,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+        {
+          number: 70,
+          title: "Ch70",
+          status: "ready-for-review",
+          wordCount: 3000,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+      ];
+      await manager.saveChapterIndex(bookId, initialIndex, "replace");
+
+      const staleSnapshot: ReadonlyArray<ChapterMeta> = [
+        {
+          number: 1,
+          title: "Ch1",
+          status: "ready-for-review",
+          wordCount: 3000,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: [],
+          lengthWarnings: [],
+        },
+        {
+          number: 66,
+          title: "Ch66",
+          status: "audit-failed",
+          wordCount: 3000,
+          createdAt: now,
+          updatedAt: now,
+          auditIssues: ["needs revision"],
+          lengthWarnings: [],
+        },
+      ];
+
+      await manager.saveChapterIndex(bookId, staleSnapshot);
+
+      const loaded = await manager.loadChapterIndex(bookId);
+      expect(loaded.map((entry) => entry.number)).toEqual([1, 66, 70]);
+      expect(loaded.find((entry) => entry.number === 66)?.status).toBe("audit-failed");
+      expect(loaded.find((entry) => entry.number === 70)?.title).toBe("Ch70");
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -605,7 +673,7 @@ describe("StateManager", () => {
 
       // Simulate rewrite of chapter 2: trim index, delete ch2+ch3, restore state
       const trimmed = fullIndex.filter((ch) => ch.number < 2);
-      await manager.saveChapterIndex(rwBookId, trimmed);
+      await manager.saveChapterIndex(rwBookId, trimmed, "replace");
       const { rm } = await import("node:fs/promises");
       await rm(join(chapDir, "0002_ch2.md"));
       await rm(join(chapDir, "0003_ch3.md"));
@@ -652,7 +720,7 @@ describe("StateManager", () => {
       }, null, 2), "utf-8");
 
       const trimmed = fullIndex.filter((ch) => ch.number < 2);
-      await manager.saveChapterIndex(rwBookId, trimmed);
+      await manager.saveChapterIndex(rwBookId, trimmed, "replace");
       const { rm } = await import("node:fs/promises");
       await rm(join(chapDir, "0002_ch2.md"));
       await rm(join(chapDir, "0003_ch3.md"));

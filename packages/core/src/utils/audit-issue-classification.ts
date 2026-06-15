@@ -138,3 +138,36 @@ export function resolvePrimaryIssueClass(
   if (counts.structural > 0 && counts.textual > 0) return "mixed";
   return counts.structural > 0 ? "structural" : "textual";
 }
+
+export interface ScorableAuditIssue extends AuditIssueSignalSource {
+  readonly severity: "critical" | "warning" | "info";
+}
+
+export const AUDIT_SCORE_DEDUCTION = {
+  critical: 35,
+  structuralWarning: 12,
+  textualWarning: 6,
+  info: 0,
+} as const;
+
+/**
+ * 唯一评分真源：critical -35；warning 按结构性 -12 / 文本性 -6 区分；info 不扣分。
+ * 写作链路（writer 门禁预览）、审计链路（review-cycle）、任务编排（controller）共用此函数，
+ * 避免同一章在不同路径下评分判定相反而触发假性修订轮。
+ */
+export function estimateAuditScoreDetailed(
+  issues: ReadonlyArray<ScorableAuditIssue>,
+): number {
+  let deduction = 0;
+  for (const issue of issues) {
+    if (issue.severity === "critical") {
+      deduction += AUDIT_SCORE_DEDUCTION.critical;
+    } else if (issue.severity === "warning") {
+      deduction += isStructuralAuditIssue(issue)
+        ? AUDIT_SCORE_DEDUCTION.structuralWarning
+        : AUDIT_SCORE_DEDUCTION.textualWarning;
+    }
+  }
+  const raw = 100 - deduction;
+  return Math.max(0, Math.min(100, raw));
+}

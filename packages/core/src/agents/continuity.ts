@@ -376,6 +376,7 @@ export class ContinuityAuditor extends BaseAgent {
       ruleStack?: RuleStack;
       previousAuditIssues?: ReadonlyArray<AuditIssue>;
       revisionClaims?: ReadonlyArray<string>;
+      focusedReaudit?: boolean;
       truthFileOverrides?: {
         currentState?: string;
         ledger?: string;
@@ -430,7 +431,49 @@ export class ContinuityAuditor extends BaseAgent {
     const resolvedLanguage = bookLanguage ?? gp.language;
     const isEnglish = resolvedLanguage === "en";
     const fanficMode = hasFanficCanon ? (bookRules?.fanficMode as FanficMode | undefined) : undefined;
-    const dimensions = buildAuditDimensions(gp, bookRules, resolvedLanguage, hasParentCanon, fanficMode);
+    let dimensions = buildAuditDimensions(gp, bookRules, resolvedLanguage, hasParentCanon, fanficMode);
+
+    // 聚焦重审模式：裁剪维度列表，只保留上轮失败维度 + 始终激活维度
+    const ALWAYS_ACTIVE_DIMENSIONS = new Set([32, 33, 38]);
+    if (options?.focusedReaudit && options.previousAuditIssues && options.previousAuditIssues.length > 0) {
+      // dimensionId/category are dimension names ("大纲偏离检测" / "Outline Drift Check")
+      // or snake_case ids, NOT numeric strings, so resolve by name against the active
+      // dimension list (numeric parse → exact name → fuzzy contains).
+      const nameToId = new Map<string, number>();
+      for (const dimension of dimensions) {
+        nameToId.set(dimension.name.trim().toLowerCase(), dimension.id);
+      }
+      const resolveDimensionId = (token: string | undefined): number | undefined => {
+        if (typeof token !== "string") return undefined;
+        const trimmed = token.trim();
+        if (trimmed.length === 0) return undefined;
+        const numeric = Number.parseInt(trimmed, 10);
+        if (Number.isInteger(numeric) && nameToId.has(trimmed) === false) {
+          if (dimensions.some((d) => d.id === numeric)) return numeric;
+        }
+        const lower = trimmed.toLowerCase();
+        const exact = nameToId.get(lower);
+        if (exact !== undefined) return exact;
+        for (const [name, id] of nameToId) {
+          if (name.includes(lower) || lower.includes(name)) return id;
+        }
+        return undefined;
+      };
+      const failedDimensionIds = new Set<number>();
+      for (const issue of options.previousAuditIssues) {
+        const resolved = resolveDimensionId(issue.dimensionId) ?? resolveDimensionId(issue.category);
+        if (resolved !== undefined) failedDimensionIds.add(resolved);
+      }
+      // Only narrow the dimension list when at least one failed dimension resolved;
+      // otherwise a parse miss would collapse the audit to just 32/33/38 and let
+      // real regressions through.
+      if (failedDimensionIds.size > 0) {
+        dimensions = dimensions.filter((d) =>
+          ALWAYS_ACTIVE_DIMENSIONS.has(d.id) || failedDimensionIds.has(d.id),
+        );
+      }
+    }
+
     const dimList = dimensions
       .map((d) => `${d.id}. ${d.name}${d.note ? (isEnglish ? ` (${d.note})` : `（${d.note}）`) : ""}`)
       .join("\n");
@@ -520,12 +563,6 @@ ${dimList}
 
 只有当存在 critical 级别问题时，passed 才为 false。`;
 
-    const ledgerBlock = gp.numericalSystem
-      ? isEnglish
-        ? `\n## Resource Ledger\n${ledger}`
-        : `\n## 资源账本\n${ledger}`
-      : "";
-
     // Smart context filtering for auditor — same logic as writer
     const bookRulesForFilter = parsedRules?.rules ?? null;
     const filteredSubplots = filterSubplots(subplotBoard);
@@ -538,21 +575,42 @@ ${dimList}
       ? buildGovernedMemoryEvidenceBlocks(options.contextPackage, resolvedLanguage)
       : undefined;
 
-    const hooksBlock = governedMemoryBlocks?.hooksBlock
-      ?? (filteredHooks !== "(文件不存在)"
+    // 聚焦重审模式：按维度相关性裁剪上下文块
+    const activeDimIds = new Set(dimensions.map((d) => d.id));
+    const shouldIncludeHooks = !options?.focusedReaudit || activeDimIds.has(6); // 伏笔检查
+    const shouldIncludeSubplot = !options?.focusedReaudit || activeDimIds.has(23); // 列表式结构（支线相关）
+    const shouldIncludeEmotional = !options?.focusedReaudit || activeDimIds.has(25); // 弧线平坦
+    const shouldIncludeLedger = !options?.focusedReaudit || activeDimIds.has(5); // 数值检查
+
+    const ledgerBlock = shouldIncludeLedger
+      ? (gp.numericalSystem
         ? isEnglish
-          ? `\n## Pending Hooks\n${filteredHooks}\n`
-          : `\n## 伏笔池\n${filteredHooks}\n`
-        : "");
-    const subplotBlock = filteredSubplots !== "(文件不存在)"
-      ? isEnglish
-        ? `\n## Subplot Board\n${filteredSubplots}\n`
-        : `\n## 支线进度板\n${filteredSubplots}\n`
+          ? `\n## Resource Ledger\n${ledger}`
+          : `\n## 资源账本\n${ledger}`
+        : "")
       : "";
-    const emotionalBlock = filteredArcs !== "(文件不存在)"
-      ? isEnglish
-        ? `\n## Emotional Arcs\n${filteredArcs}\n`
-        : `\n## 情感弧线\n${filteredArcs}\n`
+
+    const hooksBlock = shouldIncludeHooks
+      ? (governedMemoryBlocks?.hooksBlock
+        ?? (filteredHooks !== "(文件不存在)"
+          ? isEnglish
+            ? `\n## Pending Hooks\n${filteredHooks}\n`
+            : `\n## 伏笔池\n${filteredHooks}\n`
+          : ""))
+      : "";
+    const subplotBlock = shouldIncludeSubplot
+      ? (filteredSubplots !== "(文件不存在)"
+        ? isEnglish
+          ? `\n## Subplot Board\n${filteredSubplots}\n`
+          : `\n## 支线进度板\n${filteredSubplots}\n`
+        : "")
+      : "";
+    const emotionalBlock = shouldIncludeEmotional
+      ? (filteredArcs !== "(文件不存在)"
+        ? isEnglish
+          ? `\n## Emotional Arcs\n${filteredArcs}\n`
+          : `\n## 情感弧线\n${filteredArcs}\n`
+        : "")
       : "";
     const matrixBlock = filteredMatrix !== "(文件不存在)"
       ? isEnglish
@@ -634,6 +692,7 @@ ${chapterContent}`;
     ];
     const chatOptions = {
       temperature: options?.temperature ?? 0.3,
+      maxTokens: 4096,
       ...(options?.onThinkingDelta ? { onTextDelta: options.onThinkingDelta } : {}),
     };
 

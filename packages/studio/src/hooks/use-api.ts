@@ -64,6 +64,11 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
     return ["/api/v1/books", `/api/v1/books/${chapterAction[1]}`];
   }
 
+  const chapterMetaAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/chapters\/\d+\/meta$/);
+  if (chapterMetaAction) {
+    return ["/api/v1/books", `/api/v1/books/${chapterMetaAction[1]}`];
+  }
+
   const wizardCompleteAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/wizard\/complete$/);
   if (wizardCompleteAction) {
     return ["/api/v1/books", `/api/v1/books/${wizardCompleteAction[1]}`];

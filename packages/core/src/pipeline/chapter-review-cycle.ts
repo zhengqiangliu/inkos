@@ -4,7 +4,7 @@ import type { WriteChapterOutput } from "../agents/writer.js";
 import type { ContextPackage, RuleStack } from "../models/input-governance.js";
 import type { LengthSpec } from "../models/length-governance.js";
 import { countChapterLength, isOutsideSoftRange } from "../utils/length-metrics.js";
-import { countAuditIssueClasses, isStructuralAuditIssue, resolvePrimaryIssueClass, splitAuditIssuesByClass } from "../utils/audit-issue-classification.js";
+import { countAuditIssueClasses, estimateAuditScoreDetailed, isStructuralAuditIssue, resolvePrimaryIssueClass, splitAuditIssuesByClass } from "../utils/audit-issue-classification.js";
 import { validateHookLedger } from "../utils/hook-ledger-validator.js";
 import { HOOK_HEALTH_DEFAULTS } from "../utils/hook-policy.js";
 
@@ -65,6 +65,7 @@ export interface ChapterReviewCycleResult {
     readonly auditRounds: number;
     readonly stoppedByMaxRounds: boolean;
     readonly stopReason?: string;
+    readonly structuralDebtUnresolved: boolean;
   };
 }
 
@@ -126,17 +127,10 @@ function countIssueSeverities(issues: ReadonlyArray<AuditIssue>): AuditSeverityC
 }
 
 function estimateAuditScore(severityCounts: AuditSeverityCounts, issues?: ReadonlyArray<AuditIssue>): number {
-  let warningDeduction = 0;
-  if (issues) {
-    for (const issue of issues) {
-      if (issue.severity === "warning") {
-        warningDeduction += isStructuralAuditIssue(issue) ? 12 : 6;
-      }
-    }
-  } else {
-    warningDeduction = severityCounts.warning * 12;
-  }
-  const raw = 100 - severityCounts.critical * 35 - warningDeduction;
+  // 统一评分真源：见 audit-issue-classification.ts。当无 issues 明细时，
+  // 退化为按结构性 warning(-12) 估算（与旧行为一致）。
+  if (issues) return estimateAuditScoreDetailed(issues);
+  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12;
   return Math.max(0, Math.min(100, raw));
 }
 
@@ -146,6 +140,35 @@ function countBlockingAITellIssues(issues: ReadonlyArray<{ readonly severity: Au
 
 function countIssueClasses(issues: ReadonlyArray<AuditIssue>): AuditIssueClassCounts {
   return countAuditIssueClasses(issues);
+}
+
+function normalizeIssueIdentity(issue: AuditIssue): string {
+  const issueId = typeof issue.issueId === "string" ? issue.issueId.trim().toUpperCase() : "";
+  if (issueId.length > 0) return `id:${issueId}`;
+  const category = (issue.category ?? "").trim().toLowerCase();
+  const dimension = (typeof issue.dimensionId === "string" ? issue.dimensionId.trim() : issue.category ?? "").trim().toLowerCase();
+  const description = (issue.description ?? "").replace(/\s+/gu, " ").trim().toLowerCase();
+  return `sig:${category}|${dimension}|${description}`;
+}
+
+function describeIssueAction(issue: AuditIssue): string {
+  return isStructuralAuditIssue(issue)
+    ? "先改结构骨架，再补句面表达"
+    : "先压缩句面噪音，再确认问题是否已消失";
+}
+
+function describeIssueAcceptance(issue: AuditIssue): string {
+  return isStructuralAuditIssue(issue)
+    ? "相关结构性命中项不再出现，且同类问题不再反复回流"
+    : "同类文本问题不再被新一轮审计重复命中";
+}
+
+function formatIssueIdentity(issue: AuditIssue, index: number): string {
+  const issueId = normalizeIssueIdentity(issue);
+  if (issueId.startsWith("id:")) {
+    return issueId.slice(3);
+  }
+  return `ISSUE-${String(index + 1).padStart(2, "0")}`;
 }
 
 function applyScoreGateToAuditResult(params: {
@@ -621,25 +644,39 @@ export function buildReviewCycleRevisionBrief(args: {
   const criticalIssues = args.issues.filter((i) => i.severity === "critical");
   const warningIssues = args.issues.filter((i) => i.severity === "warning");
   const topIssues = [...criticalIssues, ...warningIssues];
+  const unresolvedIssueKeys = new Set(args.unresolvedIssues.map((issue) => normalizeIssueIdentity(issue)));
+  const unresolvedIssueIds = new Set(args.unresolvedIssues.map((issue, index) => formatIssueIdentity(issue, index)));
+  const minimalIssueCount = Math.min(topIssues.length, 5);
 
-  const issueLines = topIssues.map((issue, index) => {
+  const issueLines = topIssues.slice(0, minimalIssueCount).map((issue, index) => {
+    const issueKey = normalizeIssueIdentity(issue);
+    const issueId = formatIssueIdentity(issue, index);
     const sev = issue.severity ?? "info";
     const cat = (issue.category ?? "未分类").trim();
     const desc = (issue.description ?? "未提供描述").trim();
     const sugg = issue.suggestion?.trim() ? `；建议：${issue.suggestion.trim().slice(0, 150)}` : "";
-    const tag = args.unresolvedIssues.some(
-      (u) => u.category === issue.category && (u.description ?? "").slice(0, 60) === (issue.description ?? "").slice(0, 60),
-    ) ? "[持续未收敛] " : "";
-    return `${index + 1}. [${sev}]${tag} ${cat}: ${desc.slice(0, 250)}${sugg}`;
+    const tag = unresolvedIssueKeys.has(issueKey) ? "[持续未收敛] " : "";
+    const action = describeIssueAction(issue);
+    const acceptance = describeIssueAcceptance(issue);
+    const principle = unresolvedIssueKeys.has(issueKey)
+      ? "不要沿用上轮同一改法，必要时直接重构相关段落。"
+      : "优先改最能消除该问题的最小范围。";
+    return [
+      `${index + 1}. ${issueId} [${sev}]${tag}${cat}: ${desc.slice(0, 200)}${sugg}`,
+      `   - 修复动作：${action}`,
+      `   - 验收标准：${acceptance}`,
+      `   - 处理原则：${principle}`,
+    ].join("\n");
   });
 
   const unresolvedBlock = args.unresolvedIssues.length > 0 && args.reviseRound > 1
     ? [
         "## 上轮未收敛问题（本轮必须换思路处理）",
         ...args.unresolvedIssues.map((issue, index) => {
+          const issueId = formatIssueIdentity(issue, index);
           const cat = (issue.category ?? "未分类").trim();
           const desc = (issue.description ?? "未提供描述").trim();
-          return `  ${index + 1}. [${issue.severity ?? "info"}] ${cat}: ${desc.slice(0, 200)}`;
+          return `  ${index + 1}. ${issueId} [${issue.severity ?? "info"}] ${cat}: ${desc.slice(0, 160)}\n     - 这轮必须换思路：${describeIssueAction(issue)}`;
         }),
       ].join("\n")
     : "";
@@ -649,10 +686,16 @@ export function buildReviewCycleRevisionBrief(args: {
     `- 修订轮次：第 ${args.reviseRound}/${args.maxReviseRounds} 轮`,
     `- 当前评分：${args.score}/100（通过阈值 ${args.threshold}，还差 ${shortfall} 分）`,
     `- 严重问题：${criticalIssues.length}，警告：${warningIssues.length}`,
+    `- 本轮策略：${args.reviseRound >= args.maxReviseRounds ? "必须执行结构级重构" : "先收敛阻塞项，再做局部修正"}`,
     "## 本轮必修项",
     ...(issueLines.length > 0 ? issueLines : ["- 审计未提供结构化问题，请基于整体质量收敛。"]),
+    ...(topIssues.length > minimalIssueCount
+      ? [`- 其余 ${topIssues.length - minimalIssueCount} 项作为备查项，不得抢占本轮主修改预算。`]
+      : []),
     "## 修订原则",
     "- 优先清除 critical，再处理 warning，不扩写无关情节。",
+    "- 每条问题都要落到可执行修改，不要只解释原因。",
+    `- 本轮优先闭环 issueId：${[...unresolvedIssueIds].slice(0, 5).join("、") || "无"}`,
     ...(args.reviseRound >= args.maxReviseRounds
       ? ["- 本轮为最后一轮，必须执行结构级重构，不允许仅做措辞微调。"]
       : []),
@@ -1285,6 +1328,7 @@ export async function runChapterReviewCycle(params: {
       auditRounds: auditRound,
       stoppedByMaxRounds,
       ...(stopReason ? { stopReason } : {}),
+      structuralDebtUnresolved: stoppedByMaxRounds && !auditResult.passed && hasStructuralAuditSignals(auditResult.issues),
     },
   };
 }

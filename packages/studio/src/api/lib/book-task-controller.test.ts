@@ -817,6 +817,210 @@ describe("BookTaskController audit gating", () => {
     );
   });
 
+  it("allows task-center audit tasks to exceed 4 revision rounds with unbounded review", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    let chapterIndex = [{
+      number: 5,
+      title: "Ch 5",
+      status: "drafted",
+      wordCount: 2200,
+      auditIssueCount: 3,
+      updatedAt: "2026-06-01T00:00:00.000Z",
+      fileName: "ch05.md",
+      auditHistory: [],
+    }];
+
+    let auditCallCount = 0;
+    const auditDraft = vi.fn().mockImplementation(async () => {
+      auditCallCount += 1;
+      // Fail 6 times, pass on 7th
+      if (auditCallCount <= 6) {
+        return {
+          passed: false,
+          issues: [
+            { severity: "warning", category: "pacing", description: "slow pacing", suggestion: "speed up" },
+          ],
+          summary: "needs work",
+          report: "pacing issues",
+        };
+      }
+      return {
+        passed: true,
+        issues: [],
+        summary: "all clear",
+        report: "passed",
+      };
+    });
+
+    let reviseCallCount = 0;
+    const reviseDraft = vi.fn().mockImplementation(async () => {
+      reviseCallCount += 1;
+      return {
+        status: "audit-failed",
+        applied: true,
+        audit: {
+          passed: false,
+          score: 75,
+          issueCount: 1,
+          severityCounts: { critical: 0, warning: 1, info: 0 },
+          summary: "still needs work",
+          report: "not yet",
+          issues: [{ severity: "warning", category: "pacing", description: "still slow" }],
+        },
+      };
+    });
+
+    const loadChapterIndex = vi.fn(async () => chapterIndex);
+    const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
+      chapterIndex = nextIndex as typeof chapterIndex;
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 10 }),
+        loadChapterIndex,
+        saveChapterIndex,
+        getNextChapterNumber: async () => 6,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft,
+        reviseDraft,
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "audit",
+      source: "task-center",
+      requestedChapters: 1,
+      auditChapterStart: 5,
+      auditChapterEnd: 5,
+      retryEnabled: false,
+    });
+
+    await vi.waitFor(async () => {
+      const current = await controller.get(bookId, task.id);
+      expect(current?.status).toBe("succeeded");
+    }, { timeout: 10_000 });
+
+    // Should have revised at least 5 times (breaking through the old 4-round cap)
+    expect(reviseCallCount).toBeGreaterThanOrEqual(5);
+    expect(auditCallCount).toBe(7);
+    expect(chapterIndex[0]).toMatchObject({
+      status: "ready-for-review",
+      auditHistory: expect.arrayContaining([
+        expect.objectContaining({ passed: true }),
+      ]),
+    });
+  });
+
+  it("preserves 4-round limit for book-detail audit tasks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
+    tempRoots.push(root);
+    const bookId = "demo-book";
+    await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
+    await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
+
+    let chapterIndex = [{
+      number: 7,
+      title: "Ch 7",
+      status: "drafted",
+      wordCount: 1800,
+      auditIssueCount: 2,
+      updatedAt: "2026-06-02T00:00:00.000Z",
+      fileName: "ch07.md",
+      auditHistory: [],
+    }];
+
+    // Audit always fails
+    const auditDraft = vi.fn().mockResolvedValue({
+      passed: false,
+      issues: [
+        { severity: "warning", category: "dialogue", description: "weak dialogue", suggestion: "strengthen" },
+      ],
+      summary: "needs revision",
+      report: "dialogue weak",
+    });
+
+    // Revise always returns "still failed"
+    const reviseDraft = vi.fn().mockResolvedValue({
+      status: "audit-failed",
+      applied: true,
+      audit: {
+        passed: false,
+        score: 72,
+        issueCount: 1,
+        severityCounts: { critical: 0, warning: 1, info: 0 },
+        summary: "still weak",
+        report: "not fixed",
+        issues: [{ severity: "warning", category: "dialogue", description: "still weak" }],
+      },
+    });
+
+    const loadChapterIndex = vi.fn(async () => chapterIndex);
+    const saveChapterIndex = vi.fn(async (_bookId: string, nextIndex: unknown) => {
+      chapterIndex = nextIndex as typeof chapterIndex;
+    });
+
+    const controller = new BookTaskController({
+      state: {
+        stateDir: (id: string) => join(root, "books", id, "story", "state"),
+        loadBookConfig: async () => ({ title: "Demo Book", targetChapters: 10 }),
+        loadChapterIndex,
+        saveChapterIndex,
+        getNextChapterNumber: async () => 8,
+      } as never,
+      loadCurrentProjectConfig: async () => ({}) as ProjectConfig,
+      buildPipelineConfig: async () => ({} as never),
+      resolvePipelineClientFromSelection: async () => ({}),
+      createPipeline: () => ({
+        auditDraft,
+        reviseDraft,
+        writeNextChapter: async () => ({}),
+      }),
+      broadcast: () => undefined,
+      resolveWriteStageHeartbeatMs: () => 3_000,
+    });
+
+    const task = await controller.create(bookId, {
+      type: "audit",
+      source: "book-detail",
+      requestedChapters: 1,
+      auditChapterStart: 7,
+      auditChapterEnd: 7,
+      retryEnabled: false,
+    });
+
+    await vi.waitFor(async () => {
+      const current = await controller.get(bookId, task.id);
+      expect(current?.status).toBe("succeeded");
+    }, { timeout: 8_000 });
+
+    // Should stop at 4 revisions (original behavior)
+    expect(reviseDraft).toHaveBeenCalledTimes(4);
+    // Chapter status should remain as drafted (audit task doesn't update status when capped out)
+    expect(chapterIndex[0]?.status).toBe("drafted");
+    // Task shows 5 failed audits (1 initial + 4 re-audits after each revision)
+    const finalTask = await controller.get(bookId, task.id);
+    expect(finalTask?.result).toMatchObject({
+      auditedChapters: 5,
+      passedChapters: 0,
+      failedChapters: 5,
+    });
+  });
+
+
   it("warns once and keeps writing when the latest chapter is state-degraded", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
     tempRoots.push(root);

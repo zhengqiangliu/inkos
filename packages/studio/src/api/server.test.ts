@@ -9724,6 +9724,74 @@ describe("createStudioServer daemon lifecycle", () => {
     expect(runAgentSessionMock).not.toHaveBeenCalled();
   });
 
+  it("updates chapter title via chapter meta patch without changing chapter number", async () => {
+    loadChapterIndexMock.mockResolvedValueOnce([
+      {
+        number: 16,
+        title: "旧标题",
+        status: "ready-for-review",
+        wordCount: 2800,
+        createdAt: "2026-04-12T00:00:00.000Z",
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      },
+      {
+        number: 17,
+        title: "目标标题",
+        status: "ready-for-review",
+        wordCount: 3200,
+        createdAt: "2026-04-12T00:00:00.000Z",
+        updatedAt: "2026-04-12T00:00:00.000Z",
+      },
+    ]);
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapters/17/meta", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "新标题" }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      chapterNumber: 17,
+      title: "新标题",
+    });
+    expect(saveChapterIndexMock).toHaveBeenCalledTimes(1);
+    expect(saveChapterIndexMock).toHaveBeenCalledWith(
+      "demo-book",
+      expect.arrayContaining([
+        expect.objectContaining({
+          number: 16,
+          title: "旧标题",
+        }),
+        expect.objectContaining({
+          number: 17,
+          title: "新标题",
+        }),
+      ]),
+    );
+  });
+
+  it("rejects blank chapter titles via chapter meta patch", async () => {
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapters/17/meta", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "   " }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "Chapter title is required",
+    });
+    expect(saveChapterIndexMock).not.toHaveBeenCalled();
+  });
+
   it("returns AGENT_REWRITE_SNAPSHOT_MISSING when rollback snapshot is unavailable", async () => {
     rollbackToChapterMock.mockRejectedValueOnce(
       new Error('Cannot restore snapshot for chapter 22 in "demo-book"'),

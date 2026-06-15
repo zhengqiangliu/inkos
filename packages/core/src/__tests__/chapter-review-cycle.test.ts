@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { runChapterReviewCycle } from "../pipeline/chapter-review-cycle.js";
+import { buildReviewCycleRevisionBrief, runChapterReviewCycle } from "../pipeline/chapter-review-cycle.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { ReviseMode } from "../agents/reviser.js";
+import type { ChapterReviewCycleUsage } from "../pipeline/chapter-review-cycle.js";
 import type { LengthSpec } from "../models/length-governance.js";
 
 const LENGTH_SPEC: LengthSpec = {
@@ -14,11 +15,11 @@ const LENGTH_SPEC: LengthSpec = {
   normalizeMode: "none",
 };
 
-const ZERO_USAGE = {
+const ZERO_USAGE: ChapterReviewCycleUsage = {
   promptTokens: 0,
   completionTokens: 0,
   totalTokens: 0,
-} as const;
+};
 
 function createAuditResult(overrides?: Partial<AuditResult>): AuditResult {
   return {
@@ -30,6 +31,46 @@ function createAuditResult(overrides?: Partial<AuditResult>): AuditResult {
 }
 
 describe("runChapterReviewCycle", () => {
+  it("builds a revision brief with actionable repair guidance", () => {
+    const brief = buildReviewCycleRevisionBrief({
+      reviseRound: 2,
+      maxReviseRounds: 3,
+      score: 72,
+      threshold: 80,
+      issues: [
+        {
+          severity: "warning",
+          category: "卷纲一致性",
+          description: "本章提前消耗了后续节点",
+          suggestion: "回收到当前卷纲节点",
+          issueId: "ISSUE-07",
+        },
+        {
+          severity: "critical",
+          category: "台词失真",
+          description: "角色台词偏离人物语气",
+          suggestion: "恢复角色口吻",
+        },
+      ],
+      unresolvedIssues: [
+        {
+          severity: "warning",
+          category: "卷纲一致性",
+          description: "本章提前消耗了后续节点",
+          suggestion: "回收到当前卷纲节点",
+          issueId: "ISSUE-07",
+        },
+      ],
+    });
+
+    expect(brief).toContain("ISSUE-07");
+    expect(brief).toContain("修复动作");
+    expect(brief).toContain("验收标准");
+    expect(brief).toContain("[持续未收敛]");
+    expect(brief).toContain("必须换思路处理");
+    expect(brief).toContain("本轮优先闭环 issueId");
+  });
+
   it("applies post-write spot-fix before the first audit pass", async () => {
     const fixedDraft = "字".repeat(220);
     const auditChapter = vi.fn()
@@ -1347,5 +1388,196 @@ describe("runChapterReviewCycle", () => {
 
     expect(reviseModes).toEqual(["rework"]);
     expect(result.autoReview.stoppedByMaxRounds).toBe(false);
+  });
+
+  it("sets structuralDebtUnresolved=true when token limit hit with structural issues still present", async () => {
+    const draft = "字".repeat(220);
+    const structuralIssue: AuditIssue = {
+      severity: "warning",
+      category: "卷纲一致性",
+      description: "本章推进方向偏离卷纲锚点",
+      suggestion: "回收到卷纲目标",
+    };
+    const failingAudit = createAuditResult({
+      passed: false,
+      issues: [structuralIssue],
+      summary: "structural warning",
+    });
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(failingAudit);
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: draft,
+      wordCount: 220,
+      fixedIssues: [],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: { promptTokens: 150_000, completionTokens: 60_000, totalTokens: 210_000 },
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn().mockImplementation(async (content: string) => ({
+      content,
+      wordCount: content.length,
+      applied: false,
+      tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    }));
+    const addUsage = (a: typeof ZERO_USAGE, b?: typeof ZERO_USAGE) => ({
+      promptTokens: a.promptTokens + (b?.promptTokens ?? 0),
+      completionTokens: a.completionTokens + (b?.completionTokens ?? 0),
+      totalTokens: a.totalTokens + (b?.totalTokens ?? 0),
+    });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 3,
+      initialOutput: { content: draft, wordCount: 220, postWriteErrors: [] },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 150_000 },
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage,
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [], issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      reviseMode: "spot-fix",
+      unboundedReview: true,
+    });
+
+    expect(result.autoReview.stoppedByMaxRounds).toBe(true);
+    expect(result.auditResult.passed).toBe(false);
+    expect(result.autoReview.structuralDebtUnresolved).toBe(true);
+  });
+
+  it("sets structuralDebtUnresolved=false when structural issues are present but chapter eventually passes", async () => {
+    const draft = "字".repeat(220);
+    const structuralIssue: AuditIssue = {
+      severity: "warning",
+      category: "卷纲一致性",
+      description: "章节偏离卷纲锚点",
+      suggestion: "修正推进方向",
+    };
+    const failingAudit = createAuditResult({
+      passed: false,
+      issues: [structuralIssue],
+      summary: "structural warning",
+    });
+    const passingAudit = createAuditResult({ passed: true, issues: [], summary: "fixed" });
+    const auditChapter = vi.fn()
+      .mockResolvedValueOnce(failingAudit)
+      .mockResolvedValueOnce(passingAudit);
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: draft,
+      wordCount: 220,
+      fixedIssues: ["structural fixed"],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn().mockImplementation(async (content: string) => ({
+      content,
+      wordCount: content.length,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    }));
+    const addUsage = (a: typeof ZERO_USAGE, b?: typeof ZERO_USAGE) => ({
+      promptTokens: a.promptTokens + (b?.promptTokens ?? 0),
+      completionTokens: a.completionTokens + (b?.completionTokens ?? 0),
+      totalTokens: a.totalTokens + (b?.totalTokens ?? 0),
+    });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 3,
+      initialOutput: { content: draft, wordCount: 220, postWriteErrors: [] },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage,
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [], issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      reviseMode: "spot-fix",
+      maxReviseRounds: 3,
+    });
+
+    expect(result.auditResult.passed).toBe(true);
+    expect(result.autoReview.stoppedByMaxRounds).toBe(false);
+    expect(result.autoReview.structuralDebtUnresolved).toBe(false);
+  });
+
+  it("sets structuralDebtUnresolved=false when stoppedByMaxRounds but only non-structural issues remain", async () => {
+    const draft = "字".repeat(220);
+    const nonStructuralIssue: AuditIssue = {
+      severity: "warning",
+      category: "文字细节",
+      description: "部分描写过于平白",
+      suggestion: "增加文学性表达",
+    };
+    const failingAudit = createAuditResult({
+      passed: false,
+      issues: [nonStructuralIssue],
+      summary: "textual warning",
+    });
+    const auditChapter = vi.fn().mockResolvedValue(failingAudit);
+    const reviseChapter = vi.fn().mockResolvedValue({
+      revisedContent: draft,
+      wordCount: 220,
+      fixedIssues: [],
+      updatedState: "",
+      updatedLedger: "",
+      updatedHooks: "",
+      tokenUsage: ZERO_USAGE,
+    });
+    const normalizeDraftLengthIfNeeded = vi.fn().mockImplementation(async (content: string) => ({
+      content,
+      wordCount: content.length,
+      applied: false,
+      tokenUsage: ZERO_USAGE,
+    }));
+    const addUsage = (a: typeof ZERO_USAGE, b?: typeof ZERO_USAGE) => ({
+      promptTokens: a.promptTokens + (b?.promptTokens ?? 0),
+      completionTokens: a.completionTokens + (b?.completionTokens ?? 0),
+      totalTokens: a.totalTokens + (b?.totalTokens ?? 0),
+    });
+
+    const result = await runChapterReviewCycle({
+      book: { genre: "xuanhuan" },
+      bookDir: "/tmp/book",
+      chapterNumber: 3,
+      initialOutput: { content: draft, wordCount: 220, postWriteErrors: [] },
+      lengthSpec: LENGTH_SPEC,
+      reducedControlInput: undefined,
+      initialUsage: ZERO_USAGE,
+      createReviser: () => ({ reviseChapter }),
+      auditor: { auditChapter },
+      normalizeDraftLengthIfNeeded,
+      assertChapterContentNotEmpty: () => undefined,
+      addUsage,
+      restoreLostAuditIssues: (_previous, next) => next,
+      analyzeAITells: () => ({ issues: [] as AuditIssue[] }),
+      analyzeSensitiveWords: () => ({ found: [], issues: [] as AuditIssue[] }),
+      logWarn: () => undefined,
+      logStage: () => undefined,
+      reviseMode: "spot-fix",
+      maxReviseRounds: 2,
+    });
+
+    expect(result.autoReview.stoppedByMaxRounds).toBe(true);
+    expect(result.auditResult.passed).toBe(false);
+    expect(result.autoReview.structuralDebtUnresolved).toBe(false);
   });
 });

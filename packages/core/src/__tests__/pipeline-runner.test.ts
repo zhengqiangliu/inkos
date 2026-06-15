@@ -2031,6 +2031,7 @@ describe("PipelineRunner", () => {
       expect(writeInput?.externalContext).toContain("### 文本性（后修）");
       expect(writeInput?.externalContext).toContain("先回到节点、衔接、回收和推进");
       expect(writeInput?.externalContext).toContain("最近连续2章");
+      expect(writeInput?.externalContext).toContain("验收：");
       expect(writeInput?.externalContext).toContain("节奏单调");
       expect(writeInput?.externalContext).toContain("伏笔债务");
       expect(writeInput?.externalContext).toContain("对话拖沓");

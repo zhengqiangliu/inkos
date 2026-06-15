@@ -8697,6 +8697,45 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     }
   });
 
+  app.patch("/api/v1/books/:id/chapters/:num/meta", async (c) => {
+    const id = c.req.param("id");
+    const num = parseInt(c.req.param("num"), 10);
+    const { title } = await c.req.json<{ title?: unknown }>();
+
+    const nextTitle = typeof title === "string" ? title.trim() : "";
+    if (!nextTitle) {
+      return c.json({ error: "Chapter title is required" }, 400);
+    }
+
+    try {
+      const chapterIndex = await state.loadChapterIndex(id).catch(() => []);
+      if (chapterIndex.length === 0) {
+        return c.json({ error: "Chapter not found" }, 404);
+      }
+
+      let found = false;
+      const updatedAt = new Date().toISOString();
+      const updatedIndex = chapterIndex.map((chapter) => {
+        if (chapter.number !== num) return chapter;
+        found = true;
+        return {
+          ...chapter,
+          title: nextTitle,
+          updatedAt,
+        };
+      });
+
+      if (!found) {
+        return c.json({ error: "Chapter not found" }, 404);
+      }
+
+      await state.saveChapterIndex(id, updatedIndex);
+      return c.json({ ok: true, chapterNumber: num, title: nextTitle, updatedAt });
+    } catch (e) {
+      return c.json({ error: String(e) }, 500);
+    }
+  });
+
   // --- Chapter Delete (rollback from chapter N to N-1) ---
 
   app.delete("/api/v1/books/:id/chapters/:num", async (c) => {

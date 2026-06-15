@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ContinuityAuditor } from "../agents/continuity.js";
-import { buildAuditDimensions } from "../agents/audit-dimensions.js";
+import { buildAuditDimensions, formatAuditPriorityPreview } from "../agents/audit-dimensions.js";
 
 const ZERO_USAGE = {
   promptTokens: 0,
@@ -404,5 +404,42 @@ describe("ContinuityAuditor", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("keeps audit priority preview focused on top risks", () => {
+    const preview = formatAuditPriorityPreview(
+      {
+        id: "x",
+        name: "Xuanhuan",
+        language: "zh",
+        auditDimensions: [1, 2, 3, 4, 5, 6, 7, 8, 16, 17, 33, 38],
+        fatigueWords: [],
+        satisfactionTypes: [],
+      } as never,
+      {
+        protagonist: {
+          name: "林越",
+          personalityLock: ["克制"],
+        },
+      } as never,
+      false,
+      {
+        chapterNumber: 1,
+        chapterPlan: {
+          chapterName: "第一章",
+          emotionalTone: "紧绷",
+          coreConflict: "主线推进",
+          endingHook: "新的疑点",
+          hookAssignment: [],
+          requiredRecoverHooks: [],
+          maxNewHooks: 2,
+          driftFlags: [],
+        } as never,
+      },
+    );
+
+    expect(preview).toContain("最高风险");
+    expect(preview).toContain("重点：只修上面的高风险项");
+    expect(preview).not.toContain("备查清单");
   });
 });

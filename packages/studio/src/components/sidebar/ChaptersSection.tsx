@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchJson, invalidateApiPaths } from "../../hooks/use-api";
+import { fetchJson, invalidateApiPaths, patchApi } from "../../hooks/use-api";
 import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
 import { useChatStore } from "../../store/chat";
@@ -324,6 +324,10 @@ export function describeAutoReviewState(state: AutoReviewChapterState | undefine
   return describeChapterAutoReview(state)?.text ?? null;
 }
 
+export function normalizeChapterTitleInput(title: string): string {
+  return title.trim();
+}
+
 export function ChaptersSection({
   bookId,
   t,
@@ -343,10 +347,15 @@ export function ChaptersSection({
   const [repairingChapters, setRepairingChapters] = useState<ReadonlyArray<number>>([]);
   const [expandedAuditHistoryChapters, setExpandedAuditHistoryChapters] = useState<ReadonlyArray<number>>([]);
   const [auditingImpacted, setAuditingImpacted] = useState(false);
+  const [editingChapterNum, setEditingChapterNum] = useState<number | null>(null);
+  const [draftTitle, setDraftTitle] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
   const rewriteFallbackTimers = useRef<Map<number, number>>(new Map());
   const auditFallbackTimers = useRef<Map<number, number>>(new Map());
   const approveFallbackTimers = useRef<Map<number, number>>(new Map());
   const deleteFallbackTimers = useRef<Map<number, number>>(new Map());
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
   const refreshRequestSeqRef = useRef(0);
   const lastProcessedSseMessageRef = useRef<SSEMessage | null>(null);
   const latestAuditSummaryByChapterRef = useRef<Map<number, MessageAuditSummary>>(new Map());
@@ -439,7 +448,17 @@ export function ChaptersSection({
 
   useEffect(() => {
     setExpandedAuditHistoryChapters([]);
+    setEditingChapterNum(null);
+    setDraftTitle("");
+    setSavingTitle(false);
+    setTitleError(null);
   }, [bookId]);
+
+  useEffect(() => {
+    if (editingChapterNum === null) return;
+    titleInputRef.current?.focus();
+    titleInputRef.current?.select();
+  }, [editingChapterNum]);
 
   useEffect(
     () => () => {
@@ -1154,6 +1173,65 @@ export function ChaptersSection({
     });
   };
 
+  const beginTitleEdit = useCallback((chapter: ChapterMeta) => {
+    setEditingChapterNum(chapter.number);
+    setDraftTitle(chapter.title ?? "");
+    setTitleError(null);
+  }, []);
+
+  const cancelTitleEdit = useCallback(() => {
+    setEditingChapterNum(null);
+    setDraftTitle("");
+    setSavingTitle(false);
+    setTitleError(null);
+  }, []);
+
+  const commitTitleEdit = useCallback(async (chapter: ChapterMeta) => {
+    const nextTitle = normalizeChapterTitleInput(draftTitle);
+    if (!nextTitle) {
+      setTitleError("章节名称不能为空");
+      return;
+    }
+    if (nextTitle === chapter.title) {
+      cancelTitleEdit();
+      return;
+    }
+
+    setSavingTitle(true);
+    setTitleError(null);
+    try {
+      const result = await patchApi<{ title: string; updatedAt?: string }>(
+        `/books/${bookId}/chapters/${chapter.number}/meta`,
+        { title: nextTitle },
+      );
+      setChapters((previous) =>
+        previous.map((item) =>
+          item.number === chapter.number
+            ? {
+                ...item,
+                title: result.title,
+              }
+            : item,
+        ),
+      );
+      useChatStore.setState((state) => {
+        if (state.artifactChapter !== chapter.number || !state.artifactChapterMeta) return {};
+        return {
+          artifactChapterMeta: {
+            ...state.artifactChapterMeta,
+            title: result.title,
+            ...(typeof result.updatedAt === "string" ? { updatedAt: result.updatedAt } : {}),
+          },
+        };
+      });
+      bumpBookDataVersion();
+      cancelTitleEdit();
+    } catch (error) {
+      setTitleError(error instanceof Error ? error.message : "章节名称保存失败");
+      setSavingTitle(false);
+    }
+  }, [bookId, bumpBookDataVersion, cancelTitleEdit, draftTitle]);
+
   const handleRewrite = async (chapterNum: number) => {
     const brief = window.prompt(t("sidebar.chapter.rewritePrompt"), "");
     if (brief === null) return;
@@ -1435,15 +1513,65 @@ export function ChaptersSection({
                   >
                     {meta.symbol}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenChapterEditor(ch)}
-                    className="min-w-0 flex-1 text-left transition-colors"
-                    title={t("sidebar.chapter.editBody")}
-                  >
-                    <div className="truncate">
-                      {String(ch.number).padStart(2, "0")} {ch.title || t("chapter.label").replace("{n}", String(ch.number))}
-                    </div>
+                  <div className="min-w-0 flex-1">
+                    {editingChapterNum === ch.number ? (
+                      <div
+                        className="space-y-1"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="shrink-0 font-medium tabular-nums text-foreground/80">
+                            {String(ch.number).padStart(2, "0")}
+                          </span>
+                          <input
+                            ref={titleInputRef}
+                            type="text"
+                            value={draftTitle}
+                            disabled={savingTitle}
+                            onChange={(event) => {
+                              setDraftTitle(event.target.value);
+                              if (titleError) setTitleError(null);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                void commitTitleEdit(ch);
+                              } else if (event.key === "Escape") {
+                                event.preventDefault();
+                                cancelTitleEdit();
+                              }
+                            }}
+                            onBlur={() => {
+                              if (savingTitle) return;
+                              void commitTitleEdit(ch);
+                            }}
+                            className="h-7 flex-1 rounded-md border border-primary/30 bg-background px-2 text-xs text-foreground outline-none ring-offset-background focus:border-primary focus:ring-2 focus:ring-primary/20"
+                            aria-label={`修改第${ch.number}章名称`}
+                          />
+                        </div>
+                        {titleError && (
+                          <div className="text-[10px] text-destructive">{titleError}</div>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          beginTitleEdit(ch);
+                        }}
+                        className="w-full min-w-0 text-left transition-colors hover:text-foreground"
+                        title="点击修改章节名称"
+                      >
+                        <div className="truncate">
+                          {String(ch.number).padStart(2, "0")} {ch.title || t("chapter.label").replace("{n}", String(ch.number))}
+                        </div>
+                      </button>
+                    )}
                     {degradedReason && (
                       <div className="mt-0.5 truncate text-[10px] text-orange-600/90" title={degradedReason}>
                         降级原因：{degradedReason}
@@ -1473,7 +1601,7 @@ export function ChaptersSection({
                         )}
                       </div>
                     )}
-                  </button>
+                  </div>
                   <div className="shrink-0 flex flex-col items-end gap-1">
                     <div className="flex items-center justify-end gap-1.5">
                       <span className={cn("inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium", meta.badge)}>

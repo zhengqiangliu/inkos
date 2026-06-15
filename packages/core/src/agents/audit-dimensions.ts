@@ -435,7 +435,7 @@ export function formatAuditPriorityPreview(
   const selected = priorityIds
     .map((id) => dimensionMap.get(id))
     .filter((dimension): dimension is NonNullable<typeof dimension> => Boolean(dimension))
-    .slice(0, 12);
+    .slice(0, 8);
 
   const targetScoreLine = isEnglish
     ? "- Target: pass the first audit on the first attempt, with critical issues at 0 and score at or above 80."
@@ -479,8 +479,11 @@ export function formatAuditPriorityPreview(
       ? `${index + 1}. ${dimension.name}${note}`
       : `${index + 1}. ${dimension.name}${note}`;
   });
+  const focusLine = isEnglish
+    ? "- Focus: only fix the high-risk items above; treat all other dimensions as backup checks."
+    : "- 重点：只修上面的高风险项，其他维度只作备查。";
 
   return isEnglish
-    ? `## Audit Gate\n\n${targetScoreLine}\n${outlineCriticalLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${hookCriticalLine ? `\n${hookCriticalLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\nPriority checks:\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`
-    : `## 审计门禁\n\n${targetScoreLine}\n${outlineCriticalLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${hookCriticalLine ? `\n${hookCriticalLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\n优先检查：\n${items.map((item) => `- ${item}`).join("\n")}\n\n${fallbackLine}`;
+    ? `## Audit Gate\n\n${targetScoreLine}\n${outlineCriticalLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${hookCriticalLine ? `\n${hookCriticalLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\nPriority checks (top risks):\n${items.map((item) => `- ${item}`).join("\n")}\n\n${focusLine}`
+    : `## 审计门禁\n\n${targetScoreLine}\n${outlineCriticalLine}\n${scoringLine}\n${strategyLine}${chapterLine ? `\n${chapterLine}` : ""}${hookLine ? `\n${hookLine}` : ""}${hookCriticalLine ? `\n${hookCriticalLine}` : ""}${driftLine ? `\n${driftLine}` : ""}\n\n优先检查（最高风险）：\n${items.map((item) => `- ${item}`).join("\n")}\n\n${focusLine}`;
 }

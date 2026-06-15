@@ -35,7 +35,7 @@ import { analyzeLongSpanFatigue } from "../utils/long-span-fatigue.js";
 import { readStoryFrame, readVolumeMap } from "../utils/outline-paths.js";
 import { loadNarrativeMemorySeed, loadRuntimeStateSnapshot, loadSnapshotCurrentStateFacts, type NarrativeMemorySeed } from "../state/runtime-state-store.js";
 import { rewriteStructuredStateFromMarkdown } from "../state/state-bootstrap.js";
-import { classifyAuditIssueClass, countAuditIssueClasses, isStructuralAuditIssue } from "../utils/audit-issue-classification.js";
+import { classifyAuditIssueClass, countAuditIssueClasses, estimateAuditScoreDetailed, isStructuralAuditIssue } from "../utils/audit-issue-classification.js";
 import { appendFile, readFile, readdir, writeFile, mkdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -292,6 +292,10 @@ export interface WriteNextChapterOptions {
   readonly deferSnapshotSync?: boolean;
   readonly allowPendingAuditFailure?: boolean;
   readonly unboundedReview?: boolean;
+  /** @internal 防递归：表示当前已处于结构债救援重写中，不再触发二次救援 */
+  readonly _isStructuralDebtRescue?: boolean;
+  /** @internal 结构债救援时注入的重规划 externalContext，覆盖 runner config 里的值 */
+  readonly _rescueExternalContextOverride?: string;
 }
 
 // Atomic operation results
@@ -453,9 +457,8 @@ function countAuditIssueSeverities(issues: ReadonlyArray<AuditIssue>): Readonly<
   return { critical, warning, info };
 }
 
-function estimateAuditScore(severityCounts: Readonly<{ critical: number; warning: number; info: number }>): number {
-  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12;
-  return Math.max(0, Math.min(100, raw));
+function estimateAuditScore(issues: ReadonlyArray<AuditIssue>): number {
+  return estimateAuditScoreDetailed(issues);
 }
 
 function countBlockingAITellIssues(issues: ReadonlyArray<{ readonly severity: "warning" | "info" }>): number {
@@ -473,7 +476,7 @@ function buildReviseAuditSummaryFromResult(
   const issueCount = Array.isArray(auditResult.issues) ? auditResult.issues.length : 0;
   return {
     passed: auditResult.passed,
-    score: estimateAuditScore(severityCounts),
+    score: estimateAuditScore(auditResult.issues),
     issueCount,
     severityCounts,
     ...(Array.isArray(auditResult.dimensionChecks) && auditResult.dimensionChecks.length > 0
@@ -490,7 +493,7 @@ function buildAuditReportText(
   severityCounts: Readonly<{ critical: number; warning: number; info: number }>,
   issueCount: number,
 ): string {
-  const score = estimateAuditScore(severityCounts);
+  const score = estimateAuditScore(auditResult.issues);
   const lines = [
     auditResult.passed
       ? issueCount > 0
@@ -593,7 +596,7 @@ export class PipelineRunner {
     const severityCounts = countAuditIssueSeverities(auditResult.issues);
     return {
       passed: auditResult.passed,
-      score: estimateAuditScore(severityCounts),
+      score: estimateAuditScore(auditResult.issues),
       issueCount: auditResult.issues.length,
       severityCounts,
       summary: auditResult.summary?.trim() ? auditResult.summary.trim() : undefined,
@@ -740,6 +743,8 @@ export class PipelineRunner {
       critical: number;
       warning: number;
       chapters: number[];
+      lastSeenChapter: number;
+      consecutiveRuns: number;
     };
 
     const stats = new Map<string, FailureStats>();
@@ -760,6 +765,8 @@ export class PipelineRunner {
           critical: 0,
           warning: 0,
           chapters: [],
+          lastSeenChapter: 0,
+          consecutiveRuns: 0,
         };
         if (!stats.has(category)) {
           stats.set(category, current);
@@ -774,6 +781,10 @@ export class PipelineRunner {
         if (!current.chapters.includes(entry.chapterNumber)) {
           current.chapters.push(entry.chapterNumber);
           current.chapters.sort((left, right) => left - right);
+        }
+        if (entry.chapterNumber > current.lastSeenChapter) {
+          current.consecutiveRuns = entry.chapterNumber === current.lastSeenChapter + 1 ? current.consecutiveRuns + 1 : 1;
+          current.lastSeenChapter = entry.chapterNumber;
         }
       }
     }
@@ -818,7 +829,11 @@ export class PipelineRunner {
     const formatItem = (item: FailureStats): string => {
       const dimSegment = item.dimensionId && item.dimensionId !== item.category ? `，${item.dimensionId}` : "";
       const suggestionSegment = item.suggestion ? `；动作：${item.suggestion}` : "";
-      return `- ${item.category}${dimSegment}（${formatCounts(item)}，${describeRun(item.chapters)}${suggestionSegment}）`;
+      const runSegment = item.consecutiveRuns > 1 ? `，最近连续${item.consecutiveRuns}章` : `，${describeRun(item.chapters)}`;
+      const acceptance = isStructuralAuditIssue({ category: item.category, dimensionId: item.dimensionId, description: item.suggestion ?? item.category })
+        ? "；验收：结构性问题不再回流"
+        : "；验收：同类文本问题不再重复命中";
+      return `- ${item.category}${dimSegment}（${formatCounts(item)}${runSegment}${suggestionSegment}${acceptance}）`;
     };
 
     const lines = [
@@ -915,7 +930,7 @@ export class PipelineRunner {
   }): AuditResult {
     if (!params.auditResult.passed) return params.auditResult;
     const scoreBasis = params.scoreIssues ?? params.auditResult.issues;
-    const score = estimateAuditScore(countAuditIssueSeverities(scoreBasis));
+    const score = estimateAuditScore(scoreBasis);
     if (score >= MIN_AUDIT_PASS_SCORE) return params.auditResult;
 
     const category = params.language === "en" ? "Score Gate" : "评分门禁";
@@ -1340,7 +1355,7 @@ export class PipelineRunner {
         );
       }
 
-      await this.state.saveChapterIndexAt(stagingBookDir, []);
+      await this.state.saveChapterIndexAt(stagingBookDir, [], "replace");
 
       this.logStage(stageLanguage, { zh: "创建初始快照", en: "creating initial snapshot" });
       await this.state.snapshotStateAt(stagingBookDir, 0);
@@ -1433,7 +1448,7 @@ export class PipelineRunner {
     // Step 4: Initialize chapters directory + snapshot
     this.logStage(stageLanguage, { zh: "创建初始快照", en: "creating initial snapshot" });
     await mkdir(join(bookDir, "chapters"), { recursive: true });
-    await this.state.saveChapterIndex(book.id, []);
+    await this.state.saveChapterIndex(book.id, [], "replace");
     await this.state.snapshotState(book.id, 0);
   }
 
@@ -2060,6 +2075,24 @@ export class PipelineRunner {
         chapterContent: policyAdjustedRevisionContent,
         lengthSpec,
       });
+      // Delta re-audit: tell the auditor which issues the reviser targeted and
+      // claimed to fix, so the post-revision audit verifies those instead of
+      // running a cold full-dimension scan that tends to surface fresh warnings
+      // (each structural warning costs 12 pts) and stalls convergence.
+      const deltaPreviousIssues = reviseIssues.filter(
+        (issue): issue is typeof issue & { severity: "critical" | "warning" } =>
+          issue.severity === "critical" || issue.severity === "warning",
+      );
+      const deltaRevisionClaims = reviseOutput.fixedIssues.length > 0
+        ? reviseOutput.fixedIssues
+        : undefined;
+      // Focused re-audit: for bounded-edit modes (spot-fix/polish) the reviser
+      // only touches the flagged region, so re-scanning all 38 dimensions mostly
+      // surfaces unrelated fresh warnings. Restrict the re-audit to the previously
+      // failed dimensions plus the always-active ones (32/33/38). For rework/rewrite
+      // the edit is broad, so keep the full scan to catch regressions elsewhere.
+      const useFocusedReaudit = (mode === "spot-fix" || mode === "polish")
+        && deltaPreviousIssues.length > 0;
       const postRevision = await this.evaluateMergedAudit({
         auditor,
         book,
@@ -2080,10 +2113,16 @@ export class PipelineRunner {
               chapterIntent: reviseAuditControlInputWithPreflight.chapterIntent,
               contextPackage: reviseAuditControlInputWithPreflight.contextPackage,
               ruleStack: reviseAuditControlInputWithPreflight.ruleStack,
+              ...(deltaPreviousIssues.length > 0 ? { previousAuditIssues: deltaPreviousIssues } : {}),
+              ...(deltaRevisionClaims ? { revisionClaims: deltaRevisionClaims } : {}),
+              ...(useFocusedReaudit ? { focusedReaudit: true } : {}),
               truthFileOverrides: this.resolveTruthFileOverridesFromReviseOutput(reviseOutput, gp.numericalSystem),
             }
           : {
               temperature: 0,
+              ...(deltaPreviousIssues.length > 0 ? { previousAuditIssues: deltaPreviousIssues } : {}),
+              ...(deltaRevisionClaims ? { revisionClaims: deltaRevisionClaims } : {}),
+              ...(useFocusedReaudit ? { focusedReaudit: true } : {}),
               truthFileOverrides: this.resolveTruthFileOverridesFromReviseOutput(reviseOutput, gp.numericalSystem),
             },
       });
@@ -2400,7 +2439,7 @@ export class PipelineRunner {
       book,
       bookDir,
       chapterNumber,
-      this.config.externalContext,
+      options?._rescueExternalContextOverride ?? this.config.externalContext,
     );
     const reducedControlInput: ReducedAuditControlInput | undefined =
       writeInput.chapterIntent && writeInput.contextPackage && writeInput.ruleStack
@@ -2667,6 +2706,26 @@ export class PipelineRunner {
       resolveTruthFileOverrides: (reviseOutput) =>
         this.resolveTruthFileOverridesFromReviseOutput(reviseOutput, false),
     });
+    // 结构债救援：修订循环耗尽且仍有结构性问题未解 → 触发整章重规划+重写（最多1次）
+    if (
+      !options?._isStructuralDebtRescue &&
+      reviewResult.autoReview.structuralDebtUnresolved &&
+      !reviewResult.auditResult.passed
+    ) {
+      this.logStage(stageLanguage, {
+        zh: `第${chapterNumber}章结构债救援：修订耗尽仍有结构性问题，触发整章重规划重写`,
+        en: `Chapter ${chapterNumber} structural debt rescue: revision exhausted with structural issues, triggering full replan`,
+      });
+      const rescueContext = this.buildStructuralDebtRescueContext(
+        reviewResult.auditResult.issues,
+        this.config.externalContext,
+      );
+      return this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, {
+        ...options,
+        _isStructuralDebtRescue: true,
+        _rescueExternalContextOverride: rescueContext,
+      });
+    }
     totalUsage = reviewResult.totalUsage;
     let finalContent = reviewResult.finalContent;
     let finalWordCount = reviewResult.finalWordCount;
@@ -3619,7 +3678,7 @@ ${matrix}`,
           resolvedLanguage,
         );
         await this.resetImportReplayTruthFiles(bookDir, resolvedLanguage);
-        await this.state.saveChapterIndex(input.bookId, []);
+        await this.state.saveChapterIndex(input.bookId, [], "replace");
         await this.state.snapshotState(input.bookId, 0);
 
         // Generate style guide from imported chapters
@@ -3956,6 +4015,21 @@ ${matrix}`,
     const parts = [externalContext?.trim(), auditDriftGuidance?.trim()].filter((part): part is string => Boolean(part && part.length > 0));
     if (parts.length === 0) return undefined;
     return parts.join("\n\n");
+  }
+
+  private buildStructuralDebtRescueContext(
+    issues: ReadonlyArray<AuditIssue>,
+    baseContext: string | undefined,
+  ): string {
+    const structuralIssues = issues.filter(
+      (i) => isStructuralAuditIssue(i) && (i.severity === "critical" || i.severity === "warning"),
+    );
+    const header = "【结构债救援：规划时须规避以下已知结构性问题】";
+    const lines = structuralIssues.map(
+      (i) => `- [${i.severity}] ${i.dimensionId ?? i.category}: ${i.description}`,
+    );
+    const rescueBlock = [header, ...lines].join("\n");
+    return [baseContext?.trim(), rescueBlock].filter(Boolean).join("\n\n");
   }
 
   private async loadAuditDriftGuidance(bookDir: string): Promise<string | undefined> {
@@ -4839,6 +4913,9 @@ ${matrix}`,
       chapterIntent?: string;
       contextPackage?: ContextPackage;
       ruleStack?: RuleStack;
+      previousAuditIssues?: ReadonlyArray<AuditIssue>;
+      revisionClaims?: ReadonlyArray<string>;
+      focusedReaudit?: boolean;
       truthFileOverrides?: {
         currentState?: string;
         ledger?: string;

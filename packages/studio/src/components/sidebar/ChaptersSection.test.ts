@@ -8,6 +8,7 @@ import {
   normalizeAuditSummary,
   resolveChapterAuditScore,
   chapterAuditScoreBadgeClass,
+  normalizeChapterTitleInput,
   shouldCarryForwardAuditSummary,
   shouldShowChapterAuditSummary,
   sliceUnprocessedSseMessages,
@@ -122,6 +123,14 @@ describe("extractAutoReviewFinalReason", () => {
   it("returns null for non-auto-review notes", () => {
     expect(extractAutoReviewFinalReason("[rewrite-impact] 上游第12章已重写，请复核本章与上游衔接。")).toBeNull();
     expect(extractAutoReviewFinalReason(undefined)).toBeNull();
+  });
+});
+
+describe("normalizeChapterTitleInput", () => {
+  it("trims surrounding whitespace but preserves chapter numbering outside the title field", () => {
+    expect(normalizeChapterTitleInput("  新章名  ")).toBe("新章名");
+    expect(normalizeChapterTitleInput("")).toBe("");
+    expect(normalizeChapterTitleInput("   ")).toBe("");
   });
 });
 

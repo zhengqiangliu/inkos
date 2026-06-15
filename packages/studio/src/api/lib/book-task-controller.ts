@@ -1,13 +1,13 @@
 import type { AuditIssue, OnStreamProgress, PipelineConfig, ProjectConfig, StateManager } from "@actalk/inkos-core";
 import type { ReviseMode } from "@actalk/inkos-core";
-import { countAuditIssueClasses, isStructuralAuditIssue, resolvePrimaryIssueClass } from "@actalk/inkos-core";
+import { countAuditIssueClasses, estimateAuditScoreDetailed, isStructuralAuditIssue, resolvePrimaryIssueClass } from "@actalk/inkos-core";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ApiError } from "../errors.js";
 import { persistChapterAuditSummary } from "./chapter-audit-index.js";
 import type { BookTask, BookTaskCreatePayload, BookTaskPatchPayload, BookTaskStatus, BookTaskType, RunLogEntry } from "../../shared/contracts.js";
 import { BookTaskStore } from "./book-task-store.js";
-import { AUDIT_PASS_SCORE_THRESHOLD, estimateAuditScoreFromSeverityCounts } from "../../utils/audit-score.js";
+import { AUDIT_PASS_SCORE_THRESHOLD } from "../../utils/audit-score.js";
 
 type Broadcast = (event: string, data: unknown) => void;
 
@@ -109,6 +109,8 @@ function nowIso(): string {
 const MIN_AUDIT_PASS_SCORE = 80;
 const TASK_CENTER_AUDIT_MIN_PASS_SCORE = AUDIT_PASS_SCORE_THRESHOLD;
 const TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS = 4;
+// 任务中心审计任务无修订轮次限制时的安全天花板，防止不收敛章节无限空转 / token 烧穿
+const TASK_CENTER_AUDIT_REPAIR_UNBOUNDED_CEILING = 20;
 
 function normalizeChapterCount(value: unknown, fallback: number): number {
   const numeric = typeof value === "number" ? value : Number(value);
@@ -464,8 +466,16 @@ function countAuditIssueSeverities(issues: ReadonlyArray<{ readonly severity?: s
   return { critical, warning, info };
 }
 
-function estimateAuditScore(severityCounts: { critical: number; warning: number; info: number }): number {
-  return estimateAuditScoreFromSeverityCounts(severityCounts);
+function estimateAuditScore(
+  issues: ReadonlyArray<{ readonly severity?: string; readonly category?: string; readonly description?: string; readonly dimensionId?: string }>,
+): number {
+  const scorable = issues.map((issue): { severity: "critical" | "warning" | "info"; category: string; description?: string; dimensionId?: string } => ({
+    severity: (issue.severity === "critical" || issue.severity === "warning" ? issue.severity : "info"),
+    category: typeof issue.category === "string" ? issue.category : "",
+    ...(typeof issue.description === "string" ? { description: issue.description } : {}),
+    ...(typeof issue.dimensionId === "string" ? { dimensionId: issue.dimensionId } : {}),
+  }));
+  return estimateAuditScoreDetailed(scorable);
 }
 
 function clipText(value: string, maxLength: number): string {
@@ -477,6 +487,7 @@ function buildTaskCenterRevisionBrief(args: {
   readonly chapterNumber: number;
   readonly reviseRound: number;
   readonly maxReviseRounds: number;
+  readonly maxReviseRoundsLabel?: string;
   readonly score: number | null;
   readonly threshold: number;
   readonly summary?: string | null;
@@ -552,7 +563,7 @@ function buildTaskCenterRevisionBrief(args: {
   return [
     "## 任务中心自动修订约束",
     `- 章节：第${args.chapterNumber}章`,
-    `- 修订轮次：第 ${args.reviseRound}/${args.maxReviseRounds} 轮`,
+    `- 修订轮次：第 ${args.reviseRound}/${args.maxReviseRoundsLabel ?? args.maxReviseRounds} 轮`,
     `- 审计结论：未通过`,
     `- 当前评分：${scoreLine}`,
     `- 通过阈值：${args.threshold}/100`,
@@ -640,9 +651,10 @@ function selectReviseMode(
   severityCounts: { critical: number; warning: number },
   round: number,
   primaryIssueClass: "none" | "structural" | "textual" | "mixed",
-  previousWasNoop?: boolean,
+  previousWasNoop: boolean,
+  effectiveMaxRounds: number,
 ): "polish" | "rewrite" | "rework" {
-  if (round >= TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS) {
+  if (round >= effectiveMaxRounds) {
     return "rework";
   }
   if (severityCounts.critical === 0 && severityCounts.warning <= 2) {
@@ -957,7 +969,7 @@ export class BookTaskController {
     readonly wordCount?: number | null;
   }): void {
     const severityCounts = args.issues ? countAuditIssueSeverities(args.issues) : undefined;
-    const score = args.score ?? (severityCounts ? estimateAuditScore(severityCounts) : null);
+    const score = args.score ?? (args.issues ? estimateAuditScore(args.issues) : null);
     this.deps.broadcast("audit:complete", {
       bookId: args.task.bookId,
       taskId: args.task.id,
@@ -1241,6 +1253,13 @@ export class BookTaskController {
     readonly pipeline: PipelineLike;
   }): Promise<void> {
     const { bookId, taskId, pipeline } = args;
+    // 任务中心审计任务不设修订轮次上限（仅以高天花板兜底防空转）；
+    // 小说详情侧（book-detail）审计仍保留原 4 轮上限。
+    const unboundedReview = normalizeTaskSource(args.task.source) === "task-center";
+    const effectiveMaxRepairRounds = unboundedReview
+      ? TASK_CENTER_AUDIT_REPAIR_UNBOUNDED_CEILING
+      : TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS;
+    const roundDenominatorLabel = unboundedReview ? "∞" : String(effectiveMaxRepairRounds);
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     const clearHeartbeat = () => {
       if (heartbeatTimer) {
@@ -1491,7 +1510,7 @@ export class BookTaskController {
           passedChapters += 1;
           const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
           const severityCounts = countAuditIssueSeverities(result.issues);
-          const auditScore = estimateAuditScore(severityCounts);
+          const auditScore = estimateAuditScore(result.issues);
           const issueTexts = normalizeAuditIssueTexts(result.issues);
           await persistChapterAuditSummary({
             state: this.deps.state,
@@ -1583,8 +1602,8 @@ export class BookTaskController {
         }
         prevAuditDraftIssues = result.issues;
 
-        if (auditRepairRound >= TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS) {
-          await this.appendTaskLog(latest, "warn", `第 ${chapterNumber} 章已达最大修订轮次（${TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS}），跳过。`);
+        if (auditRepairRound >= effectiveMaxRepairRounds) {
+          await this.appendTaskLog(latest, "warn", `第 ${chapterNumber} 章已达最大修订轮次（${effectiveMaxRepairRounds}），跳过。`);
           failedChapters += 1;
           const auditMetrics = buildAuditMetrics({ auditedChapters, passedChapters, failedChapters });
           latest = await this.store.setStatus(bookId, taskId, "running", {
@@ -1595,7 +1614,7 @@ export class BookTaskController {
             chapterFinishedAt: nowIso(),
             stage: "revise",
             stageLabel: stageLabel("revise"),
-            stageDetail: `第 ${chapterNumber} 章修订${TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS}轮后仍未通过`,
+            stageDetail: `第 ${chapterNumber} 章修订${effectiveMaxRepairRounds}轮后仍未通过`,
             stageStartedAt: nowIso(),
             stageUpdatedAt: nowIso(),
             lastHeartbeatAt: nowIso(),
@@ -1615,7 +1634,7 @@ export class BookTaskController {
         }
         auditRepairRound += 1;
 
-        await this.updateStage(latest, "revise", `第 ${chapterNumber} 章审计未通过，正在自动修订（第 ${auditRepairRound}/${TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS} 轮）`);
+        await this.updateStage(latest, "revise", `第 ${chapterNumber} 章审计未通过，正在自动修订（第 ${auditRepairRound}/${roundDenominatorLabel} 轮）`);
 
         if (typeof pipeline.reviseDraft !== "function") {
           throw new Error(`Task pipeline does not support reviseDraft for chapter ${chapterNumber}.`);
@@ -1624,7 +1643,7 @@ export class BookTaskController {
         const reviseSeverityCounts = countAuditIssueSeverities(result.issues);
         const reviseScore = typeof refreshedSnapshot?.score === "number"
           ? refreshedSnapshot.score
-          : estimateAuditScore(reviseSeverityCounts);
+          : estimateAuditScore(result.issues);
         const reviseContext = buildFullReviseContext({
           issues: result.issues,
           severityCounts: reviseSeverityCounts,
@@ -1634,11 +1653,11 @@ export class BookTaskController {
             ? auditUnresolvedIssueIds
             : undefined,
           previousRevisionWasNoop: auditRepairRound > 1 && auditUnresolvedIssueIds.length > 0,
-          ...(auditRepairRound >= TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS
+          ...(auditRepairRound >= effectiveMaxRepairRounds
             ? {
                 structureOverload: {
                   enabled: true,
-                  reason: `第 ${auditRepairRound}/${TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS} 轮仍未通过，已切换为结构级重构模式。`,
+                  reason: `第 ${auditRepairRound}/${effectiveMaxRepairRounds} 轮仍未通过，已切换为结构级重构模式。`,
                   signals: result.issues
                     .filter((issue) => issue.severity === "critical" || issue.severity === "warning")
                     .slice(0, 5)
@@ -1659,7 +1678,8 @@ export class BookTaskController {
         const revisionBrief = buildTaskCenterRevisionBrief({
           chapterNumber,
           reviseRound: auditRepairRound,
-          maxReviseRounds: TASK_CENTER_AUDIT_REPAIR_MAX_ROUNDS,
+          maxReviseRounds: effectiveMaxRepairRounds,
+          maxReviseRoundsLabel: roundDenominatorLabel,
           score: reviseScore,
           threshold: MIN_AUDIT_PASS_SCORE,
           summary: result.summary ?? null,
@@ -1696,6 +1716,7 @@ export class BookTaskController {
           auditRepairRound,
           reviseContext.primaryIssueClass ?? "none",
           consecutiveNoopRevisions > 0,
+          effectiveMaxRepairRounds,
         );
         const reviseResult = await pipeline.reviseDraft(bookId, chapterNumber, reviseMode, {
           userBrief: revisionBrief,
@@ -1802,7 +1823,7 @@ export class BookTaskController {
           const reviseSeverityCounts = reviseAudit?.severityCounts ?? countAuditIssueSeverities(reviseAudit?.issues ?? []);
           const reviseAuditScore = typeof reviseAudit?.score === "number"
             ? reviseAudit.score
-            : estimateAuditScore(reviseSeverityCounts);
+            : estimateAuditScore(reviseAudit?.issues ?? []);
           const reviseIssueTexts = reviseAudit?.issues ? normalizeAuditIssueTexts(reviseAudit.issues) : [];
           await persistChapterAuditSummary({
             state: this.deps.state,

@@ -30,6 +30,7 @@ const LEGACY_WIZARD_STEP_FILE_NAMES: Readonly<Partial<Record<BookCreationWizardS
 };
 
 type WizardStepStatus = "empty" | "saved" | "dirty";
+export type ChapterIndexSaveMode = "merge" | "replace";
 
 interface WizardStepFileRecord {
   readonly status: WizardStepStatus;
@@ -685,31 +686,49 @@ export class StateManager {
   }
 
   async loadChapterIndex(bookId: string): Promise<ReadonlyArray<ChapterMeta>> {
-    const indexPath = join(this.bookDir(bookId), "chapters", "index.json");
-    try {
-      const raw = await readFile(indexPath, "utf-8");
-      return JSON.parse(raw);
-    } catch {
-      return [];
-    }
+    return this.loadChapterIndexAt(this.bookDir(bookId));
   }
 
   async saveChapterIndex(
     bookId: string,
     index: ReadonlyArray<ChapterMeta>,
+    mode: ChapterIndexSaveMode = "merge",
+    options?: { readonly mergeExisting?: boolean },
   ): Promise<void> {
-    await this.saveChapterIndexAt(this.bookDir(bookId), index);
+    await this.saveChapterIndexAt(this.bookDir(bookId), index, mode, options);
   }
 
   async saveChapterIndexAt(
     bookDir: string,
     index: ReadonlyArray<ChapterMeta>,
+    mode: ChapterIndexSaveMode = "merge",
+    options?: { readonly mergeExisting?: boolean },
   ): Promise<void> {
     const chaptersDir = join(bookDir, "chapters");
     await mkdir(chaptersDir, { recursive: true });
+    const indexPath = join(chaptersDir, "index.json");
+    const normalized = [...index].sort((left, right) => left.number - right.number);
+    if (mode === "replace") {
+      await writeFile(indexPath, JSON.stringify(normalized, null, 2), "utf-8");
+      return;
+    }
+
+    if (options?.mergeExisting === false) {
+      await writeFile(indexPath, JSON.stringify(normalized, null, 2), "utf-8");
+      return;
+    }
+
+    const existing = await this.loadChapterIndexAt(bookDir);
+    const merged = new Map<number, ChapterMeta>();
+    for (const entry of existing) {
+      merged.set(entry.number, entry);
+    }
+    for (const entry of normalized) {
+      merged.set(entry.number, entry);
+    }
     await writeFile(
-      join(chaptersDir, "index.json"),
-      JSON.stringify(index, null, 2),
+      indexPath,
+      JSON.stringify([...merged.values()].sort((left, right) => left.number - right.number), null, 2),
       "utf-8",
     );
   }
@@ -965,7 +984,7 @@ export class StateManager {
       rm(join(bookDir, "story", "narrative_memory_sync.json"), { force: true }),
     ]);
 
-    await this.saveChapterIndex(bookId, kept);
+    await this.saveChapterIndex(bookId, kept, "replace");
     return discarded;
   }
 
@@ -974,6 +993,16 @@ export class StateManager {
       await stat(path);
     } catch {
       await writeFile(path, content, "utf-8");
+    }
+  }
+
+  private async loadChapterIndexAt(bookDir: string): Promise<ReadonlyArray<ChapterMeta>> {
+    const indexPath = join(bookDir, "chapters", "index.json");
+    try {
+      const raw = await readFile(indexPath, "utf-8");
+      return JSON.parse(raw);
+    } catch {
+      return [];
     }
   }
 }
