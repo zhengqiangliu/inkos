@@ -3,6 +3,7 @@ import type { FanficMode } from "../models/book.js";
 import type { ChapterPlan } from "../models/chapter-plan.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { getFanficDimensionConfig } from "./fanfic-dimensions.js";
+import { AUDIT_SCORE_DEDUCTION } from "../utils/audit-issue-classification.js";
 
 export type AuditPromptLanguage = "zh" | "en";
 
@@ -437,15 +438,19 @@ export function formatAuditPriorityPreview(
     .filter((dimension): dimension is NonNullable<typeof dimension> => Boolean(dimension))
     .slice(0, 8);
 
+  const critPts = AUDIT_SCORE_DEDUCTION.critical;
+  const structPts = AUDIT_SCORE_DEDUCTION.structuralWarning;
+  const textPts = AUDIT_SCORE_DEDUCTION.textualWarning;
+  const twoStructPts = structPts * 2;
   const targetScoreLine = isEnglish
     ? "- Target: pass the first audit on the first attempt, with critical issues at 0 and score at or above 80."
     : "- 目标：首审一次通过，critical=0，分数达到80分及以上。";
   const outlineCriticalLine = isEnglish
-    ? "- CRITICAL BLOCKER: Only advance the current volume node — consuming future nodes → critical (−35 pts, instant fail)."
-    : "- 【critical 阻断】只推进当前卷纲节点——提前消耗后续节点 → critical（-35分，直接不过）。";
+    ? `- CRITICAL BLOCKER: Only advance the current volume node — consuming future nodes → critical (−${critPts} pts, instant fail).`
+    : `- 【critical 阻断】只推进当前卷纲节点——提前消耗后续节点 → critical（-${critPts}分，直接不过）。`;
   const scoringLine = isEnglish
-    ? "- Scoring: each critical deducts 35 pts; each structural warning deducts 12 pts; each textual/style warning deducts 6 pts. 1 critical = instant fail; 2 structural warnings = −24 pts (near fail line)."
-    : "- 扣分规则：每个 critical 扣35分；每个结构性 warning（连续性/偏离/弧线）扣12分；每个文本性 warning（句面/风格）扣6分。1个critical直接不过；2个结构性warning扣24分，接近失败线。";
+    ? `- Scoring: each critical deducts ${critPts} pts; each structural warning deducts ${structPts} pts; each textual/style warning deducts ${textPts} pts. 1 critical = instant fail; ${twoStructPts >= 20 ? "2" : "several"} structural warnings = −${twoStructPts} pts (toward fail line).`
+    : `- 扣分规则：每个 critical 扣${critPts}分；每个结构性 warning（连续性/偏离/弧线）扣${structPts}分；每个文本性 warning（句面/风格）扣${textPts}分。1个critical直接不过；2个结构性warning扣${twoStructPts}分。`;
   const strategyLine = isEnglish
     ? "- Order of work: structure first, continuity second, character consistency third, then style."
     : "- 处理顺序：先结构，再连续性，再人物一致性，最后才是句面。";
@@ -464,8 +469,8 @@ export function formatAuditPriorityPreview(
     : "";
   const hookCriticalLine = (chapterPlan?.requiredRecoverHooks?.length ?? 0) > 0
     ? isEnglish
-      ? `- CRITICAL BLOCKER: Required hook recovery — ${chapterPlan!.requiredRecoverHooks!.join(", ")}. Missing ANY → critical (−35 pts, instant fail).`
-      : `- 【critical 阻断】强制回收伏笔：${chapterPlan!.requiredRecoverHooks!.join("、")}。漏回收任意一个 → critical（-35分，直接不过）。`
+      ? `- CRITICAL BLOCKER: Required hook recovery — ${chapterPlan!.requiredRecoverHooks!.join(", ")}. Missing ANY → critical (−${critPts} pts, instant fail).`
+      : `- 【critical 阻断】强制回收伏笔：${chapterPlan!.requiredRecoverHooks!.join("、")}。漏回收任意一个 → critical（-${critPts}分，直接不过）。`
     : "";
   const driftLine = chapterPlan?.driftFlags.length
     ? isEnglish

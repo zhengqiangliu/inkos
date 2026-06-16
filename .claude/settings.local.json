@@ -52,7 +52,8 @@
       "PowerShell(node_modules\\\\.bin\\\\tsc --noEmit -p packages/core/tsconfig.json 2>&1 | Select-Object -First 40)",
       "PowerShell(node_modules\\\\.bin\\\\tsc --noEmit -p packages/studio/tsconfig.json 2>&1 | Select-Object -First 40)",
       "PowerShell(& \".\\\\node_modules\\\\.bin\\\\tsc.cmd\" --noEmit -p packages/core/tsconfig.json 2>&1 | Select-Object -First 40)",
-      "PowerShell(& \".\\\\node_modules\\\\.bin\\\\tsc.cmd\" --noEmit -p packages/studio/tsconfig.json 2>&1 | Select-Object -First 40)"
+      "PowerShell(& \".\\\\node_modules\\\\.bin\\\\tsc.cmd\" --noEmit -p packages/studio/tsconfig.json 2>&1 | Select-Object -First 40)",
+      "Bash(echo \"EXIT=$?\")"
     ]
   }
 }

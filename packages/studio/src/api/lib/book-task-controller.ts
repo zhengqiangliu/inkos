@@ -601,6 +601,27 @@ function buildIssueIdList(
   return issueIds;
 }
 
+/**
+ * 跨轮次问题署名：审计提示词已要求 description 以「第X段：」/「全章：」位置锚点开头并跨轮保持稳定，
+ * dimensionId 取自固定维度列表。故用 dimensionId（缺失时回退 category）+ 锚点先导句作为署名，
+ * 比旧的 category|description.slice(0,80) 更稳定，能在文风措辞被改写时仍命中同一问题。
+ */
+function buildIssueSignature(issue: {
+  readonly category?: string;
+  readonly description?: string;
+  readonly dimensionId?: string;
+}): string {
+  const dimensionKey = (issue.dimensionId ?? issue.category ?? "").trim().toLowerCase();
+  const description = (issue.description ?? "").trim();
+  // 锚点形如「第3段：」「第3-5段：」「全章：」「Paragraph 3:」——优先用「锚点 + 锚点后前24字符」做署名，
+  // 这样即便锚点后的措辞被复审改写，只要问题位置与核心仍一致就能匹配；无锚点时回退取前48字符。
+  const anchorMatch = description.match(/^(第[0-9]+(?:[-–][0-9]+)?段|全章|Paragraphs?\s+[0-9]+(?:[-–][0-9]+)?|Whole chapter)\s*[:：]/i);
+  const anchorPart = anchorMatch
+    ? `${anchorMatch[1]!.toLowerCase()}|${description.slice(anchorMatch[0].length).trim().slice(0, 24)}`
+    : description.slice(0, 48);
+  return `${dimensionKey}|${anchorPart}`;
+}
+
 function buildFullReviseContext(args: {
   readonly issues: ReadonlyArray<{ readonly severity?: string; readonly category?: string; readonly description?: string; readonly dimensionId?: string }>;
   readonly severityCounts: { critical: number; warning: number; info: number };
@@ -653,14 +674,26 @@ function selectReviseMode(
   primaryIssueClass: "none" | "structural" | "textual" | "mixed",
   previousWasNoop: boolean,
   effectiveMaxRounds: number,
+  failureGate?: "critical" | "score" | "none",
+  score?: number,
 ): "polish" | "rewrite" | "rework" {
   if (round >= effectiveMaxRounds) {
+    return "rework";
+  }
+  if (failureGate === "score") {
+    return "rework";
+  }
+  // C: 低分章节提前升级到结构级重构，避免前几轮浪费在无法收敛的 rewrite 上。
+  if (round > 1 && typeof score === "number" && score < 60) {
+    return "rework";
+  }
+  if (round > 1 && typeof score === "number" && score < 70 && (primaryIssueClass === "structural" || primaryIssueClass === "mixed")) {
     return "rework";
   }
   if (severityCounts.critical === 0 && severityCounts.warning <= 2) {
     return "polish";
   }
-  if (primaryIssueClass === "structural" || primaryIssueClass === "mixed") {
+  if (round > 1 && (primaryIssueClass === "structural" || primaryIssueClass === "mixed")) {
     return "rework";
   }
   // A2: if previous revision was a noop (pre-audit skipped it), escalate immediately to rework
@@ -1380,11 +1413,13 @@ export class BookTaskController {
       let auditRepairRound = 0;
       let auditUnresolvedIssueIds: string[] = [];
       // R1a+R3: track full issue objects from previous round for convergence injection
-      let prevRoundIssues: ReadonlyArray<{ severity?: string; category?: string; description?: string; suggestion?: string }> = [];
+      let prevRoundIssues: ReadonlyArray<{ severity?: string; category?: string; description?: string; suggestion?: string; dimensionId?: string }> = [];
       // A2: track consecutive noop revisions (applied===false) for early rework escalation
       let consecutiveNoopRevisions = 0;
       // A3: track the previous auditDraft issues for same-type diff (auditDraft vs auditDraft)
-      let prevAuditDraftIssues: ReadonlyArray<{ severity?: string; category?: string; description?: string; suggestion?: string }> = [];
+      let prevAuditDraftIssues: ReadonlyArray<{ severity?: string; category?: string; description?: string; suggestion?: string; dimensionId?: string }> = [];
+      // F: track best revision score across rounds for adaptive threshold (anti-spin)
+      let bestRevisionScore: number | null = null;
       let chapterFinished = false;
       while (!chapterFinished) {
         auditLoopRound += 1;
@@ -1585,11 +1620,11 @@ export class BookTaskController {
         if (prevAuditDraftIssues.length > 0) {
           const prevSigs = prevAuditDraftIssues
             .filter((i) => i.severity === "critical" || i.severity === "warning")
-            .map((i) => `${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`);
+            .map((i) => buildIssueSignature(i));
           const currSigs = new Set(
             result.issues
               .filter((i) => i.severity === "critical" || i.severity === "warning")
-              .map((i) => `${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+              .map((i) => buildIssueSignature(i)),
           );
           const unresolvedSigs = new Set(prevSigs.filter((s) => currSigs.has(s)));
           auditUnresolvedIssueIds = buildIssueIdList(prevAuditDraftIssues).filter(
@@ -1597,7 +1632,7 @@ export class BookTaskController {
           );
           prevRoundIssues = prevAuditDraftIssues.filter(
             (i) => (i.severity === "critical" || i.severity === "warning")
-              && unresolvedSigs.has(`${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+              && unresolvedSigs.has(buildIssueSignature(i)),
           );
         }
         prevAuditDraftIssues = result.issues;
@@ -1694,13 +1729,13 @@ export class BookTaskController {
                     .filter((_i, idx) => auditUnresolvedIssueIds.some(
                       (uid) => uid === `ISSUE-${String(idx + 1).padStart(2, "0")}`,
                     ))
-                    .map((i) => `${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+                    .map((i) => buildIssueSignature(i)),
                 );
                 const unresolved = result.issues.filter(
-                  (i) => unresolvedSigs.has(`${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+                  (i) => unresolvedSigs.has(buildIssueSignature(i)),
                 );
                 const rest = result.issues.filter(
-                  (i) => !unresolvedSigs.has(`${i.category ?? ""}|${(i.description ?? "").slice(0, 80)}`),
+                  (i) => !unresolvedSigs.has(buildIssueSignature(i)),
                 );
                 return [...unresolved, ...rest];
               })()
@@ -1717,6 +1752,8 @@ export class BookTaskController {
           reviseContext.primaryIssueClass ?? "none",
           consecutiveNoopRevisions > 0,
           effectiveMaxRepairRounds,
+          reviseContext.failureGate,
+          reviseScore,
         );
         const reviseResult = await pipeline.reviseDraft(bookId, chapterNumber, reviseMode, {
           userBrief: revisionBrief,
@@ -1764,11 +1801,35 @@ export class BookTaskController {
         const revisionIssueCount = typeof reviseResult?.audit?.issueCount === "number"
           ? reviseResult.audit.issueCount
           : 0;
-        const revisionPassed = Boolean(reviseResult?.audit?.passed ?? reviseResult?.status === "ready-for-review")
+        const strictRevisionPassed = Boolean(reviseResult?.audit?.passed ?? reviseResult?.status === "ready-for-review")
           && (revisionAuditScore === null || revisionAuditScore >= minPassScore);
+        // F: 自适应降阈防空转 —— 仅作用于任务中心（unboundedReview）路径的「逼近天花板」安全阀。
+        // book-detail 已有 4 轮硬上限，空转成本低，不需要降阈；任务中心天花板高达 20 轮，
+        // 才是真正的 token 烧穿风险点。仅当已修订到逼近天花板（ceiling-3 轮起）仍卡在
+        // [70, minPassScore) 区间、且本轮为该章历史最佳分（说明在缓慢爬坡但难以收敛）时，
+        // 判定为条件通过，避免继续烧到天花板后被判失败。早期轮次不降阈，保证章节有机会真正过审。
+        if (typeof revisionAuditScore === "number"
+          && (bestRevisionScore === null || revisionAuditScore > bestRevisionScore)) {
+          bestRevisionScore = revisionAuditScore;
+        }
+        const adaptivePassed = !strictRevisionPassed
+          && unboundedReview
+          && typeof revisionAuditScore === "number"
+          && auditRepairRound >= Math.max(3, effectiveMaxRepairRounds - 3)
+          && revisionAuditScore >= 70
+          && revisionAuditScore < minPassScore
+          && revisionAuditScore === bestRevisionScore;
+        const revisionPassed = strictRevisionPassed || adaptivePassed;
         if (revisionPassed) {
           passedChapters += 1;
           consecutiveNoopRevisions = 0;
+          if (adaptivePassed) {
+            await this.appendTaskLog(
+              latest,
+              "warn",
+              `第 ${chapterNumber} 章修订 ${auditRepairRound} 轮后评分 ${revisionAuditScore}/100，已达自适应门槛（≥70 且为历史最佳），判定为条件通过。`,
+            );
+          }
         } else {
           failedChapters += 1;
           const revisionWasNoop = reviseResult?.applied === false || reviseResult?.status === "unchanged";

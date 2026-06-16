@@ -523,6 +523,11 @@ Output format MUST be JSON:
 
 passed is false ONLY when critical-severity issues exist.
 
+Output consistency requirements (follow strictly so the same issue can be tracked across revision rounds):
+- dimensionId must be taken from the "Audit dimensions" list above; do not invent new dimension names.
+- description must start with a position anchor in the form "Paragraph X:" or "Paragraphs X-Y:" (use "Whole chapter:" when it cannot be localized), followed by the specific issue. The same issue must keep the same anchor and dimension across re-audits, and should only be rephrased when the issue has genuinely changed.
+- Do not rewrite the main body of a still-present issue's description on re-audit due to wording preference, to avoid it being misjudged as "fixed" or "new".
+
 Severity guide:
 - critical: direct contradiction (location/time/character state conflict with established facts), information boundary violation, a character acts with knowledge they cannot have, hook_id declared recovered but still pending, outline node skipped entirely.
 - warning: pattern problem fixable by revision (subplot dormant ≥3 chapters, arc flat ≥3 chapters, chapter transition awkward but not contradictory, pacing consumed faster than outline span, chapter ends with no hook renewal).
@@ -561,7 +566,12 @@ ${dimList}
   "summary": "一句话总结审查结论"
 }
 
-只有当存在 critical 级别问题时，passed 才为 false。`;
+只有当存在 critical 级别问题时，passed 才为 false。
+
+输出一致性要求（务必遵守，便于跨轮修订追踪同一问题）：
+- dimensionId 必须取自上方「审查维度」列表中的维度标识，不得自创新维度名。
+- description 必须以问题位置锚点开头，格式为「第X段：」或「第X-Y段：」（无法定位时用「全章：」），再接具体描述。同一问题在不同轮次复审时应保持相同的位置锚点与维度，仅在问题确已变化时才改写。
+- 不要因措辞偏好在复审时改写仍然存在的问题的 description 主干，以免被误判为「已修复」或「新问题」。`;
 
     // Smart context filtering for auditor — same logic as writer
     const bookRulesForFilter = parsedRules?.rules ?? null;

@@ -1677,24 +1677,24 @@ export function ChaptersSection({
                         {auditing ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
                       </button>
                       {auditHistory.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          if (hasAuditHistoryModal) {
-                            onOpenAuditHistory(ch.number);
-                            return;
-                          }
-                          toggleAuditHistory(ch.number);
-                        }}
-                        className="inline-flex h-5 items-center gap-1 rounded-md border border-border/60 bg-background/70 px-1.5 text-[10px] text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                        title={hasAuditHistoryModal ? "查看审计历史" : (auditHistoryExpanded ? "收起历史审计" : "展开历史审计")}
-                      >
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (hasAuditHistoryModal) {
+                              onOpenAuditHistory(ch.number);
+                              return;
+                            }
+                            toggleAuditHistory(ch.number);
+                          }}
+                          className="inline-flex h-5 w-5 items-center justify-center rounded-md border border-border/60 bg-background/70 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                          title={hasAuditHistoryModal ? "查看审计历史" : (auditHistoryExpanded ? "收起历史审计" : "展开历史审计")}
+                          aria-label={hasAuditHistoryModal ? "查看审计历史" : (auditHistoryExpanded ? "收起历史审计" : "展开历史审计")}
+                        >
                           <Clock3 size={10} />
-                          {hasAuditHistoryModal ? `历史 ${auditHistory.length}` : (auditHistoryExpanded ? "收起" : `历史 ${auditHistory.length}`)}
-                      </button>
-                    )}
+                        </button>
+                      )}
                   </div>
                 </div>
                 </div>

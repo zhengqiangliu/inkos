@@ -9,7 +9,7 @@ import {
 describe("audit issue classification", () => {
   it("classifies structural issues and splits them from textual ones", () => {
     const issues = [
-      { category: "节奏单调", dimensionId: "pacing_monotony", description: "近期节奏拉平。" },
+      { category: "时间线", dimensionId: "timeline_check", description: "时间线与已有事实冲突。" },
       { category: "文风", description: "表述偏啰嗦。" },
     ] as const;
 
@@ -23,7 +23,7 @@ describe("audit issue classification", () => {
     const split = splitAuditIssuesByClass(issues);
     expect(split.structural).toHaveLength(1);
     expect(split.textual).toHaveLength(1);
-    expect(split.structural[0]?.category).toBe("节奏单调");
+    expect(split.structural[0]?.category).toBe("时间线");
     expect(split.textual[0]?.category).toBe("文风");
   });
 });

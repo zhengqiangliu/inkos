@@ -631,6 +631,12 @@ describe("runChapterReviewCycle", () => {
         description: "信息重复偏多",
         suggestion: "压缩重复信息",
       },
+      {
+        severity: "warning",
+        category: "用词",
+        description: "用词重复偏多",
+        suggestion: "丰富用词",
+      },
     ];
     const auditChapter = vi.fn()
       .mockResolvedValueOnce(createAuditResult({

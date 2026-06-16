@@ -35,9 +35,6 @@ export const STRUCTURAL_AUDIT_SIGNALS = [
   "power scaling check",
   "数值检查",
   "numerical consistency check",
-  "paragraph-shape",
-  "段落等长",
-  "paragraph uniformity",
   "章节衔接检查",
   "chapter transition",
   "读者期待管理",
@@ -53,22 +50,14 @@ export const STRUCTURAL_AUDIT_SIGNALS = [
   "side character instrumentalization",
   "爽点虚化",
   "payoff dilution",
-  "台词失真",
-  "dialogue authenticity",
-  "流水账",
-  "chronicle drift",
   "知识库污染",
   "knowledge base pollution",
   "视角一致性",
   "pov consistency",
-  "列表式结构",
-  "list-like structure",
   "支线停滞",
   "subplot stagnation",
   "弧线平坦",
   "arc flatline",
-  "节奏单调",
-  "pacing monotony",
   "正传事件冲突",
   "mainline canon event conflict",
   "未来信息泄露",
@@ -144,14 +133,14 @@ export interface ScorableAuditIssue extends AuditIssueSignalSource {
 }
 
 export const AUDIT_SCORE_DEDUCTION = {
-  critical: 35,
-  structuralWarning: 12,
-  textualWarning: 6,
+  critical: 30,
+  structuralWarning: 8,
+  textualWarning: 5,
   info: 0,
 } as const;
 
 /**
- * 唯一评分真源：critical -35；warning 按结构性 -12 / 文本性 -6 区分；info 不扣分。
+ * 唯一评分真源：critical -30；warning 按结构性 -8 / 文本性 -5 区分；info 不扣分。
  * 写作链路（writer 门禁预览）、审计链路（review-cycle）、任务编排（controller）共用此函数，
  * 避免同一章在不同路径下评分判定相反而触发假性修订轮。
  */

@@ -127,6 +127,16 @@ const resolveServiceModelsBaseUrlMock = vi.fn((service: string) => {
   const preset = SERVICE_PRESETS_MOCK[service];
   return preset?.modelsBaseUrl ?? preset?.baseUrl;
 });
+const classifyAuditIssueClassMock = vi.fn((source: { category: string; dimensionId?: string; description?: string }) => {
+  const merged = `${source.dimensionId ?? ""} ${source.category} ${source.description ?? ""}`.toLowerCase();
+  return merged.includes("设定冲突")
+    || merged.includes("时间线")
+    || merged.includes("卷纲")
+    || merged.includes("outline drift")
+    || merged.includes("chapter transition")
+    ? "structural"
+    : "textual";
+});
 const listModelsForServiceMock = vi.fn(async (service: string, apiKey?: string) => {
   const preset = resolveServicePresetMock(service);
   if (!preset || service === "custom") return [];
@@ -557,6 +567,13 @@ vi.mock("@actalk/inkos-core", () => {
     listModelsForService: listModelsForServiceMock,
     readVolumeMap: readVolumeMapMock,
     extractChapterLimitFromOutline: extractChapterLimitFromOutlineMock,
+    classifyAuditIssueClass: classifyAuditIssueClassMock,
+    AUDIT_SCORE_DEDUCTION: {
+      critical: 30,
+      structuralWarning: 8,
+      textualWarning: 5,
+      info: 0,
+    },
     InteractionRequestSchema: { parse: (value: unknown) => value },
     GLOBAL_ENV_PATH: join(tmpdir(), "inkos-global.env"),
   };
@@ -3807,9 +3824,9 @@ describe("createStudioServer daemon lifecycle", () => {
       chapterNumber: 3,
       passed: true,
       issues: [
-        { severity: "warning", category: "节奏", description: "节奏松散", suggestion: "收紧冲突线" },
-        { severity: "warning", category: "人物", description: "动机表达偏弱", suggestion: "补强动机锚点" },
-        { severity: "info", category: "文风", description: "措辞重复", suggestion: "替换重复表达" },
+        { severity: "warning", category: "时间线", description: "时间线略有漂移", suggestion: "补充时间锚点" },
+        { severity: "warning", category: "设定冲突", description: "局部设定存在偏差", suggestion: "统一设定口径" },
+        { severity: "warning", category: "卷纲", description: "章节推进略偏离卷纲", suggestion: "回收卷纲节点" },
       ],
       summary: "形式通过，但分数偏低。",
     };

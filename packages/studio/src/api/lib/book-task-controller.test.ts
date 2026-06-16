@@ -478,7 +478,7 @@ describe("BookTaskController audit gating", () => {
     expect(reviseDraft).toHaveBeenCalledWith(
       bookId,
       3,
-      "polish",
+      "rework",
       expect.objectContaining({
         userBrief: expect.stringContaining("## 任务中心自动修订约束"),
         reviseContext: expect.objectContaining({

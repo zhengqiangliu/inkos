@@ -41,6 +41,8 @@ import {
   buildExportArtifact,
   GLOBAL_ENV_PATH,
   extractChapterLimitFromOutline,
+  classifyAuditIssueClass,
+  AUDIT_SCORE_DEDUCTION,
   InteractionRequestSchema,
   type BookCreationWizardStep,
   type AgentContext,
@@ -110,7 +112,6 @@ import { listScriptWorkspaceChecklistTemplates, resolveScriptWorkspaceChecklistT
 import {
   AUDIT_PASS_SCORE_THRESHOLD,
   clampAuditScore,
-  estimateAuditScoreFromSeverityCounts,
   resolveAuditFailureGate,
   resolveAuditPassedByScore,
   type AuditFailureGate,
@@ -2859,6 +2860,41 @@ function countAuditIssueSeveritiesFromIssues(issues: unknown): AuditSeverityCoun
   return { critical, warning, info };
 }
 
+function estimateCanonicalAuditScore(issueTexts: ReadonlyArray<string>): number {
+  let deduction = 0;
+  for (const item of issueTexts) {
+    const parsed = parseAuditIssueText(item);
+    if (!parsed) continue;
+    if (parsed.severity === "critical") {
+      deduction += AUDIT_SCORE_DEDUCTION.critical;
+    } else if (parsed.severity === "warning") {
+      const issueClass = classifyAuditIssueClass({ category: parsed.text, description: parsed.text });
+      deduction += issueClass === "structural"
+        ? AUDIT_SCORE_DEDUCTION.structuralWarning
+        : AUDIT_SCORE_DEDUCTION.textualWarning;
+    }
+  }
+  return clampAuditScore(100 - deduction);
+}
+
+function estimateCanonicalAuditScoreFromIssues(issues: unknown): number {
+  if (!Array.isArray(issues)) return 100;
+  let deduction = 0;
+  for (const issue of issues) {
+    const normalized = normalizeAuditIssue(issue);
+    if (!normalized) continue;
+    if (normalized.severity === "critical") {
+      deduction += AUDIT_SCORE_DEDUCTION.critical;
+    } else if (normalized.severity === "warning") {
+      const issueClass = classifyAuditIssueClass({ category: normalized.text, description: normalized.text });
+      deduction += issueClass === "structural"
+        ? AUDIT_SCORE_DEDUCTION.structuralWarning
+        : AUDIT_SCORE_DEDUCTION.textualWarning;
+    }
+  }
+  return clampAuditScore(100 - deduction);
+}
+
 function describeAuditFailureGate(gate: AuditFailureGate): string | null {
   if (gate === "score") {
     return `失败原因：score gate 未通过（阈值 ${AUDIT_PASS_SCORE_THRESHOLD}/100）。`;
@@ -3020,7 +3056,7 @@ function buildAuditReportText(args: {
     .map((item) => formatAuditIssueText(item));
   const issueCount = args.issueCount > 0 ? args.issueCount : issueTexts.length;
   const severityCounts = args.severityCounts ?? countAuditIssueSeverities(issueTexts);
-  const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+  const score = estimateCanonicalAuditScore(issueTexts);
   const header = args.passed
     ? issueCount > 0
       ? `第${args.chapterNumber}章审计通过，发现${issueCount}项非阻断问题。`
@@ -3446,7 +3482,7 @@ function resolveAdaptiveMaxReviseRounds(
 
 function resolveAdaptiveReviseMode(
   configuredMode: AutoReviseMode,
-  audit: Pick<NormalizedAuditDraftSummary, "issueTexts">,
+  audit: Pick<NormalizedAuditDraftSummary, "issueTexts" | "failureGate">,
   reviseRound: number,
   options?: {
     forceRework?: boolean;
@@ -3456,6 +3492,11 @@ function resolveAdaptiveReviseMode(
   if (options?.forceRework) return "rework";
   if (options?.forceRewrite) return "rewrite";
   if (configuredMode !== "spot-fix") return configuredMode;
+  if (audit.failureGate === "score") {
+    // Score-gated audits still start with the lighter spot-fix pass.
+    if (isLengthOnlyIssueTexts(audit.issueTexts)) return "rewrite";
+    return "spot-fix";
+  }
   if (!hasStructuralAuditTextSignals(audit)) {
     // Pure word-count deficiency: use rewrite (broader than spot-fix but lighter than rework)
     if (isLengthOnlyIssueTexts(audit.issueTexts)) return "rewrite";
@@ -3876,7 +3917,7 @@ function normalizeAuditDraftSummary(
 ): NormalizedAuditDraftSummary {
   const issueTexts = buildAuditIssueTexts(auditResult.issues);
   const severityCounts = countAuditIssueSeveritiesFromIssues(auditResult.issues);
-  const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+  const score = estimateCanonicalAuditScoreFromIssues(auditResult.issues);
   const issueCount = Array.isArray(auditResult.issues) ? auditResult.issues.length : issueTexts.length;
   const summary = typeof auditResult.summary === "string" && auditResult.summary.trim()
     ? auditResult.summary.trim()
@@ -4473,7 +4514,7 @@ function normalizeReviseAuditSummary(
     : (typeof fallbackPassed === "boolean" ? fallbackPassed : issueCount === 0);
   const score = Number.isFinite(Number(payload.score))
     ? clampAuditScore(Number(payload.score))
-    : estimateAuditScoreFromSeverityCounts(severityCounts);
+    : estimateCanonicalAuditScore(issueTexts);
   const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
   const failureGate = resolveAuditFailureGate({
     basePassed,
@@ -4525,7 +4566,7 @@ function normalizeWriteAuditSummary(
   const issueTexts = buildAuditIssueTexts(payload.issues);
   const severityCounts = countAuditIssueSeverities(issueTexts);
   const issueCount = issueTexts.length;
-  const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+  const score = estimateCanonicalAuditScore(issueTexts);
   const basePassed = typeof payload.passed === "boolean" ? payload.passed : issueCount === 0;
   const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
   const failureGate = resolveAuditFailureGate({
@@ -11549,7 +11590,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
                 : [];
               if (chapterIssues.length > 0 || reviseResult.status === "audit-failed" || reviseResult.status === "ready-for-review") {
                 const severityCounts = countAuditIssueSeverities(chapterIssues);
-                const score = estimateAuditScoreFromSeverityCounts(severityCounts);
+                const score = estimateCanonicalAuditScore(chapterIssues);
                 lines.push(`当前审计评分：${score}/100（严重 ${severityCounts.critical} / 警告 ${severityCounts.warning} / 提示 ${severityCounts.info}）`);
                 lines.push(`当前问题数：${chapterIssues.length}`);
               }

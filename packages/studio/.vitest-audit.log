@@ -1,0 +1,227 @@
+
+[1m[46m RUN [49m[22m [36mv3.2.4 [39m[90mF:/InkOSv2/MyInkos/packages/studio[39m
+
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns from /api/daemon/start before the first write cycle finishes
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects book routes with path traversal ids
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mallows reading and updating fixed control truth files
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreflects project edits immediately without restarting the studio server
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreloads latest llm config for doctor checks without restarting the studio server
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-falls back to a non-stream probe in doctor checks when the first transport returns empty
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreloads latest llm config for radar scans without restarting the studio server
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mupdates the first-run language immediately after the language selector saves
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmerges service config patches instead of overwriting existing services
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mpreserves custom service baseUrl when updating only preferredModel
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreports config source and detected env overrides for Studio switching
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mallows switching config source without overwriting services
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22msyncs llm.model when services config updates defaultModel
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns configured service together with defaultModel from services config
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mtests and lists models for custom services using baseUrl and stored config
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-detects a working custom combination when /models is unavailable
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mfalls back to the detected/default model when custom /models is unavailable
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mshort-circuits service probe on 401/403 from /models
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes write-next with explicit service/model through selected runtime model
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-switches reasoner model to a faster writer model for write-next and keeps quick mode disabled by default
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mdoes not trigger a second audit-revise loop in studio route after write-next
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits write:complete with a normalized autoReview payload for write-next route
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mcreates and completes a background book task
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mupdates live word and token counts while a background task is running
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22msupports stopping a running book task
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mresumes a paused book task
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mupdates runtime settings for a paused book task
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects runtime setting changes while a task is running
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mcancels a paused book task immediately when stopped
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mdeletes a paused book task
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects deleting a running book task
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mpauses an in-flight book task during recovery
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mexposes global task list with book titles and summary
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22msurfaces audit revise and save sub-stages for auto-write tasks
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrecords exception logs when task fails
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mretries a failed task
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmoves recoverable failures into retry_waiting when auto retry is enabled
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mtests a single model connectivity with elapsed time
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22muses stored service api key when single model test body omits apiKey
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns auth_failed for single model test on 401
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns auth_failed for single model test on 403
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns unsupported_model for single model test on 404
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns timeout for single model test on timeout errors
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22muses the MiniMax preset provider family during service probe
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22muses the preset models baseUrl when listing Bailian models
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mkeys cached model lists by baseUrl so custom endpoints do not leak stale results
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmerges manual and detected models in hybrid mode
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns manual models only when modelMode=manual
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns detected models only when source=auto is requested
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns stored service secret for detail page rehydration
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects create requests when a complete book with the same id already exists
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreports async create failures through the create-status endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmarks a wizard shell complete without waiting for the create pipeline
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22msyncs wizard volume planning into canonical story outline files on wizard completion
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mlists canonical outline files through the truth browser using normalized artifact names
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mprefers canonical volume_map content over legacy volume_outline in truth browser listings
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mwrites volume outline edits to the canonical outline path while keeping legacy compatibility
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mhydrates volume outline from wizard volume markdown when no story outline exists yet
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes standalone audit through pipeline auditDraft
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mkeeps standalone audit endpoint available when chapter index is missing
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-revises up to three rounds when standalone audit keeps failing
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mescalates structural stagnation with stronger override issues and stop reason
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrespects configurable stagnation threshold before forcing rewrite escalation
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-revises once and exits when second-round audit passes
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mtreats low-score audit as failed and enters auto-revise even when passed=true
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mskips auto revise when autoReview.enabled is false
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mdisables unified review loop when INKOS_UNIFIED_REVIEW_LOOP=false
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns default review metrics payload in analytics endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22maggregates review metrics and buckets by entry in analytics endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns normalized chapter word count in chapter detail endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mself-heals stale chapter index wordCount when opening chapter detail
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22msyncs chapter index wordCount when manually saving chapter content
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22muses book.json targetChapters for precheck generation truncation
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mignores volume outline chapter counts when book.json has a different limit
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mflags existing chapter content as a generation conflict during precheck
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects manual chapter-plan edits when the chapter already has content
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects AI chapter-plan optimization when the chapter already has content
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmarks chapter plans as approved and clears review state when approving
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects chapter approval when latest audit score is below 80
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mappends manual chapter-plan edits to history
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mappends ai chapter-plan edits to history
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mappends generated chapter plans to history
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mappends backfilled chapter plans to history
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mincludes action labels in chapter-plan history responses
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22muses rollback semantics for chapter rejection instead of only flipping status
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mbackfills existing planned chapters from chapter content instead of skipping them
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mbackfills missing chapter plans when endChapter is omitted
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes create requests through the shared structured interaction runtime
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mpasses one-off brief into revise requests through pipeline config
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22muses non-destructive rewrite execution for /api/v1/books/:id/rewrite/:chapter by default
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns destructive rewrite risk summary for /api/v1/books/:id/rewrite/:chapter
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mblocks destructive rewrite endpoint unless advanced mode is enabled
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits rewrite:error when non-destructive rewrite endpoint fails
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits rewrite:error when non-destructive rewrite causes downstream consistency regression
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mexposes a resync endpoint for rebuilding latest chapter truth artifacts
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mbuilds a default script workspace from selected chapter content
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mbuilds script workspace by episode when the strategy merges chapters
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mpersists a saved script workspace under story state
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mregenerates script workspace using request-time duration and prompt config
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mprefers llm-generated script workspace when the model returns valid structured json
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreads and persists task checklist template selection
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mderives production workspace from script workspace when no production state exists
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mgenerates and persists production workspace storyboard state
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mderives director plan from production workspace when no director-plan state exists
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mstores director plan history, returns diffs, and supports rollback
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mgenerates and persists asset library from production workspace
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mstores asset library history, returns diffs, and supports rollback
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22muploads asset library thumbnail and source file, then serves preview content
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mstores script workspace history and returns version diffs
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrolls back script workspace to a previous version and appends rollback history
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes export-save through the shared structured interaction runtime
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mopens exported files only from the project root
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mcreates a fresh book session on POST /api/v1/sessions
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns session:null for missing GET /api/v1/sessions/:sessionId
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrenames a session through PUT /api/v1/sessions/:sessionId
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mdeletes a session through DELETE /api/v1/sessions/:sessionId
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes /api/agent through runAgentSession and returns response + sessionId
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mpersists incremental streaming checkpoints with upserted assistant state
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-switches reasoner model for write-intent agent calls and enables quick pipeline defaults
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mdoes not route wizard-step agent requests into chapter persistence repair even if the prompt mentions chapter missing text
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-switches default reasoner model for write-intent agent calls without explicit model selection
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes exact batch write command through deterministic pipeline execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes shorthand Chinese batch write command (写N章) through deterministic pipeline execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes target chapter command (写第N章) through deterministic writer execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes target chapter command with bare Chinese form (写17章) through deterministic writer execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes audit chapter command through deterministic auditor execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes bare audit command to latest chapter through deterministic auditor execution
+ [31m×[39m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mformats deterministic audit report with score and severity-grouped issue sections[33m 525[2mms[22m[39m
+[31m   → expected 500 to be 200 // Object.is equality[39m
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-enters revise and exits after passing on second audit in deterministic /agent flow
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns 404 when deterministic /agent audit reports missing chapter
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmaps deterministic /agent audit upstream 410(no body) to AGENT_UPSTREAM_ERROR 502
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits revise:start and revise:complete during deterministic audit auto-review loop
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mescalates unchanged auto revision to rework on the next round
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmarks deterministic audit tool:end as error when final audit still fails
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes audit+revise chapter command through deterministic reviser execution with real chapter filename
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mincludes attempted fixes and current audit score when revise result is unchanged
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mprefers structured audit from revise result when composing deterministic revise response
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits audit:complete for write-next, revise and rewrite deterministic commands
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits write-target entry for deterministic 写第N章 audit events
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrepairs missing index instead of writing next chapter when 写第N章 targets an existing chapter file
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes rewrite chapter command through deterministic writer execution with rollback
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mkeeps destructive rewrite disabled by default for non-advanced users
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes default rewrite chapter command through deterministic non-destructive revise execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes Chinese numeral rewrite command through deterministic non-destructive rewrite auto-review loop
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mdoes not emit rollback/discarded logs for default non-destructive rewrite
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mfails non-destructive rewrite when downstream index/files/snapshots regress
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mfails non-destructive rewrite batch when downstream chapters regress
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits per-chapter audit:complete during non-destructive rewrite batch and includes audit summaries on rewrite:complete
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits round-level audit/revise events for non-destructive rewrite endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits consistent terminal autoReview state fields across write-next/write-target/rewrite entries
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22maudits impacted chapters in batch and clears rewrite-impact review notes
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mupdates chapter title via chapter meta patch without changing chapter number
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects blank chapter titles via chapter meta patch
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_REWRITE_SNAPSHOT_MISSING when rollback snapshot is unavailable
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrepairs missing rollback snapshot and continues deterministic rewrite
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes rewrite chapter range command through deterministic writer execution with batch progress semantics
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits batch:progress started/progress/completed during deterministic rewrite batch execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits chapter:delta during deterministic rewrite execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreplays persisted chapter content as chapter:delta when deterministic target write has no live writer delta
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreplays persisted chapter content as chapter:delta for default non-destructive rewrite when no reviser delta is streamed
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits chapter:delta patch preview during deterministic spot-fix revise execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits thinking:start/delta/end with metadata during deterministic rewrite execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits thinking:start/delta/end with metadata during deterministic target chapter write
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits tool:update, chapter:delta and batch:progress with sessionId/runId payloads
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits log events with run/chapter context prefixes for writer progress
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22memits synthetic draft:delta when upstream returns response text without text deltas
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mroutes wizard world-step agent requests to draft generation instead of summary chat
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_WRITE_NOT_EXECUTED when write intent does not call writer tool
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrepairs missing chapter index deterministically for persistence-repair command
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_TOOL_CALL_BLOCKED when model emits blocked tool-call marker without execution
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_WRITE_NOT_PERSISTED when writer succeeds but no chapter index is added
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_WRITE_NOT_PERSISTED when deterministic rewrite does not persist chapter artifacts
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_WRITE_NOT_PERSISTED when deterministic rewrite batch does not persist chapter artifacts
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_WRITE_DEGRADED with recovery details for deterministic write-next
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_WRITE_DEGRADED when deterministic rewrite settles chapter as state-degraded
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns AGENT_WRITE_DEGRADED when deterministic rewrite batch hits a state-degraded chapter
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmaps state-degraded precondition errors to AGENT_WRITE_DEGRADED for deterministic rewrite
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mauto-repairs missing chapter index from disk and emits persist telemetry events
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mkeeps chapter file and chapter index visible after chat write-next command
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mallows /api/agent to use explicit service+model when Studio config has no defaultModel
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns 500 with an error payload when the agent session fails
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mmaps non-deterministic /agent upstream 410(no body) to AGENT_UPSTREAM_ERROR 502
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mprobes the upstream when the agent returns empty text and surfaces the real error
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mfalls back to plain chat when the tool-agent returns empty text
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mexposes /api/v1/agent/stop and returns stopped=false when no run is active
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mexposes /api/v1/agent/status and returns running=false when no run is active
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mexposes /api/v1/agent/status and returns running=true for active run
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mrejects /api/v1/agent requests without sessionId
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns the shared interaction session state
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns creation-draft state through the shared interaction session endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mposts structured interaction requests through the shared interaction session endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns wizard draftRaw details through the shared interaction session endpoint
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mtreats legacy books without wizard state as already completed
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mposts retreat wizard requests through the shared interaction session endpoint without streaming
+ [2m[90m↓[39m[22m src/api/server.test.ts[2m > [22mcreateStudioServer daemon lifecycle[2m > [22mreturns structured 409 errors for blocked wizard control requests
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/api/server.test.ts > createStudioServer daemon lifecycle > formats deterministic audit report with score and severity-grouped issue sections
+AssertionError: expected 500 to be 200 // Object.is equality
+
+- Expected
++ Received
+
+- 200
++ 500
+
+ ❯ src/api/server.test.ts:7858:29
+    7856|     });
+    7857| 
+    7858|     expect(response.status).toBe(200);
+       |                             ^
+    7859|     const payload = await response.json();
+    7860|     const report = String((payload as { response?: unknown }).response…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+[2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[33m194 skipped[39m[90m (195)[39m
+[2m   Start at [22m 23:38:27
+[2m   Duration [22m 1.38s[2m (transform 699ms, setup 0ms, collect 401ms, tests 526ms, environment 0ms, prepare 145ms)[22m
+

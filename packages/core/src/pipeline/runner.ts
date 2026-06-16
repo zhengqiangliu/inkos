@@ -2086,13 +2086,14 @@ export class PipelineRunner {
       const deltaRevisionClaims = reviseOutput.fixedIssues.length > 0
         ? reviseOutput.fixedIssues
         : undefined;
-      // Focused re-audit: for bounded-edit modes (spot-fix/polish) the reviser
-      // only touches the flagged region, so re-scanning all 38 dimensions mostly
-      // surfaces unrelated fresh warnings. Restrict the re-audit to the previously
-      // failed dimensions plus the always-active ones (32/33/38). For rework/rewrite
-      // the edit is broad, so keep the full scan to catch regressions elsewhere.
-      const useFocusedReaudit = (mode === "spot-fix" || mode === "polish")
-        && deltaPreviousIssues.length > 0;
+      // Focused re-audit: for bounded-edit modes (spot-fix/polish) always use
+      // focused re-audit since the reviser only touches the flagged region.
+      // For rework/rewrite on round 2+ (signaled by unresolvedIssueIdsFromPrevRound),
+      // also use focused re-audit to prevent fresh unrelated warnings from stalling
+      // convergence — the first rework round already ran a full scan.
+      const isSecondRoundOrLater = (options?.reviseContext?.unresolvedIssueIdsFromPrevRound?.length ?? 0) > 0;
+      const useFocusedReaudit = deltaPreviousIssues.length > 0
+        && ((mode === "spot-fix" || mode === "polish") || isSecondRoundOrLater);
       const postRevision = await this.evaluateMergedAudit({
         auditor,
         book,
@@ -2146,16 +2147,16 @@ export class PipelineRunner {
         lengthWarning: lengthWarnings.length > 0,
       });
 
-      const improvedBlocking = effectivePostRevision.blockingCount < preRevision.blockingCount;
-      const improvedAITells = effectivePostRevision.aiTellCount < preRevision.aiTellCount;
-      const blockingDidNotWorsen = effectivePostRevision.blockingCount <= preRevision.blockingCount;
       const criticalDidNotWorsen = effectivePostRevision.criticalCount <= preRevision.criticalCount;
-      const aiDidNotWorsen = effectivePostRevision.aiTellCount <= preRevision.aiTellCount;
+      // B: 放松 apply gate —— 不再要求每个维度都不变差，改为「critical 不增加 + 总问题数（blocking+AI痕迹）净不增加」。
+      // 这样修复多个问题但引入 1 个新 warning 的净改善修订不再被整体丢弃，降低 noop 比例。
+      const preTotalIssueCount = preRevision.blockingCount + preRevision.aiTellCount;
+      const postTotalIssueCount = effectivePostRevision.blockingCount + effectivePostRevision.aiTellCount;
+      const netIssueDidNotWorsen = postTotalIssueCount <= preTotalIssueCount;
       const hasMeaningfulContentChange = normalizedRevision.content.trim() !== content.trim();
       const nonWorseningRevision = hasMeaningfulContentChange
-        && blockingDidNotWorsen
         && criticalDidNotWorsen
-        && aiDidNotWorsen;
+        && netIssueDidNotWorsen;
       const shouldApplyRevision = nonWorseningRevision;
 
       if (!shouldApplyRevision) {
