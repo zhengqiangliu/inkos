@@ -1168,8 +1168,8 @@ export function BookCreate({ nav, theme, t, draftSessionId, resumeBookId }: { na
       setIntroBodySource("generated");
     } else {
       setStatus(projectLang === "zh"
-        ? "简介正文已返回，但未识别到足够完整的正文内容，已保留当前编辑内容。"
-        : "Intro content came back, but it was not complete enough to be treated as body text, so the current editor content was kept.");
+        ? "Agent 未生成有效正文，已保留当前编辑内容，请补充卖点/题材后重试。"
+        : "The agent did not produce valid body text, so the current editor content was kept. Add a hook/genre and retry.");
     }
     setDraft(savedDraft);
     if (savedDraft.title?.trim()) {
@@ -1271,7 +1271,7 @@ export function BookCreate({ nav, theme, t, draftSessionId, resumeBookId }: { na
           response?.details?.creationDraft?.draftFields?.introMarkdown,
         ]);
         if (!canonicalIntro || !hasMeaningfulIntroMarkdown(canonicalIntro)) {
-          setError(projectLang === "zh" ? "简介生成成功，但未返回可保存的 Markdown 正文，请重试。" : "Intro generation completed but did not return savable Markdown body. Please retry.");
+          setError(projectLang === "zh" ? "Agent 未生成有效正文（多次重试后仍为空或仅有框架），请补充卖点/题材后重试。" : "The agent did not produce valid body text (still empty or skeleton-only after retries). Add a hook/genre and retry.");
           return;
         }
         const saved = await saveWizardStepToFile(resolvedBookId, "intro", canonicalIntro);

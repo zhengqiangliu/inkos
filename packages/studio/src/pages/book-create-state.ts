@@ -878,6 +878,9 @@ function scoreIntroMarkdownCandidate(content: string): number {
       && !/^(题材|平台|主题)[:：]/.test(line),
     );
   const substantiveCount = concreteLines.filter((line) => line.length >= 8).length;
+  if (substantiveCount === 0) {
+    return Number.NEGATIVE_INFINITY;
+  }
   const placeholderCount = trimmed
     .split(/\r?\n/)
     .map((line) => line.trim())

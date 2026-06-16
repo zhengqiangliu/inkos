@@ -407,6 +407,10 @@ function scoreIntroMarkdownBody(content: string): number {
       && !/^(题材|平台|主题)[:：]/.test(line),
     );
   const substantiveCount = concreteLines.filter((line) => line.length >= 8).length;
+  if (substantiveCount === 0) {
+    // 纯占位骨架（只有标题和 "-"）没有任何实质正文，永不当作有效候选。
+    return Number.NEGATIVE_INFINITY;
+  }
   const placeholderCount = trimmed
     .split(/\r?\n/)
     .map((line) => line.trim())

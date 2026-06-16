@@ -732,7 +732,9 @@ const INTRO_REVISION_SYSTEM_PROMPT = [
   "你只处理简介页，不要把内容扩写到世界观、角色矩阵、卷纲或章节大纲。",
   "如果用户要求按题材生成，要优先遵守题材约束。",
   "如果用户要求修改或润色，要在保留原意的基础上优化表达和钩子。",
-  "必须输出结构化字段，至少返回 blurb、storyBackground、introMarkdown 之一。",
+  "你只能输出一篇完整的 Markdown 正文，使用 ## 段落标题组织内容。",
+  "禁止输出 title、blurb、storyBackground、introMarkdown 之类的字段标签或结构化前缀。",
+  "每个段落都必须写出有信息量的实质正文，不能用占位符“-”“…”或空标题敷衍。",
   "不要反问用户确认参数；如果信息足够，直接生成完整正文或直接修改正文。",
 ].join(" ");
 
@@ -1084,47 +1086,74 @@ async function runIntroRevisionTool(params: {
   for (const line of thinkingLead) {
     params.onThinkingDelta?.(line);
   }
-  const emitDraftDelta = createIntroRevisionStreamNormalizer();
-  let streamedDraft = "";
+  const baseUserPrompt = buildIntroRevisionPrompt({
+    mode: revisionKind,
+    userMessage: input,
+    existingDraft,
+    genreContext,
+    writingLanguage,
+    targetChapters,
+    chapterWordCount,
+  });
 
-  const result = await chatCompletion(
-    pipeline.config.client,
-    pipeline.config.model,
-    [
-      { role: "system", content: [INTRO_REVISION_SYSTEM_PROMPT, "你只能输出完整正文，不要输出工具调用，不要输出解释说明。"].join(" ") },
-      { role: "user", content: buildIntroRevisionPrompt({
-        mode: revisionKind,
-        userMessage: input,
-        existingDraft,
-        genreContext,
-        writingLanguage,
-        targetChapters,
-        chapterWordCount,
-      }) },
-    ],
-    {
-      temperature: revisionKind === "polish" ? 0.25 : 0.35,
-      onTextDelta: (text) => {
-        const normalizedChunk = emitDraftDelta(text);
-        if (normalizedChunk) {
-          streamedDraft += normalizedChunk;
-          params.onDraftDelta?.(normalizedChunk);
-          params.onDraftRawDelta?.(normalizedChunk);
-        }
+  const attemptIntroGeneration = async (
+    reinforce: string | undefined,
+    stream: boolean,
+  ): Promise<string> => {
+    const emitDraftDelta = createIntroRevisionStreamNormalizer();
+    let streamedDraft = "";
+    const result = await chatCompletion(
+      pipeline.config!.client!,
+      pipeline.config!.model!,
+      [
+        { role: "system", content: [INTRO_REVISION_SYSTEM_PROMPT, "你只能输出完整正文，不要输出工具调用，不要输出解释说明。"].join(" ") },
+        { role: "user", content: reinforce ? `${baseUserPrompt}\n\n${reinforce}` : baseUserPrompt },
+      ],
+      {
+        temperature: revisionKind === "polish" ? 0.25 : 0.35,
+        onTextDelta: stream
+          ? (text) => {
+              const normalizedChunk = emitDraftDelta(text);
+              if (normalizedChunk) {
+                streamedDraft += normalizedChunk;
+                params.onDraftDelta?.(normalizedChunk);
+                params.onDraftRawDelta?.(normalizedChunk);
+              }
+            }
+          : undefined,
       },
-    },
-  );
+    );
+    const rawDraft = result.content.trim();
+    return stripLeadingBookTitleHeading(
+      pickBestIntroMarkdownCandidate([
+        stream ? normalizeIntroRevisionOutput(streamedDraft) : undefined,
+        normalizeIntroRevisionOutput(rawDraft),
+        rawDraft,
+      ]),
+      extractIntroTitleFromMarkdown(rawDraft) ?? existingDraft?.title,
+    );
+  };
 
-  const rawDraft = result.content.trim();
-  const normalizedStreamDraft = normalizeIntroRevisionOutput(streamedDraft);
-  const normalizedDraft = stripLeadingBookTitleHeading(
-    pickBestIntroMarkdownCandidate([
-      normalizedStreamDraft,
-      normalizeIntroRevisionOutput(rawDraft),
-      rawDraft,
-    ]),
-    extractIntroTitleFromMarkdown(rawDraft) ?? existingDraft?.title,
-  );
+  const RETRY_REINFORCEMENT = [
+    "上一次输出不是合格的简介正文（出现了字段标签、占位符“-”，或段落正文为空）。",
+    "请重新输出：必须是一篇完整的 Markdown 正文，包含 一句话卖点、故事概述、故事走向、主要人物成长路径、核心冲突、核心价值观 六个 ## 段落。",
+    "每个段落都要写出有信息量的实质内容，禁止任何字段标签、结构化前缀或占位符。",
+  ].join("\n");
+
+  const candidates: string[] = [];
+  let normalizedDraft = "";
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const stream = attempt === 0;
+    const candidate = await attemptIntroGeneration(attempt === 0 ? undefined : RETRY_REINFORCEMENT, stream);
+    if (candidate) candidates.push(candidate);
+    if (candidate && hasMeaningfulIntroMarkdown(candidate)) {
+      normalizedDraft = candidate;
+      break;
+    }
+  }
+  if (!normalizedDraft) {
+    normalizedDraft = pickBestIntroMarkdownCandidate(candidates);
+  }
   const parsedIntro = parseIntroMarkdownDraft(normalizedDraft);
   const parsedTitle = extractIntroTitleFromMarkdown(normalizedDraft) ?? existingDraft?.title?.trim();
   const normalizedArgs: Record<string, string> = {};
@@ -1136,25 +1165,26 @@ async function runIntroRevisionTool(params: {
   if (!normalizedArgs.title && existingDraft?.title?.trim()) {
     normalizedArgs.title = existingDraft.title.trim();
   }
-  if (!normalizedArgs.introMarkdown) {
-    const introSummary = [
-      normalizedArgs.blurb || existingDraft?.blurb,
-      normalizedArgs.storyBackground || existingDraft?.storyBackground,
-      normalizedArgs.title || existingDraft?.title ? `书名：${normalizedArgs.title || existingDraft?.title}` : undefined,
-      existingDraft?.genreAlias ? `题材别名：${existingDraft.genreAlias}` : undefined,
-    ].filter((item): item is string => Boolean(item));
-    normalizedArgs.introMarkdown = buildIntroBodyMarkdown({
-      title: normalizedArgs.title || existingDraft?.title,
-      genre: themeGenre ?? existingDraft?.genre,
-      platform: existingDraft?.platform,
-      theme: existingDraft?.genreAlias ?? themeGenre ?? existingDraft?.genre,
-      blurb: normalizedArgs.blurb || existingDraft?.blurb,
-      storyBackground: normalizedArgs.storyBackground || existingDraft?.storyBackground,
-      plotDirection: introSummary.join("；"),
-      characterGrowth: existingDraft?.characterArc,
-      coreConflict: existingDraft?.conflictCore,
-      coreValue: existingDraft?.constraints,
-    });
+
+  const introIsMeaningful = Boolean(normalizedArgs.introMarkdown)
+    && hasMeaningfulIntroMarkdown(normalizedArgs.introMarkdown);
+  if (!introIsMeaningful) {
+    // 不再用空骨架兜底：Agent 没产出合格正文就如实失败，保留既有草案，让前端提示重试。
+    const preservedDraft = applyFieldsToDraft(
+      existingDraft,
+      normalizedArgs.title ? { title: normalizedArgs.title } : {},
+      concept,
+    );
+    return {
+      draft: {
+        ...preservedDraft,
+        draftFields: existingDraft?.draftFields,
+        readyToCreate: false,
+      },
+      responseText: "Agent 未生成合格的简介正文（多次重试后仍为空或仅有框架），请补充卖点/题材后重试。",
+      fieldsUpdated: normalizedArgs.title ? ["title"] : [],
+      draftRaw: "",
+    };
   }
 
   const draft = applyFieldsToDraft(existingDraft, normalizedArgs, concept);
