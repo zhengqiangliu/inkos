@@ -805,6 +805,7 @@ export async function runChapterReviewCycle(params: {
     found: ReadonlyArray<{ severity: string }>;
     issues: ReadonlyArray<AuditIssue>;
   };
+  readonly analyzeSupplementalIssues?: (chapterContent: string) => Promise<ReadonlyArray<AuditIssue>>;
   readonly preflightSignals?: ReadonlyArray<{
     readonly code: string;
     readonly severity: "warning" | "info";
@@ -980,11 +981,14 @@ export async function runChapterReviewCycle(params: {
   totalUsage = params.addUsage(totalUsage, llmAudit.tokenUsage);
   const aiTellsInitial = params.analyzeAITells(finalContent);
   const sensitiveWriteResult = params.analyzeSensitiveWords(finalContent);
+  const supplementalIssuesInitial = params.analyzeSupplementalIssues
+    ? await params.analyzeSupplementalIssues(finalContent)
+    : [];
   const hasBlockedWriteWords = sensitiveWriteResult.found.some((item) => item.severity === "block");
   let previousAITellCount = countBlockingAITellIssues(aiTellsInitial.issues);
   let auditResult: AuditResult = {
     passed: hasBlockedWriteWords ? false : llmAudit.passed,
-    issues: [...llmAudit.issues, ...aiTellsInitial.issues, ...sensitiveWriteResult.issues],
+    issues: [...llmAudit.issues, ...aiTellsInitial.issues, ...sensitiveWriteResult.issues, ...supplementalIssuesInitial],
     summary: llmAudit.summary,
   };
   {
@@ -1234,7 +1238,6 @@ export async function runChapterReviewCycle(params: {
         : { temperature: 0, ...(params.onThinkingDelta || params.onThinkingEnd ? { onThinkingDelta: params.onThinkingDelta, onThinkingEnd: params.onThinkingEnd } : {}), previousAuditIssues: priorRoundIssues, revisionClaims: reviseOutput.fixedIssues.length > 0 ? reviseOutput.fixedIssues : undefined, ...(reAuditTruthOverrides ? { truthFileOverrides: reAuditTruthOverrides } : {}) },
     );
     totalUsage = params.addUsage(totalUsage, reAudit.tokenUsage);
-    const reAuditReturnedNoIssues = Array.isArray(reAudit.issues) && reAudit.issues.length === 0;
     const reAITells = params.analyzeAITells(finalContent);
     // Only inject AI-tell issues on re-audit if the count worsened, to prevent
     // the reviser from being penalized by the same or diminishing AI markers
@@ -1247,10 +1250,15 @@ export async function runChapterReviewCycle(params: {
     previousAITellCount = reAITellCount;
     const reSensitive = params.analyzeSensitiveWords(finalContent);
     const reHasBlocked = reSensitive.found.some((item) => item.severity === "block");
+    const supplementalIssues = params.analyzeSupplementalIssues
+      ? await params.analyzeSupplementalIssues(finalContent)
+      : [];
+    const rawRoundIssues = [...reAudit.issues, ...aiTellIssuesForRound, ...reSensitive.issues, ...supplementalIssues];
+    const reAuditReturnedNoIssues = !hasBlockingIssues(rawRoundIssues);
     const previousAuditResult = auditResult;
     auditResult = params.restoreLostAuditIssues(auditResult, {
       passed: reHasBlocked ? false : reAudit.passed,
-      issues: [...reAudit.issues, ...aiTellIssuesForRound, ...reSensitive.issues],
+      issues: rawRoundIssues,
       summary: reAudit.summary,
     });
     auditResult = applyLengthGateToAuditResult({

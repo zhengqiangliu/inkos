@@ -4,6 +4,7 @@ import {
   buildChatGuide,
   buildChatQuickTemplates,
   buildConceptSplitSummary,
+  buildCreationDraftSummary,
   buildCreationReviewChecklist,
   buildIntroCandidateBackfill,
   buildHardParamsSummary,
@@ -17,6 +18,7 @@ import {
   parseIntroCandidateResponse,
   parseLatestIntroCandidates,
   normalizeIntroCandidateMessageForDisplay,
+  mergeWizardStepContentIntoDraft,
   rankIntroCandidates,
   buildStepFocusCard,
   buildStepActionSections,
@@ -24,7 +26,9 @@ import {
   buildStepShortcuts,
   buildWizardValidationReports,
   resolveInitialGenreSelection,
+  resolveIntroGenerationState,
   selectBookCreateDockMessages,
+  shouldAutoSyncVisibleWizardStep,
   shouldSubmitChatOnKeyDown,
   waitForBookReady,
 } from "./BookCreate";
@@ -184,6 +188,57 @@ describe("buildCreationReviewChecklist", () => {
     expect(checklist[2]?.done).toBe(false);
     expect(checklist[2]?.target.kind).toBe("step");
     expect(checklist[2]?.target.kind === "step" ? checklist[2]?.target.step : undefined).toBe("world");
+  });
+});
+
+describe("resolveIntroGenerationState", () => {
+  it("treats a fresh intro stream without assistant draft text as thinking", () => {
+    expect(resolveIntroGenerationState({
+      isStreaming: true,
+      currentWizardStep: "intro",
+      messages: [
+        { role: "user", content: "旧请求", wizardStep: "intro", timestamp: 1 },
+        { role: "assistant", content: "旧正文", wizardStep: "intro", timestamp: 2 },
+        { role: "user", content: "新请求", wizardStep: "intro", timestamp: 3 },
+      ],
+    } as any)).toEqual({
+      active: true,
+      phase: "thinking",
+    });
+  });
+
+  it("switches to drafting once the current intro stream has emitted text", () => {
+    expect(resolveIntroGenerationState({
+      isStreaming: true,
+      currentWizardStep: "intro",
+      messages: [
+        { role: "user", content: "生成简介", wizardStep: "intro", timestamp: 1 },
+        {
+          role: "assistant",
+          content: "",
+          wizardStep: "intro",
+          timestamp: 2,
+          parts: [
+            { type: "thinking", content: "先想", streaming: false },
+            { type: "text", content: "正文开始输出" },
+          ],
+        },
+      ],
+    } as any)).toEqual({
+      active: true,
+      phase: "drafting",
+    });
+  });
+
+  it("falls back to idle when the current stream is not intro", () => {
+    expect(resolveIntroGenerationState({
+      isStreaming: true,
+      currentWizardStep: "world",
+      messages: [],
+    } as any)).toEqual({
+      active: false,
+      phase: "idle",
+    });
   });
 });
 
@@ -464,6 +519,87 @@ reason: 适合强悬念开局
         storyBackground: "背景 B",
       },
     ]);
+  });
+});
+
+describe("shouldAutoSyncVisibleWizardStep", () => {
+  const wizardStepOrder = new Map([
+    ["intro", 0],
+    ["world", 1],
+    ["outline", 2],
+    ["volume", 3],
+    ["characters", 4],
+    ["arc", 5],
+    ["relation", 6],
+  ] as const);
+
+  it("does not force the visible step back to a later server step after the user manually pinned another page", () => {
+    expect(shouldAutoSyncVisibleWizardStep({
+      userPinnedWizardStep: true,
+      visibleStep: "world",
+      serverStep: "relation",
+      wizardStepOrder: wizardStepOrder as any,
+    })).toBe(false);
+  });
+
+  it("still auto-advances when the user has not pinned a visible page", () => {
+    expect(shouldAutoSyncVisibleWizardStep({
+      userPinnedWizardStep: false,
+      visibleStep: "world",
+      serverStep: "relation",
+      wizardStepOrder: wizardStepOrder as any,
+    })).toBe(true);
+  });
+});
+
+describe("mergeWizardStepContentIntoDraft", () => {
+  it("parses structured world markdown back into draft fields", () => {
+    expect(mergeWizardStepContentIntoDraft("world", `## 世界观
+近未来港口城由多股资本与地下账本共同支配。
+
+## 补充设定
+账本不是实物，而是一套分布式黑账网络。`, {})).toMatchObject({
+      worldPremise: "近未来港口城由多股资本与地下账本共同支配。",
+      settingNotes: "账本不是实物，而是一套分布式黑账网络。",
+    });
+  });
+
+  it("parses character page markdown back into distinct draft fields", () => {
+    expect(mergeWizardStepContentIntoDraft("characters", `主角：林砚，表面是洗白顾问，实则被旧债追索。
+
+配角：陆沉负责逼迫主角站队，秦鸢掌握账本入口。
+
+角色矩阵：林砚负责破局，陆沉负责施压，秦鸢负责制造信息差。`, {})).toMatchObject({
+      protagonist: "林砚，表面是洗白顾问，实则被旧债追索。",
+      supportingCast: "陆沉负责逼迫主角站队，秦鸢掌握账本入口。",
+      characterMatrix: "林砚负责破局，陆沉负责施压，秦鸢负责制造信息差。",
+    });
+  });
+});
+
+describe("buildCreationDraftSummary", () => {
+  it("includes platform, target size, setting notes, and supporting cast", () => {
+    expect(buildCreationDraftSummary({
+      concept: "港风商战悬疑",
+      title: "夜港账本",
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      storyBackground: "港城、账本、灰产洗白。",
+      worldPremise: "港口商战和地下账本交织。",
+      settingNotes: "账本网络决定势力分层。",
+      protagonist: "林砚",
+      supportingCast: "陆沉、秦鸢",
+      missingFields: [],
+      readyToCreate: false,
+    } as any, "zh")).toEqual(expect.arrayContaining([
+      { key: "platform", label: "平台", value: "tomato" },
+      { key: "targetChapters", label: "目标章数", value: "120" },
+      { key: "chapterWordCount", label: "每章字数", value: "2800" },
+      { key: "settingNotes", label: "补充设定", value: "账本网络决定势力分层。" },
+      { key: "supportingCast", label: "配角", value: "陆沉、秦鸢" },
+    ]));
   });
 });
 

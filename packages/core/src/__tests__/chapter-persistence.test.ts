@@ -199,4 +199,45 @@ describe("persistChapterArtifacts", () => {
     expect(savedIndex[0].createdAt).toBe("2026-01-01T00:00:00.000Z");
     expect(savedIndex[0].updatedAt).toBe("2026-04-01T00:00:00.000Z");
   });
+
+  it("stores audit history score using structural/textual weighted deductions", async () => {
+    const saveChapterIndex = vi.fn().mockResolvedValue(undefined);
+
+    await persistChapterArtifacts({
+      chapterNumber: 2,
+      chapterTitle: "Weighted Score",
+      status: "audit-failed",
+      auditResult: createAuditResult({
+        passed: false,
+        issues: [
+          createIssue({
+            category: "伏笔债务",
+            description: "旧伏笔没有推进。",
+          }),
+          createIssue({
+            category: "paragraph-shape",
+            description: "段落被切得过碎。",
+          }),
+        ],
+        summary: "needs review",
+      }),
+      finalWordCount: 666,
+      lengthWarnings: [],
+      degradedIssues: [],
+      tokenUsage: ZERO_USAGE,
+      loadChapterIndex: async () => [] satisfies ReadonlyArray<ChapterMeta>,
+      saveChapter: vi.fn().mockResolvedValue(undefined),
+      saveTruthFiles: vi.fn().mockResolvedValue(undefined),
+      saveChapterIndex,
+      markBookActiveIfNeeded: vi.fn().mockResolvedValue(undefined),
+      persistAuditDriftGuidance: vi.fn().mockResolvedValue(undefined),
+      snapshotState: vi.fn().mockResolvedValue(undefined),
+      syncCurrentStateFactHistory: vi.fn().mockResolvedValue(undefined),
+      logSnapshotStage: vi.fn(),
+      now: () => "2026-04-01T00:00:00.000Z",
+    });
+
+    const savedIndex = saveChapterIndex.mock.calls[0]?.[0] as ChapterMeta[];
+    expect(savedIndex[0]?.auditHistory?.[0]?.score).toBe(87);
+  });
 });

@@ -208,10 +208,12 @@ export function routeNaturalLanguageIntent(
   const introCommand = trimmed.match(/^\/intro(?:\s+([\s\S]+))?$/i);
   if (introCommand) {
     const payload = introCommand[1]?.trim() ?? "";
+    const explicitInstruction = readParam(payload, "instruction");
+    const instruction = explicitInstruction !== undefined ? explicitInstruction : payload;
     return {
       intent: "revise_book_intro",
       ...(bookId ? { bookId } : {}),
-      instruction: trimmed,
+      instruction,
       revisionKind: (readParam(payload, "mode") as "generate" | "revise" | "polish" | undefined) ?? "generate",
       ...(readParam(payload, "theme") ? { themeGenre: readParam(payload, "theme") } : {}),
       ...(readParam(payload, "genre") ? { genre: readParam(payload, "genre") } : {}),
@@ -220,6 +222,9 @@ export function routeNaturalLanguageIntent(
       ...(readParam(payload, "genreSource") ? { genreSource: readParam(payload, "genreSource") as "builtin" | "project" | "custom" } : {}),
       ...(readParam(payload, "title") ? { title: readParam(payload, "title") } : {}),
       ...(readParam(payload, "platform") ? { platform: readParam(payload, "platform") } : {}),
+      ...(readParam(payload, "language") ? { language: readParam(payload, "language") as "zh" | "en" } : {}),
+      ...(readParam(payload, "targetChapters") ? { targetChapters: parsePositiveInteger(readParam(payload, "targetChapters") ?? "") } : {}),
+      ...(readParam(payload, "chapterWordCount") ? { chapterWordCount: parsePositiveInteger(readParam(payload, "chapterWordCount") ?? "") } : {}),
       ...(readParam(payload, "blurb") ? { blurb: readParam(payload, "blurb") } : {}),
       ...(readParam(payload, "storyBackground") ? { storyBackground: readParam(payload, "storyBackground") } : {}),
     };

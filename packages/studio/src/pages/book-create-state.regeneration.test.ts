@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildWizardStepRegenerationInstruction,
   hasMeaningfulIntroMarkdown,
+  looksLikeWizardStepMarkdown,
+  normalizeIntroMarkdownCandidate,
   pickBestIntroMarkdownCandidate,
+  stripWizardPreamble,
 } from "./book-create-state";
 
 const SKELETON_INTRO = [
@@ -60,10 +63,28 @@ describe("intro skeleton rejection", () => {
   });
 
   it("never selects the skeleton over substantive body text", () => {
-    expect(pickBestIntroMarkdownCandidate([SKELETON_INTRO, REAL_INTRO])).toBe(REAL_INTRO);
+    expect(pickBestIntroMarkdownCandidate([SKELETON_INTRO, REAL_INTRO])).toBe(normalizeIntroMarkdownCandidate(REAL_INTRO));
   });
 
   it("does not promote a skeleton even when it is the only candidate", () => {
     expect(pickBestIntroMarkdownCandidate([SKELETON_INTRO])).toBe("");
+  });
+});
+
+describe("wizard preamble stripping", () => {
+  it("keeps valid volume markdown after removing leading explanation text", () => {
+    const raw = [
+      "我先重写卷纲页正文，并保持其他页面不变。",
+      "",
+      "# 卷纲规划",
+      "",
+      "## 第一卷（1-40章）",
+      "- 核心目标：主角完成从入局到站稳脚跟的第一轮积累。",
+      "- 卷末钩子：第一份关键证据曝光，逼出更高层对手。",
+    ].join("\n");
+
+    const stripped = stripWizardPreamble("volume", raw);
+    expect(stripped).toContain("# 卷纲规划");
+    expect(looksLikeWizardStepMarkdown("volume", stripped)).toBe(true);
   });
 });

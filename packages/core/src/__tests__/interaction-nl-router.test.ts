@@ -244,7 +244,21 @@ describe("interaction natural-language router", () => {
     expect(routeNaturalLanguageIntent("/intro mode=generate genre=urban title=夜港账本", { activeBookId: "harbor" })).toEqual({
       intent: "revise_book_intro",
       bookId: "harbor",
-      instruction: "/intro mode=generate genre=urban title=夜港账本",
+      instruction: "mode=generate genre=urban title=夜港账本",
+      revisionKind: "generate",
+      genre: "urban",
+      title: "夜港账本",
+    });
+  });
+
+  it("extracts instruction parameter from /intro command", () => {
+    expect(routeNaturalLanguageIntent(
+      "/intro mode=generate genre=urban title=夜港账本 instruction=%E7%94%9F%E6%88%90%E4%B8%80%E4%B8%AA%E6%B8%AF%E5%9F%8E%E8%83%8C%E6%99%AF%E7%9A%84%E5%95%86%E6%88%98%E6%95%85%E4%BA%8B",
+      { activeBookId: "harbor" },
+    )).toEqual({
+      intent: "revise_book_intro",
+      bookId: "harbor",
+      instruction: "生成一个港城背景的商战故事",
       revisionKind: "generate",
       genre: "urban",
       title: "夜港账本",
@@ -267,10 +281,11 @@ describe("interaction natural-language router", () => {
       "storyBackground: 港城、账本、灰产洗白。",
       "instruction: 只生成第一页正文，不要提问。",
     ].join("\n");
+    const payload = multiLine.slice("/intro ".length);
     expect(routeNaturalLanguageIntent(multiLine, { activeBookId: "harbor" })).toEqual({
       intent: "revise_book_intro",
       bookId: "harbor",
-      instruction: multiLine,
+      instruction: payload,
       revisionKind: "generate",
       genre: "urban",
       title: "夜港账本",
@@ -278,13 +293,15 @@ describe("interaction natural-language router", () => {
   });
 
   it("keeps extended /intro params and decodes encoded values", () => {
+    const fullCommand = "/intro mode=generate theme=%E6%B8%AF%E9%A3%8E genre=urban genreName=%E9%83%BD%E5%B8%82 genreAlias=%E6%B8%AF%E9%A3%8E%E5%95%86%E6%88%98 genreSource=custom title=%E5%A4%9C%E6%B8%AF%E8%B4%A6%E6%9C%AC platform=tomato blurb=%E6%B8%AF%E5%8F%A3%E8%B4%A6%E6%9C%AC%E7%89%B5%E5%87%BA%E7%81%B0%E4%BA%A7 storyBackground=%E6%B8%AF%E5%9F%8E%E3%80%81%E8%B4%A6%E6%9C%AC%E3%80%81%E7%81%B0%E4%BA%A7";
+    const payload = fullCommand.slice("/intro ".length);
     expect(routeNaturalLanguageIntent(
-      "/intro mode=generate theme=%E6%B8%AF%E9%A3%8E genre=urban genreName=%E9%83%BD%E5%B8%82 genreAlias=%E6%B8%AF%E9%A3%8E%E5%95%86%E6%88%98 genreSource=custom title=%E5%A4%9C%E6%B8%AF%E8%B4%A6%E6%9C%AC platform=tomato blurb=%E6%B8%AF%E5%8F%A3%E8%B4%A6%E6%9C%AC%E7%89%B5%E5%87%BA%E7%81%B0%E4%BA%A7 storyBackground=%E6%B8%AF%E5%9F%8E%E3%80%81%E8%B4%A6%E6%9C%AC%E3%80%81%E7%81%B0%E4%BA%A7",
+      fullCommand,
       { activeBookId: "harbor" },
     )).toEqual({
       intent: "revise_book_intro",
       bookId: "harbor",
-      instruction: "/intro mode=generate theme=%E6%B8%AF%E9%A3%8E genre=urban genreName=%E9%83%BD%E5%B8%82 genreAlias=%E6%B8%AF%E9%A3%8E%E5%95%86%E6%88%98 genreSource=custom title=%E5%A4%9C%E6%B8%AF%E8%B4%A6%E6%9C%AC platform=tomato blurb=%E6%B8%AF%E5%8F%A3%E8%B4%A6%E6%9C%AC%E7%89%B5%E5%87%BA%E7%81%B0%E4%BA%A7 storyBackground=%E6%B8%AF%E5%9F%8E%E3%80%81%E8%B4%A6%E6%9C%AC%E3%80%81%E7%81%B0%E4%BA%A7",
+      instruction: payload,
       revisionKind: "generate",
       themeGenre: "港风",
       genre: "urban",

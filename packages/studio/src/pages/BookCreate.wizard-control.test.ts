@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { mergeCreationWizardState, buildBookCreateCommand, buildIntroMarkdownDraft, buildStepValidationReport, buildWizardStepRegenerationInstruction, explainManualWizardStepContentIssue, hasMeaningfulIntroMarkdown, hasMeaningfulManualWizardStepContent, hasMeaningfulWizardStepContent, isWizardNavigationLocked, looksLikeOutlineMarkdown, looksLikeWizardStepMarkdown, resolveBookCreateGenreSelection, resolveBookCreationResumeStep, resolveCanonicalIntroMarkdown, resolveIntroMarkdownEditorContent, resolvePreferredIntroMarkdown, resolveWizardStepDisplayContent, shouldAutoGenerateWizardStepBody, shouldSyncWizardStep, stripWizardPreamble } from "./book-create-state";
-import { resolveIntroRevisionBookId } from "./BookCreate";
+import { resolveIntroRevisionBookId, shouldAllowManualStepSave, shouldPersistIntroStepOnAutoSave } from "./BookCreate";
 
 describe("BookCreate wizard control", () => {
   it("advances with stable wizard step ids rather than localized titles", () => {
@@ -18,6 +18,23 @@ describe("BookCreate wizard control", () => {
     }).instruction;
 
     expect(instruction).toBe("/wizard advance current=intro next=world title=夜港账本 genre=urban platform=tomato target=120 words=2800");
+  });
+
+  it("keeps advance commands aligned with page-level language and sizing params", () => {
+    const instruction = buildBookCreateCommand({
+      kind: "advance",
+      language: "en",
+      stepTitle: "Intro / Background",
+      currentStep: "intro",
+      nextStep: "world",
+      title: "Night Harbor Ledger",
+      genre: "urban",
+      platform: "royal-road",
+      targetChapters: 90,
+      chapterWordCount: 2200,
+    }).instruction;
+
+    expect(instruction).toBe("/wizard advance current=intro next=world title=Night Harbor Ledger genre=urban platform=royal-road target=90 words=2200");
   });
 
   it("keeps back navigation on control requests instead of streaming chat", async () => {
@@ -236,6 +253,19 @@ describe("BookCreate wizard control", () => {
 林砚被迫卷入灰产清算。`);
   });
 
+  it("extracts canonical intro markdown from narrative planning prose", () => {
+    expect(resolveCanonicalIntroMarkdown([
+      `赛道定位：都市商战爽文。
+核心卖点：旧账本牵出港城灰产洗白风暴。
+主角人设：江野，前明星销售，擅长从混乱里找杠杆。
+故事梗概：江野被合伙人踢出公司后，被旧账卷回港城黑幕。
+剧情主线：他从自保查账走向主动掀桌，在旧债和资本夹击中升级对抗。
+人物成长：江野从只想保住饭碗，走到敢于公开撕破灰色秩序。
+核心冲突：江野既要对抗灰产链条，也要面对昔日兄弟和资本集团的联合围堵。
+价值观：在灰色规则里守住底线，才有资格完成真正的反击。`,
+    ])).toContain("## 主要人物成长路径");
+  });
+
   it("prefers a complete intro markdown body over a scaffold-only template", () => {
     expect(resolveCanonicalIntroMarkdown([
       "# 简介正文\n\n## 一句话卖点\n-\n\n## 故事概述\n-\n\n## 故事走向\n-\n\n## 主要人物成长路径\n-\n\n## 核心冲突\n-\n\n## 核心价值观\n-",
@@ -250,6 +280,60 @@ describe("BookCreate wizard control", () => {
     ])).toContain("港口账本牵出灰产洗白风暴。");
   });
 
+  it("deduplicates repeated intro headings and paragraphs from model output", () => {
+    const resolved = resolveCanonicalIntroMarkdown([
+      `# 简介正文
+
+## 一句话卖点
+港口账本牵出灰产洗白风暴。
+
+## 故事概述
+林砚被迫卷入港城旧债。
+
+## 主要人物成长路径
+林砚从被动防守到主动追索真相。
+
+## 主要人物成长路径
+林砚从被动防守到主动追索真相。
+
+## 核心冲突
+他与灰产链条的对抗不断升级。
+
+## 核心冲突
+他与灰产链条的对抗不断升级。
+
+## 核心价值观
+在灰色秩序中守住底线。`,
+    ]);
+
+    expect(resolved.match(/## 主要人物成长路径/g)).toHaveLength(1);
+    expect(resolved.match(/## 核心冲突/g)).toHaveLength(1);
+    expect(resolved.match(/林砚从被动防守到主动追索真相。/g)).toHaveLength(1);
+  });
+
+  it("drops repeated intro headings even when duplicated sections have slightly different body text", () => {
+    const resolved = resolveCanonicalIntroMarkdown([
+      `# 简介正文
+
+## 一句话卖点
+港口账本牵出灰产洗白风暴。
+
+## 故事概述
+林砚被迫卷入港城旧债。
+
+## 核心冲突
+他与灰产链条的对抗不断升级。
+
+## 核心冲突
+他与灰产链条的对抗不断升级，并被迫和旧盟友彻底翻脸。
+
+## 核心价值观
+在灰色秩序中守住底线。`,
+    ]);
+
+    expect(resolved.match(/## 核心冲突/g)).toHaveLength(1);
+  });
+
   it("resolves intro revision book id by preferring active book ids", async () => {
     const ensureBookShell = vi.fn(async () => "book-from-shell");
 
@@ -258,6 +342,14 @@ describe("BookCreate wizard control", () => {
 
     await expect(resolveIntroRevisionBookId(null, ensureBookShell)).resolves.toBe("book-from-shell");
     expect(ensureBookShell).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps intro draft local until the next step is chosen", () => {
+    expect(shouldPersistIntroStepOnAutoSave(null, "intro")).toBe(false);
+    expect(shouldPersistIntroStepOnAutoSave("book-1", "intro")).toBe(false);
+    expect(shouldPersistIntroStepOnAutoSave("book-1", "world")).toBe(true);
+    expect(shouldAllowManualStepSave("intro")).toBe(false);
+    expect(shouldAllowManualStepSave("world")).toBe(true);
   });
 
   it("prefers persisted intro body over scaffold draftFields when draft refreshes", () => {

@@ -79,9 +79,9 @@ describe("interaction runtime", () => {
             title: "夜港账本",
             genre: "urban",
             blurb: "港口账本牵出灰产洗白风暴。",
-            storyBackground: "港城、账本、灰产洗白。",
+            storyBackground: "林砚在港城被旧账拖回灰产洗白局。",
             draftFields: {
-              introMarkdown: "# 夜港账本\n\n## 一句话卖点\n港口账本牵出灰产洗白风暴。",
+              introMarkdown: "# 夜港账本\n\n## 一句话卖点\n港口账本牵出灰产洗白风暴。\n\n## 故事概述\n林砚在港城被旧账拖回灰产洗白局。",
             },
             missingFields: [],
             readyToCreate: false,
@@ -130,6 +130,7 @@ describe("interaction runtime", () => {
       "urban",
     );
     expect(result.session.creationDraft?.draftFields?.introMarkdown).toContain("夜港账本");
+    expect(result.session.creationDraft?.introCharacterNames).toEqual(["林砚"]);
     expect(result.responseText).toContain("已生成简介正文");
   });
 
@@ -143,11 +144,11 @@ describe("interaction runtime", () => {
             title: "夜港账本",
             genre: "urban",
             blurb: "港口账本牵出灰产洗白风暴。",
-            storyBackground: "港城、账本、灰产洗白。",
+            storyBackground: "林砚在港城被旧账拖回灰产洗白局。",
             worldPremise: "不该被这一步写出的世界观。",
             novelOutline: "不该被这一步写出的小说大纲。",
             draftFields: {
-              introMarkdown: "# 夜港账本\n\n## 一句话卖点\n港口账本牵出灰产洗白风暴。",
+              introMarkdown: "# 夜港账本\n\n## 一句话卖点\n港口账本牵出灰产洗白风暴。\n\n## 故事概述\n林砚在港城被旧账拖回灰产洗白局。",
             },
             missingFields: [],
             readyToCreate: false,
@@ -166,7 +167,7 @@ describe("interaction runtime", () => {
           title: "夜港账本",
           genre: "urban",
           blurb: "港口账本牵出灰产洗白风暴。",
-          storyBackground: "港城、账本、灰产洗白。",
+          storyBackground: "林砚在港城被旧账拖回灰产洗白局。",
           worldPremise: "旧世界观",
           novelOutline: "旧大纲",
           missingFields: [],
@@ -195,6 +196,7 @@ describe("interaction runtime", () => {
     expect(result.session.creationDraft?.worldPremise).toBe("旧世界观");
     expect(result.session.creationDraft?.novelOutline).toBe("旧大纲");
     expect(result.session.creationDraft?.draftFields?.introMarkdown).toContain("夜港账本");
+    expect(result.session.creationDraft?.introCharacterNames).toEqual(["林砚"]);
   });
 
   it("prefers the fuller intro markdown body when revise_book_intro returns both scaffold and complete text", async () => {
@@ -208,7 +210,7 @@ describe("interaction runtime", () => {
             title: "夜港账本",
             genre: "urban",
             blurb: "港口账本牵出灰产洗白风暴。",
-            storyBackground: "港城、账本、灰产洗白。",
+            storyBackground: "林砚在港城被旧账拖回灰产洗白局。",
             draftFields: {
               introMarkdown: "# 简介正文\n\n## 一句话卖点\n-\n\n## 故事概述\n-\n\n## 故事走向\n-\n\n## 主要人物成长路径\n-\n\n## 核心冲突\n-\n\n## 核心价值观\n-",
             },
@@ -229,7 +231,7 @@ describe("interaction runtime", () => {
           title: "夜港账本",
           genre: "urban",
           blurb: "港口账本牵出灰产洗白风暴。",
-          storyBackground: "港城、账本、灰产洗白。",
+          storyBackground: "林砚在港城被旧账拖回灰产洗白局。",
           missingFields: [],
           readyToCreate: false,
         },
@@ -248,6 +250,34 @@ describe("interaction runtime", () => {
 
     expect(result.session.creationDraft?.draftFields?.introMarkdown).toContain("林砚从被动防守到主动追索真相。");
     expect(result.session.creationDraft?.draftFields?.introMarkdown).not.toContain("## 核心价值观\n-");
+    expect(result.session.creationDraft?.introCharacterNames).toEqual(["林砚"]);
+  });
+
+  it("syncs structured intro character names when selecting an intro candidate", async () => {
+    const result = await runInteractionRequest({
+      session: InteractionSessionSchema.parse({
+        sessionId: "session-intro-candidate",
+        projectRoot: "/tmp/project",
+        automationMode: "semi",
+        creationDraft: {
+          concept: "港风商战悬疑，主角从灰产洗白。",
+          title: "夜港账本",
+          genre: "urban",
+          missingFields: [],
+          readyToCreate: false,
+        },
+        messages: [],
+        events: [],
+      }),
+      request: {
+        intent: "select_intro_candidate",
+        candidateIndex: 2,
+        instruction: "书名：夜港账本\n简介：林砚在港城被旧账拖回灰产洗白局。\n故事背景：陆沉和秦鸢分别从码头与商会两端逼近林砚。",
+      },
+      tools: makeTools(),
+    });
+
+    expect(result.session.creationDraft?.introCharacterNames).toEqual(["林砚", "陆沉", "秦鸢"]);
   });
 
   it("selects a genre from the shared genre library and seeds a draft", async () => {
@@ -426,7 +456,7 @@ describe("interaction runtime", () => {
   });
 
   it("routes advance_book_wizard through the shared wizard tool and moves to the next step", async () => {
-    const advanceBookWizard = vi.fn(async (_input, existingDraft, currentStep, nextStep) => ({
+    const advanceBookWizard = vi.fn(async (_input, existingDraft, targetStep, themeGenre) => ({
       __interaction: {
         responseText: "已生成世界观。",
         details: {
@@ -473,6 +503,7 @@ describe("interaction runtime", () => {
         instruction: "确认当前简介页，进入世界观。",
         wizardStep: "intro",
         nextStep: "world",
+        themeGenre: "urban",
       },
       tools: makeTools({
         advanceBookWizard,
@@ -482,7 +513,7 @@ describe("interaction runtime", () => {
     expect(advanceBookWizard).toHaveBeenCalledWith("确认当前简介页，进入世界观。", expect.objectContaining({
       concept: "港风商战悬疑，主角从灰产洗白。",
       blurb: "港口账本牵出灰产洗白风暴。",
-    }), "intro", "world");
+    }), "world", "urban");
     expect(result.session.creationDraft).toEqual(expect.objectContaining({
       blurb: "港口账本牵出灰产洗白风暴。",
       storyBackground: "港城、账本、灰产洗白。",

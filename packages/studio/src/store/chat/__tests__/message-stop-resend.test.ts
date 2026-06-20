@@ -228,6 +228,46 @@ describe("chat stop + resend run isolation", () => {
     expect(stream.closed).toBe(true);
   });
 
+  it("includes themeGenre in /agent requests for wizard generation", async () => {
+    const store = createTestStore();
+    const fetchJsonMock = vi.mocked(fetchJson);
+
+    let agentBody: Record<string, unknown> | null = null;
+    fetchJsonMock.mockImplementation(async (path, init) => {
+      if (path === "/agent") {
+        agentBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return {
+          response: "## 世界观\n都市港城与灰产势力交错。",
+          details: { draftRaw: "## 世界观\n都市港城与灰产势力交错。" },
+        } as AgentResponse;
+      }
+      throw new Error(`Unexpected fetchJson path: ${path}`);
+    });
+
+    store.setState((state) => ({
+      ...state,
+      sessions: {
+        ...state.sessions,
+        s1: createSessionRuntime({ sessionId: "s1", bookId: "book-1", title: "Session 1" }),
+      },
+      activeSessionId: "s1",
+      selectedModel: "gpt-5.4",
+      selectedService: "openai",
+    }));
+
+    await store.getState().sendMessage("s1", "生成世界观", "book-1", {
+      skipAutoNewPrefix: true,
+      wizardStep: "world",
+      themeGenre: "urban",
+    });
+
+    expect(agentBody).toEqual(expect.objectContaining({
+      instruction: "生成世界观",
+      wizardStep: "world",
+      themeGenre: "urban",
+    }));
+  });
+
   it("preserves streamed wizard body when finalization payload is only a short summary", async () => {
     const store = createTestStore();
 
@@ -331,6 +371,35 @@ describe("chat stop + resend run isolation", () => {
     const last = session.messages.at(-1);
     expect(last?.content).toContain("账本牵出港城旧债");
     expect(last?.content).not.toBe("好的，我已生成并更新允许的字段。");
+  });
+
+  it("retags the latest unbound assistant message when replacing wizard step content", () => {
+    const store = createTestStore();
+
+    store.setState((state) => ({
+      ...state,
+      sessions: {
+        ...state.sessions,
+        s1: createSessionRuntime({
+          sessionId: "s1",
+          bookId: null,
+          title: "draft",
+          messages: [
+            { role: "user", content: "生成简介", wizardStep: "intro", timestamp: 1 },
+            { role: "assistant", content: "正在生成简介...", timestamp: 2 },
+          ],
+        }),
+      },
+      activeSessionId: "s1",
+    }));
+
+    store.getState().replaceWizardStepMessage("s1", "intro", "# 简介正文\n\n## 一句话卖点\n账本牵出旧债。");
+
+    const session = store.getState().sessions.s1;
+    const last = session.messages.at(-1);
+    expect(last?.wizardStep).toBe("intro");
+    expect(last?.content).toContain("账本牵出旧债");
+    expect(session.messages).toHaveLength(2);
   });
 
   it("probes /agent/status on timeout-like failure and avoids immediate hard error when still running", async () => {

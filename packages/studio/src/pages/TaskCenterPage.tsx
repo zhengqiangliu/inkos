@@ -129,9 +129,11 @@ function taskAuditRangeText(task: Pick<GlobalBookTaskItem, "type" | "auditChapte
   return `审计范围：${task.auditChapterStart ?? "?"} - ${task.auditChapterEnd ?? "?"}`;
 }
 
-function taskAuditReminder(task: Pick<GlobalBookTaskItem, "error" | "lastErrorType" | "status">): string | null {
-  const raw = `${task.error ?? ""} ${task.lastErrorType ?? ""}`.toLowerCase();
-  if (!raw.includes("failed audit")) return null;
+function taskAuditReminder(task: Pick<GlobalBookTaskItem, "error" | "lastErrorType" | "lastErrorCode" | "status" | "result">): string | null {
+  const raw = `${task.error ?? ""} ${task.lastErrorType ?? ""} ${task.lastErrorCode ?? ""}`.toLowerCase();
+  const result = task.result as { failedChapters?: unknown } | null;
+  const failedChapters = Number(result?.failedChapters ?? 0);
+  if (!raw.includes("failed audit") && !raw.includes("chapter_audit_failed") && !(Number.isFinite(failedChapters) && failedChapters > 0)) return null;
   return task.status === "running"
     ? "上一章审计未通过，任务继续执行中"
     : "上一章审计未通过";

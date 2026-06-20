@@ -4437,6 +4437,140 @@ describe("PipelineRunner", () => {
     }
   });
 
+  it("continues auto review when first revised draft still fails because paragraph warnings keep the score below threshold", async () => {
+    const { root, runner, state, bookId } = await createRunnerFixture();
+    const storyDir = join(state.bookDir(bookId), "story");
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const chapterOneBody = [
+      "林越沿着码头最外侧的栈桥走了很久，潮声和旧木桩的吱呀声混在一起，把他对那盏灰灯的判断一遍遍磨得更细。",
+      "他反复核对前夜留下的脚印和缆绳磨损，确认有人刻意把靠泊记录改到了另一册账本里，想让追查线索的人多绕一层弯。",
+      "等他摸到栏杆尽头时，风已经换了方向，水面浮沫把最后一点热气也带走，只剩那盏灯还固执地朝仓房窗口晃动。",
+      "他没有立刻靠近，而是先把沿路看到的缺口、碎屑和鞋钉痕迹重新串起来，确认自己下一步不是闯进去，而是先找出藏在里面的人准备怎么反咬。",
+    ].join("\n\n");
+    const draftBody = "林越先把门推开一条缝，再侧耳去听墙后的动静。屋里的灯没有亮，但桌角还有没散的热气，说明人刚离开不久。";
+    const fragmentedBody = [
+      "门开了。",
+      "他没进去。",
+      "先听了一下。",
+      "里面没有声响。",
+      "他这才抬脚。",
+      "屋里很冷。",
+    ].join("\n\n");
+    const polishedBody = [
+      "门开之后，林越没有立刻迈步，而是先贴着门框听清屋里的回声。",
+      "确认里面暂时没有第二道呼吸后，他才踩进门槛，把桌角尚未散尽的热气、翻乱的纸页和窗边压歪的灯罩一并收入眼底。",
+      "这些痕迹说明离开的人走得很急，也说明对方并不觉得自己已经完全摆脱了追踪。",
+      "林越顺着这条判断继续往里逼近，准备先找到账册缺失的那一页，再逼出躲在暗处的人到底想把哪笔旧债抹平。",
+    ].join("\n\n");
+    const now = "2026-03-19T00:00:00.000Z";
+
+    await Promise.all([
+      writeFile(join(chaptersDir, "0001_旧门.md"), `# 第1章 旧门\n\n${chapterOneBody}`, "utf-8"),
+      writeFile(join(storyDir, "current_state.md"), createStateCard({
+        chapter: 1,
+        location: "Ashen ferry crossing",
+        protagonistState: "Lin Yue still hides the oath token.",
+        goal: "Find the vanished mentor.",
+        conflict: "The debt trail keeps narrowing.",
+      }), "utf-8"),
+      writeFile(join(storyDir, "pending_hooks.md"), "# Pending Hooks\n", "utf-8"),
+    ]);
+    await state.saveChapterIndex(bookId, [{
+      number: 1,
+      title: "旧门",
+      status: "ready-for-review",
+      wordCount: chapterOneBody.length,
+      createdAt: now,
+      updatedAt: now,
+      auditIssues: [],
+      lengthWarnings: [],
+    }]);
+
+    vi.spyOn(WriterAgent.prototype, "writeChapter").mockResolvedValue(
+      createWriterOutput({
+        chapterNumber: 2,
+        title: "雾线",
+        content: draftBody,
+        wordCount: draftBody.length,
+      }),
+    );
+    vi.spyOn(ContinuityAuditor.prototype, "auditChapter")
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: false,
+          issues: [CRITICAL_ISSUE],
+          summary: "needs revision",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: true,
+          issues: [{
+            severity: "warning",
+            category: "信息越界",
+            description: "当前场景里角色对账册缺页的判断跳得太快，证据链还没完全落地。",
+            suggestion: "补一笔让角色得出判断的现场依据，再让推断成立。",
+          }],
+          summary: "still soft issues",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createAuditResult({
+          passed: true,
+          issues: [],
+          summary: "clean",
+        }),
+      );
+    const reviseChapter = vi.spyOn(ReviserAgent.prototype, "reviseChapter")
+      .mockResolvedValueOnce(
+        createReviseOutput({
+          revisedContent: fragmentedBody,
+          wordCount: fragmentedBody.length,
+          updatedState: createStateCard({
+            chapter: 2,
+            location: "Ashen ferry crossing",
+            protagonistState: "Lin Yue still hides the oath token.",
+            goal: "Find the vanished mentor.",
+            conflict: "He steps into the empty room.",
+          }),
+          updatedHooks: "# Pending Hooks\n",
+        }),
+      )
+      .mockResolvedValueOnce(
+        createReviseOutput({
+          revisedContent: polishedBody,
+          wordCount: polishedBody.length,
+          updatedState: createStateCard({
+            chapter: 2,
+            location: "Ashen ferry crossing",
+            protagonistState: "Lin Yue still hides the oath token.",
+            goal: "Find the vanished mentor.",
+            conflict: "He locks the missing ledger page as the next objective.",
+          }),
+          updatedHooks: "# Pending Hooks\n",
+        }),
+      );
+    vi.spyOn(ChapterAnalyzerAgent.prototype, "analyzeChapter").mockResolvedValue(
+      createAnalyzedOutput({
+        title: "雾线",
+        content: polishedBody,
+        wordCount: polishedBody.length,
+        chapterSummary: "| 2 | 雾线 | 林越 | 锁定缺页账册 | 状态推进 | 无 | 紧绷 | 调查 |",
+      }),
+    );
+
+    try {
+      const result = await runner.writeNextChapter(bookId, 120);
+
+      expect(reviseChapter).toHaveBeenCalledTimes(2);
+      expect(reviseChapter.mock.calls[1]?.[1]).toBe(fragmentedBody);
+      expect(result.auditResult.passed).toBe(true);
+      expect(result.auditResult.issues.some((issue) => issue.category === "paragraph-shape")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("resolves duplicate chapter titles before persist", async () => {
     const { root, runner, state, bookId } = await createRunnerFixture();
     const storyDir = join(state.bookDir(bookId), "story");

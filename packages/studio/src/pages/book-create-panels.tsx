@@ -1,7 +1,7 @@
 ﻿import type { BookCreationWizardStep } from "@actalk/inkos-core";
 import type { ReactNode, RefObject } from "react";
 import { ArrowUp, BotMessageSquare, Check, ChevronDown, Square } from "lucide-react";
-import type { IntroCandidateLike, ReviewChecklistItem, StepValidationReport } from "./book-create-state";
+import type { IntroCandidateLike, IntroGenerationPhase, ReviewChecklistItem, StepValidationReport } from "./book-create-state";
 import { defaultChapterWordsForLanguage, platformOptionsForLanguage } from "./book-create-state";
 import { shouldSubmitChatOnKeyDown } from "./book-create-state";
 import { ChatMessage } from "../components/chat/ChatMessage";
@@ -231,6 +231,8 @@ function IntroSeedSection(props: {
   readonly autoGenerateAllowed: boolean;
   readonly loading: boolean;
   readonly creating: boolean;
+  readonly introGenerationActive: boolean;
+  readonly introGenerationPhase: IntroGenerationPhase;
   readonly setIntroMode: (value: "manual" | "auto") => void;
   readonly setIntroSeedText: (value: string) => void;
   readonly setIntroTheme: (value: string) => void;
@@ -251,6 +253,8 @@ function IntroSeedSection(props: {
     autoGenerateAllowed,
     loading,
     creating,
+    introGenerationActive,
+    introGenerationPhase,
     setIntroMode,
     setIntroSeedText,
     setIntroTheme,
@@ -273,9 +277,23 @@ function IntroSeedSection(props: {
       {introMode === "manual" ? (
         <div className="rounded-2xl border border-border/40 bg-background/40 p-4 space-y-3">
           <textarea value={introSeedText} onChange={(e) => setIntroSeedText(e.target.value)} rows={5} className={`w-full rounded-xl ${c.input} resize-y px-4 py-3 text-sm leading-7 outline-none`} placeholder="输入主题、卖点或故事背景，支持多行..." />
-          <div className="text-xs leading-6 text-muted-foreground">推荐写法：直接写主题或一句话卖点，再补故事背景。点击后会直接生成正文并回填当前页，不会在工作台里追问确认。</div>
+          <div className="text-xs leading-6 text-muted-foreground">
+            {introGenerationActive
+              ? (introGenerationPhase === "drafting"
+                ? "正文正在回流并回填当前页。生成结束前按钮保持锁定，避免重复触发。"
+                : "当前处于构思阶段，收到正文流后会自动进入正文生成中。")
+              : "推荐写法：直接写主题或一句话卖点，再补故事背景。点击后会直接生成正文并回填当前页，不会在工作台里追问确认。"}
+          </div>
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => void handleGenerateIntroBody()} disabled={loading || creating || !introSeedText.trim()} className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}>生成正文</button>
+            <button
+              onClick={() => void handleGenerateIntroBody()}
+              disabled={introGenerationActive || creating || !introSeedText.trim()}
+              className={`rounded-md px-4 py-3 text-sm font-medium ${c.btnPrimary} disabled:opacity-50`}
+            >
+              {introGenerationActive
+                ? (introGenerationPhase === "drafting" ? "正文生成中..." : "构思中...")
+                : "生成正文"}
+            </button>
           </div>
         </div>
       ) : (
@@ -299,10 +317,21 @@ function IntroCandidatePoolSection(props: {
   readonly selectedIntroCandidateIndex: number;
   readonly selectedIntroCandidate: IntroCandidateLike | null;
   readonly introMode: "manual" | "auto";
+  readonly introGenerationActive: boolean;
+  readonly introGenerationPhase: IntroGenerationPhase;
   readonly handleSelectCandidate: (candidate: IntroCandidateLike, index: number) => void;
   readonly handleGenerateCandidateBody: (candidate: IntroCandidateLike, index: number) => void;
 }) {
-  const { introCandidates, selectedIntroCandidateIndex, selectedIntroCandidate, introMode, handleSelectCandidate, handleGenerateCandidateBody } = props;
+  const {
+    introCandidates,
+    selectedIntroCandidateIndex,
+    selectedIntroCandidate,
+    introMode,
+    introGenerationActive,
+    introGenerationPhase,
+    handleSelectCandidate,
+    handleGenerateCandidateBody,
+  } = props;
   if (introCandidates.length === 0) return null;
 
   return (
@@ -343,9 +372,12 @@ function IntroCandidatePoolSection(props: {
                     event.stopPropagation();
                     handleGenerateCandidateBody(candidate, index);
                   }}
-                  className="rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-[10px] text-primary hover:bg-primary/10"
+                  disabled={introGenerationActive}
+                  className="rounded-full border border-primary/30 bg-primary/5 px-3 py-1 text-[10px] text-primary hover:bg-primary/10 disabled:opacity-50"
                 >
-                  生成正文
+                  {introGenerationActive
+                    ? (introGenerationPhase === "drafting" ? "正文生成中..." : "构思中...")
+                    : "生成正文"}
                 </button>
               </div>
             </button>
@@ -397,6 +429,8 @@ export function IntroPanel(props: {
   loadingDraft: boolean;
   loading: boolean;
   creating: boolean;
+  introGenerationActive: boolean;
+  introGenerationPhase: IntroGenerationPhase;
   introCandidateLoading: boolean;
   autoGenerateAllowed: boolean;
   introBodyEditing: boolean;
@@ -450,6 +484,8 @@ export function IntroPanel(props: {
     loadingDraft,
     loading,
     creating,
+    introGenerationActive,
+    introGenerationPhase,
     introCandidateLoading,
     autoGenerateAllowed,
     introBodyEditing,
@@ -540,6 +576,8 @@ export function IntroPanel(props: {
               autoGenerateAllowed={autoGenerateAllowed}
               loading={loading}
               creating={creating}
+              introGenerationActive={introGenerationActive}
+              introGenerationPhase={introGenerationPhase}
               setIntroMode={setIntroMode}
               setIntroSeedText={setIntroSeedText}
               setIntroTheme={setIntroTheme}
@@ -552,6 +590,8 @@ export function IntroPanel(props: {
               selectedIntroCandidateIndex={selectedIntroCandidateIndex}
               selectedIntroCandidate={selectedIntroCandidate}
               introMode={introMode}
+              introGenerationActive={introGenerationActive}
+              introGenerationPhase={introGenerationPhase}
               handleSelectCandidate={handleSelectCandidate}
               handleGenerateCandidateBody={handleGenerateCandidateBody}
             />
@@ -563,7 +603,7 @@ export function IntroPanel(props: {
               value={introBodyDraft}
               editing={introBodyEditing}
               onToggleEditing={() => setIntroBodyEditing(!introBodyEditing)}
-              onSave={handleSaveIntroBody}
+              onSave={undefined}
               onValueChange={setIntroBodyDraft}
               onAiModify={handleIntroAiModify}
               saving={introBodySaving}
@@ -962,6 +1002,8 @@ export function BookCreateChatDock(props: {
 }) {
   const { nav, pageTheme, title, subtitle, chatGuide, legacyMessageCount, canStop, isAdvancing, selectedModel, selectedService, modelPickerStatus, filteredGroupedModels, messages, loading, input, setInput, stopMessage, activeSessionId, scrollRef, textareaRef, c, onSend, setSelectedModel } = props;
   const currentAssistantExecutions = messages.flatMap((message) => (message.role === "assistant" ? [...(message.toolExecutions ?? [])] : [])) as ToolExecution[];
+  const assistantMessages = messages.filter((message) => message.role === "assistant");
+  const hasRenderableAssistantOutput = assistantMessages.some((message) => Boolean(message.thinking?.trim()) || Boolean(message.content.trim()));
 
   return (
     <aside className="w-full xl:sticky xl:top-6 xl:w-[640px] 2xl:w-[680px] shrink-0 min-h-0 rounded-2xl border border-border/60 bg-card/80 p-4 shadow-sm flex flex-col overflow-hidden xl:h-full">
@@ -989,7 +1031,7 @@ export function BookCreateChatDock(props: {
             <div className="w-14 h-14 rounded-2xl border border-dashed border-border flex items-center justify-center mb-4 bg-secondary/30 opacity-40">
               <BotMessageSquare size={24} className="text-muted-foreground" />
             </div>
-            <p className="text-sm text-muted-foreground/70 max-w-md leading-7">右侧只保留当前页的思考、正文和工具事件。</p>
+            <p className="text-sm text-muted-foreground/70 max-w-md leading-7">右侧只保留当前页的结果、正文和工具事件。</p>
             {legacyMessageCount > 0 ? (
               <div className="mt-3 rounded-xl border border-border/50 bg-background/60 px-3 py-2 text-left text-xs leading-6 text-muted-foreground">
                 已隐藏 {legacyMessageCount} 条未绑定向导页的旧历史消息。
@@ -1009,30 +1051,24 @@ export function BookCreateChatDock(props: {
                 <ToolExecutionSteps executions={currentAssistantExecutions} />
               </div>
             ) : null}
-            {messages
-              .filter((msg) => msg.role === "assistant")
-              .map((msg, i) => (
-                <div key={`${msg.timestamp}-${i}`} className="space-y-2">
-                  {!!msg.thinking && (
-                    <AssistantThinkingCard
-                      heading="思考过程（流式）"
-                      content={msg.thinking}
-                      isStreaming={msg.thinkingStreaming === true}
-                    />
-                  )}
-                  <ChatMessage
-                    role="assistant"
-                    content={msg.content}
-                    timestamp={msg.timestamp}
-                    theme={pageTheme}
-                    audit={msg.audit as never}
-                  />
-                </div>
-              ))}
-            {loading && (
+            {assistantMessages.map((msg, i) => (
+              <div key={`${msg.timestamp}-${i}`} className="space-y-2">
+                {msg.thinking?.trim() ? (
+                  <AssistantThinkingCard content={msg.thinking} isStreaming={msg.thinkingStreaming === true} />
+                ) : null}
+                <ChatMessage
+                  role="assistant"
+                  content={msg.content}
+                  timestamp={msg.timestamp}
+                  theme={pageTheme}
+                  audit={msg.audit as never}
+                />
+              </div>
+            ))}
+            {loading && !hasRenderableAssistantOutput && (
               <Message from="assistant">
                 <AssistantOutputCard>
-                  <Shimmer className="text-sm" duration={1.5}>Thinking...</Shimmer>
+                  <Shimmer className="text-sm" duration={1.5}>{isAdvancing ? `正在生成 ${title} 内容...` : "思考中..."}</Shimmer>
                 </AssistantOutputCard>
               </Message>
             )}

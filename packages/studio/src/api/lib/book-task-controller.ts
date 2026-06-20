@@ -173,8 +173,15 @@ function canDeleteTaskStatus(status: BookTaskStatus): boolean {
 
 function isFatalWriteResult(result: unknown): boolean {
   if (!result || typeof result !== "object") return false;
-  const payload = result as { status?: unknown; error?: unknown };
+  const payload = result as { status?: unknown; error?: unknown; chapterNumber?: unknown; wordCount?: unknown; passed?: unknown; audit?: unknown; auditResult?: unknown };
   const status = typeof payload.status === "string" ? payload.status.toLowerCase() : "";
+  const chapterNumber = Number(payload.chapterNumber);
+  const wordCount = Number(payload.wordCount);
+  const hasPersistedChapter = (Number.isFinite(chapterNumber) && chapterNumber > 0) || (Number.isFinite(wordCount) && wordCount > 0);
+  const auditPassed = extractChapterAuditPassed(result);
+  if (hasPersistedChapter && auditPassed === false) {
+    return false;
+  }
   if (/failed|error/.test(status)) return true;
   return typeof payload.error === "string" && payload.error.trim().length > 0;
 }
@@ -2173,46 +2180,14 @@ export class BookTaskController {
             auditFailedChapters = failedChaptersAfterThisRound;
           }
         }
-        if (!finalAuditPassed) {
-          const autoReviewReason = currentAudit.report?.trim()
+        const auditFailureMessage = !finalAuditPassed
+          ? `第 ${resolvedChapterNumber} 章未通过自动复审${(
+            currentAudit.report?.trim()
             || currentAudit.summary?.trim()
             || extractAutoReviewStopReason(result)
-            || "";
-          const failureMessage = `第 ${resolvedChapterNumber} 章未通过自动复审${autoReviewReason ? `：${autoReviewReason}` : ""}。`;
-          const failed = await this.store.setStatus(bookId, taskId, "failed", {
-            finishedAt: nowIso(),
-            error: failureMessage,
-            result: {
-              chapterNumber: resolvedChapterNumber,
-              passed: false,
-              issueCount: currentAudit.issueCount,
-              summary: currentAudit.summary ?? null,
-              revisionApplied: finalRevisionApplied,
-              revisionStatus: finalRevisionStatus,
-              revisionAuditScore: finalRevisionAuditScore,
-              ...auditMetrics,
-              auditChapterStart: nextChapter,
-              auditChapterEnd: nextChapter,
-            },
-            lastErrorType: "quality",
-            lastErrorCode: "chapter_audit_failed",
-            lastErrorStage: "revise",
-            stage: "failed",
-            stageLabel: stageLabel("failed"),
-            stageDetail: failureMessage,
-            stageUpdatedAt: nowIso(),
-            lastHeartbeatAt: nowIso(),
-          });
-          await this.appendTaskEvent("book-task:error", failed, {
-            exceptionLog: {
-              timestamp: nowIso(),
-              level: "error",
-              message: failureMessage,
-            },
-          });
-          await this.appendTaskLog(failed, "error", failureMessage);
-          return;
-        }
+            || ""
+          ) ? `：${currentAudit.report?.trim() || currentAudit.summary?.trim() || extractAutoReviewStopReason(result) || ""}` : ""}。`
+          : null;
 
         completed += 1;
         const refreshed = await this.requireTask(bookId, taskId);
@@ -2253,18 +2228,29 @@ export class BookTaskController {
           writtenChapters: completed,
           writtenWords: (latest.writtenWords ?? 0) + wordCount,
           tokenUsage,
+          ...(auditFailureMessage
+            ? {
+                lastErrorType: "quality_warning",
+                lastErrorCode: "chapter_audit_failed",
+                lastErrorStage: "audit",
+                error: null,
+              }
+            : {}),
           result: {
             ...(typeof finalPipelineResult === "object" && finalPipelineResult ? (finalPipelineResult as Record<string, unknown>) : {}),
             ...auditMetrics,
+            ...(auditFailureMessage ? { auditFailureMessage } : {}),
           },
         });
         await this.appendTaskEvent("book-task:update", latest);
         await this.appendTaskLog(
           latest,
-          "info",
-          finalRevisionApplied
-            ? `第 ${resolvedChapterNumber} 章已自动修订并复审通过${finalRevisionAuditScore !== null ? `，评分 ${finalRevisionAuditScore}/100` : ""}。`
-            : `第 ${resolvedChapterNumber} 章完成。`,
+          auditFailureMessage ? "warn" : "info",
+          auditFailureMessage
+            ? `${auditFailureMessage} 任务继续执行。`
+            : finalRevisionApplied
+              ? `第 ${resolvedChapterNumber} 章已自动修订并复审通过${finalRevisionAuditScore !== null ? `，评分 ${finalRevisionAuditScore}/100` : ""}。`
+              : `第 ${resolvedChapterNumber} 章完成。`,
         );
 
         if (isFatalWriteResult(finalPipelineResult)) {
@@ -2292,7 +2278,9 @@ export class BookTaskController {
         finishedAt: nowIso(),
         stage: "succeeded",
         stageLabel: stageLabel("succeeded"),
-        stageDetail: "全部章节写作完成",
+        stageDetail: auditFailedChapters > 0
+          ? `全部章节写作完成，其中 ${auditFailedChapters} 章待复核`
+          : "全部章节写作完成",
         stageStartedAt: nowIso(),
         stageUpdatedAt: nowIso(),
         lastHeartbeatAt: nowIso(),

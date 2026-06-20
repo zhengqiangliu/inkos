@@ -1174,7 +1174,7 @@ describe("BookTaskController audit gating", () => {
     );
   });
 
-  it("propagates failed task-center auto-review results without imposing extra repair rounds", async () => {
+  it("does not fail task-center write tasks when a chapter only fails auto-review", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
     tempRoots.push(root);
     const bookId = "demo-book";
@@ -1246,56 +1246,84 @@ describe("BookTaskController audit gating", () => {
 
     await vi.waitFor(async () => {
       const current = await controller.get(bookId, task.id);
-      expect(current?.status).toBe("failed");
+      expect(current?.status).toBe("succeeded");
     });
 
     const finalTask = await controller.get(bookId, task.id);
     expect(writeNextChapter).toHaveBeenCalledTimes(1);
     expect(reviseDraft).not.toHaveBeenCalled();
-    expect(finalTask?.status).toBe("failed");
-    expect(finalTask?.completedChapters).toBe(0);
-    expect(finalTask?.error).toContain("pipeline review stopped after convergence guardrail");
+    expect(finalTask?.status).toBe("succeeded");
+    expect(finalTask?.completedChapters).toBe(1);
+    expect(finalTask?.writtenChapters).toBe(1);
+    expect(finalTask?.error).toBeNull();
+    expect(finalTask?.lastErrorCode).toBe("chapter_audit_failed");
+    expect(finalTask?.result).toMatchObject({
+      auditedChapters: 1,
+      passedChapters: 0,
+      failedChapters: 1,
+    });
   });
 
-  it("fails task-center write chapters using the pipeline stop reason, not a fixed repair-round cap", async () => {
+  it("continues writing later chapters after an earlier chapter fails auto-review", async () => {
     const root = await mkdtemp(join(tmpdir(), "inkos-task-controller-"));
     tempRoots.push(root);
     const bookId = "demo-book";
     await mkdir(join(root, "books", bookId, "story", "state"), { recursive: true });
     await writeFile(join(root, "books", bookId, "book.json"), JSON.stringify({ id: bookId, title: "Demo Book" }), "utf-8");
 
-    const writeNextChapter = vi.fn().mockResolvedValue({
-      chapterNumber: 1,
-      title: "Ch 1",
-      wordCount: 1200,
-      status: "failed",
-      passed: false,
-      auditResult: {
+    const writeNextChapter = vi.fn()
+      .mockResolvedValueOnce({
+        chapterNumber: 1,
+        title: "Ch 1",
+        wordCount: 1200,
+        status: "failed",
         passed: false,
-        score: 64,
-        issueCount: 3,
-        summary: "needs revision",
-        report: "pipeline review stopped after convergence guardrail",
-        issues: [
-          { severity: "warning", category: "pacing", description: "too slow", suggestion: "tighten" },
-          { severity: "warning", category: "structure", description: "flat middle", suggestion: "add conflict" },
-          { severity: "warning", category: "hook", description: "weak ending", suggestion: "strengthen hook" },
-        ],
-      },
-      autoReview: {
-        maxReviseRounds: 0,
-        reviseRoundsUsed: 0,
-        auditRounds: 1,
-        stoppedByMaxRounds: true,
-        finalState: "failed-max-rounds",
-        stopReason: "pipeline review stopped after convergence guardrail",
-      },
-      tokenUsage: {
-        promptTokens: 12,
-        completionTokens: 18,
-        totalTokens: 30,
-      },
-    });
+        auditResult: {
+          passed: false,
+          score: 64,
+          issueCount: 3,
+          summary: "needs revision",
+          report: "pipeline review stopped after convergence guardrail",
+          issues: [
+            { severity: "warning", category: "pacing", description: "too slow", suggestion: "tighten" },
+            { severity: "warning", category: "structure", description: "flat middle", suggestion: "add conflict" },
+            { severity: "warning", category: "hook", description: "weak ending", suggestion: "strengthen hook" },
+          ],
+        },
+        autoReview: {
+          maxReviseRounds: 0,
+          reviseRoundsUsed: 0,
+          auditRounds: 1,
+          stoppedByMaxRounds: true,
+          finalState: "failed-max-rounds",
+          stopReason: "pipeline review stopped after convergence guardrail",
+        },
+        tokenUsage: {
+          promptTokens: 12,
+          completionTokens: 18,
+          totalTokens: 30,
+        },
+      })
+      .mockResolvedValueOnce({
+        chapterNumber: 2,
+        title: "Ch 2",
+        wordCount: 1300,
+        status: "ready-for-review",
+        passed: true,
+        auditResult: {
+          passed: true,
+          score: 91,
+          issueCount: 0,
+          summary: "passed",
+          report: "passed",
+          issues: [],
+        },
+        tokenUsage: {
+          promptTokens: 10,
+          completionTokens: 20,
+          totalTokens: 30,
+        },
+      });
     const reviseDraft = vi.fn();
 
     const controller = new BookTaskController({
@@ -1320,7 +1348,7 @@ describe("BookTaskController audit gating", () => {
     const task = await controller.create(bookId, {
       type: "write",
       source: "task-center",
-      requestedChapters: 1,
+      requestedChapters: 2,
       retryEnabled: false,
       service: "svc-a",
       model: "model-a",
@@ -1329,15 +1357,20 @@ describe("BookTaskController audit gating", () => {
 
     await vi.waitFor(async () => {
       const current = await controller.get(bookId, task.id);
-      expect(current?.status).toBe("failed");
+      expect(current?.status).toBe("succeeded");
     });
 
     const finalTask = await controller.get(bookId, task.id);
-    expect(writeNextChapter).toHaveBeenCalledTimes(1);
+    expect(writeNextChapter).toHaveBeenCalledTimes(2);
     expect(reviseDraft).not.toHaveBeenCalled();
-    expect(finalTask?.status).toBe("failed");
-    expect(finalTask?.completedChapters).toBe(0);
-    expect(finalTask?.error).toContain("pipeline review stopped after convergence guardrail");
-    expect(finalTask?.error).not.toContain("3 轮");
+    expect(finalTask?.status).toBe("succeeded");
+    expect(finalTask?.completedChapters).toBe(2);
+    expect(finalTask?.writtenChapters).toBe(2);
+    expect(finalTask?.error).toBeNull();
+    expect(finalTask?.result).toMatchObject({
+      auditedChapters: 2,
+      passedChapters: 1,
+      failedChapters: 1,
+    });
   });
 });

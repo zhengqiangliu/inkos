@@ -141,6 +141,107 @@ export const InteractionMessageSchema = z.object({
 
 export type InteractionMessage = z.infer<typeof InteractionMessageSchema>;
 
+const CHINESE_SURNAME_PATTERN = "(?:赵|钱|孙|李|周|吴|郑|王|冯|陈|褚|卫|蒋|沈|韩|杨|朱|秦|尤|许|何|吕|施|张|孔|曹|严|华|金|魏|陶|姜|戚|谢|邹|喻|柏|水|窦|章|云|苏|潘|葛|奚|范|彭|郎|鲁|韦|昌|马|苗|凤|花|方|俞|任|袁|柳|酆|鲍|史|唐|费|廉|岑|薛|雷|贺|倪|汤|滕|殷|罗|毕|郝|邬|安|常|乐|于|时|傅|皮|卞|齐|康|伍|余|元|卜|顾|孟|平|黄|和|穆|萧|尹|姚|邵|湛|汪|祁|毛|禹|狄|米|贝|明|臧|计|伏|成|戴|谈|宋|茅|庞|熊|纪|舒|屈|项|祝|董|梁|杜|阮|蓝|闵|席|季|麻|强|贾|路|娄|危|江|童|颜|郭|梅|盛|林|刁|钟|徐|邱|骆|高|夏|蔡|田|樊|胡|凌|霍|虞|万|支|柯|昝|管|卢|莫|经|房|裘|缪|干|解|应|宗|丁|宣|贲|邓|郁|单|杭|洪|包|诸|左|石|崔|吉|钮|龚|程|嵇|邢|滑|裴|陆|荣|翁|荀|羊|於|惠|甄|曲|家|封|芮|羿|储|靳|汲|邴|糜|松|井|段|富|巫|乌|焦|巴|弓|牧|隗|山|谷|车|侯|宓|蓬|全|郗|班|仰|秋|仲|伊|宫|宁|仇|栾|暴|甘|钭|厉|戎|祖|武|符|刘|景|詹|束|龙|叶|幸|司|韶|郜|黎|蓟|薄|印|宿|白|怀|蒲|邰|从|鄂|索|咸|籍|赖|卓|蔺|屠|蒙|池|乔|阴|鬱|胥|能|苍|双|闻|莘|党|翟|谭|贡|劳|逄|姬|申|扶|堵|冉|宰|郦|雍|郤|璩|桑|桂|濮|牛|寿|通|边|扈|燕|冀|郏|浦|尚|农|温|别|庄|晏|柴|瞿|阎|充|慕|连|茹|习|宦|艾|鱼|容|向|古|易|慎|戈|廖|庾|终|暨|居|衡|步|都|耿|满|弘|匡|国|文|寇|广|禄|阙|东|欧|殳|沃|利|蔚|越|夔|隆|师|巩|厍|聂|晁|勾|敖|融|冷|訾|辛|阚|那|简|饶|空|曾|沙|乜|养|鞠|须|丰|巢|关|蒯|相|查|后|荆|红|游|竺|权|逯|盖|益|桓|公|欧阳|司马|上官|夏侯|诸葛|东方|尉迟|皇甫|令狐|宇文|长孙|慕容|司徒|司空)";
+const CHINESE_NAME_FOLLOWING_PATTERN = "[\\s，。！？；：“”\"'《》（）()、】【,.!?;:在被和与及从向对把将令让使遭因同跟于往来去回入出逼卷拖追查守攻看听说问想要会正仍也却并再已便先后中里内外上下前后间时处分]";
+const CHINESE_NAME_REGEX = new RegExp(`(^|[\\s，。！？；：“”"'《》（）()、])(${CHINESE_SURNAME_PATTERN}[\\u4e00-\\u9fff]{1,2})(?=${CHINESE_NAME_FOLLOWING_PATTERN}|$)`, "g");
+const CHINESE_NAME_PAIR_REGEX = new RegExp(`(^|[\\s，。！？；：“”"'《》（）()、])(${CHINESE_SURNAME_PATTERN}[\\u4e00-\\u9fff]{1,2})(?:和|与|及)(${CHINESE_SURNAME_PATTERN}[\\u4e00-\\u9fff]{1,2})(?=${CHINESE_NAME_FOLLOWING_PATTERN}|$)`, "g");
+const EXPLICIT_ROLE_NAME_REGEX = /(主角|主人公|男主|女主|反派|配角|关键角色|关键配角|角色名|角色)\s*(?:是|为|叫|名叫|叫做|名为|：|:)?\s*([A-Za-z][A-Za-z' -]{1,30}|[\u4e00-\u9fff]{2,6})/g;
+
+function normalizeCharacterNameCandidate(value: string): string {
+  return value
+    .trim()
+    .replace(/^[#>*\-\d.\s]+/, "")
+    .replace(/[：:（(][^）)\n]{0,20}[）)]?$/g, "")
+    .replace(/[，。！？；：、,!?;:\-]+$/g, "")
+    .trim();
+}
+
+function looksLikeGenericCharacterToken(value: string): boolean {
+  if (!value) return true;
+  if (value.length < 2 || value.length > 12) return true;
+  return /^(简介|卖点|主角|主人公|男主|女主|反派|配角|角色|人物|世界观|故事背景|故事概述|故事走向|核心冲突|核心价值观|成长路径|卷纲规划|小说大纲)$/.test(value);
+}
+
+function normalizeCharacterNameList(names: ReadonlyArray<string>): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const name of names) {
+    const candidate = normalizeCharacterNameCandidate(name);
+    if (!candidate || looksLikeGenericCharacterToken(candidate) || seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    normalized.push(candidate);
+  }
+  return normalized;
+}
+
+export function collectCharacterNamesFromText(text: string): ReadonlyArray<string> {
+  const source = text.trim();
+  if (!source) return [];
+  const candidates: Array<{ readonly name: string; readonly order: number }> = [];
+  const pushCandidate = (raw: string | undefined, order: number) => {
+    const normalized = normalizeCharacterNameCandidate(raw ?? "");
+    if (!normalized || looksLikeGenericCharacterToken(normalized)) return;
+    candidates.push({ name: normalized, order });
+  };
+
+  for (const match of source.matchAll(EXPLICIT_ROLE_NAME_REGEX)) {
+    pushCandidate(match[2], match.index ?? Number.MAX_SAFE_INTEGER);
+  }
+  for (const match of source.matchAll(CHINESE_NAME_PAIR_REGEX)) {
+    const order = match.index ?? Number.MAX_SAFE_INTEGER;
+    pushCandidate(match[2], order);
+    pushCandidate(match[3], order + 0.01);
+  }
+  for (const match of source.matchAll(CHINESE_NAME_REGEX)) {
+    pushCandidate(match[2], match.index ?? Number.MAX_SAFE_INTEGER);
+  }
+
+  const seen = new Set<string>();
+  return candidates
+    .sort((a, b) => a.order - b.order)
+    .filter((candidate) => {
+      if (seen.has(candidate.name)) return false;
+      seen.add(candidate.name);
+      return true;
+    })
+    .map((candidate) => candidate.name);
+}
+
+export function extractIntroCharacterNameHints(input?: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly introMarkdown?: string;
+  readonly draftFields?: Readonly<Record<string, string>>;
+  readonly protagonist?: string;
+  readonly supportingCast?: string;
+  readonly introCharacterNames?: ReadonlyArray<string>;
+}): ReadonlyArray<string> {
+  if (!input) return [];
+  const structuredNames = normalizeCharacterNameList(input.introCharacterNames ?? []);
+  if (structuredNames.length > 0) {
+    return structuredNames;
+  }
+
+  const introOnlyCombined = [
+    input.draftFields?.introMarkdown,
+    input.introMarkdown,
+    input.blurb,
+    input.storyBackground,
+  ].filter((value): value is string => Boolean(value?.trim())).join("\n");
+  const introNames = collectCharacterNamesFromText(introOnlyCombined);
+  if (introNames.length > 0) {
+    return introNames;
+  }
+
+  const legacyFallbackCombined = [
+    input.protagonist,
+    input.supportingCast,
+  ].filter((value): value is string => Boolean(value?.trim())).join("\n");
+  return collectCharacterNamesFromText(legacyFallbackCombined);
+}
+
 export const BookCreationDraftSchema = z.object({
   concept: z.string().min(1),
   rawConcept: z.string().min(1).optional(),
@@ -156,6 +257,7 @@ export const BookCreationDraftSchema = z.object({
   blurb: z.string().min(1).optional(),
   storyBackground: z.string().min(1).optional(),
   introMarkdown: z.string().min(1).optional(),
+  introCharacterNames: z.array(z.string().min(1)).optional(),
   worldPremise: z.string().min(1).optional(),
   settingNotes: z.string().min(1).optional(),
   novelOutline: z.string().min(1).optional(),
@@ -177,6 +279,31 @@ export const BookCreationDraftSchema = z.object({
 });
 
 export type BookCreationDraft = z.infer<typeof BookCreationDraftSchema>;
+
+export function syncIntroCharacterNames<T extends BookCreationDraft>(draft: T): T {
+  const introCharacterNames = extractIntroCharacterNameHints({
+    blurb: draft.blurb,
+    storyBackground: draft.storyBackground,
+    introMarkdown: draft.introMarkdown,
+    draftFields: draft.draftFields,
+    protagonist: draft.protagonist,
+    supportingCast: draft.supportingCast,
+    introCharacterNames: draft.introCharacterNames,
+  });
+  if (introCharacterNames.length === 0) {
+    if (!draft.introCharacterNames || draft.introCharacterNames.length === 0) {
+      return draft;
+    }
+    return {
+      ...draft,
+      introCharacterNames: undefined,
+    };
+  }
+  return {
+    ...draft,
+    introCharacterNames: [...introCharacterNames],
+  };
+}
 
 function hasAnyText(...values: ReadonlyArray<string | undefined>): boolean {
   return values.some((value) => typeof value === "string" && value.trim().length > 0);
@@ -481,7 +608,7 @@ export function updateCreationDraft(
 ): InteractionSession {
   return {
     ...session,
-    creationDraft: draft,
+    creationDraft: syncIntroCharacterNames(draft),
   };
 }
 

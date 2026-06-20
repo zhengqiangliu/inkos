@@ -292,8 +292,10 @@ export interface MessageActions {
       readonly preferFastWriterModel?: boolean;
       readonly skipAutoNewPrefix?: boolean;
       readonly wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep;
+      readonly themeGenre?: string;
       readonly forceStream?: boolean;
       readonly responseFormat?: "json_object";
+      readonly propagateErrors?: boolean;
       readonly wizardAdvance?: {
         readonly wizardStep: string;
         readonly nextStep?: string;

@@ -37,6 +37,9 @@ interface ChapterPlansResponse {
 interface ChapterPlanBatchActionResponse {
   ok?: boolean;
   partial?: boolean;
+  usedFallback?: boolean;
+  fallbackReason?: string;
+  generatedCount?: number;
   successChapters?: ReadonlyArray<number>;
   removedChapters?: ReadonlyArray<number>;
   failedChapters?: ReadonlyArray<{
@@ -141,6 +144,7 @@ interface ChapterPlansSectionProps {
   readonly targetChapters: number;
   readonly refreshToken?: number;
   readonly onRefresh?: () => void;
+  readonly onPlansChange?: (plans: ReadonlyArray<ChapterPlan>) => void;
   readonly onSelectChapter?: (chapterNumber: number) => void;
   readonly selectedChapter?: number | null;
   readonly chapterNumbers?: ReadonlyArray<number>;
@@ -153,6 +157,7 @@ export function ChapterPlansSection({
   targetChapters,
   refreshToken,
   onRefresh,
+  onPlansChange,
   onSelectChapter,
   selectedChapter: selectedChapterProp = null,
   chapterNumbers = [],
@@ -169,6 +174,8 @@ export function ChapterPlansSection({
   const [actionSummary, setActionSummary] = useState<{
     label: string;
     partial: boolean;
+    usedFallback: boolean;
+    fallbackReason?: string;
     successChapters: number[];
     failedChapters: Array<{ chapterNumber: number; reason: string }>;
   } | null>(null);
@@ -221,6 +228,11 @@ export function ChapterPlansSection({
     setHoveredChapter(selectedChapterProp);
   }, [selectedChapterProp]);
 
+  useEffect(() => {
+    if (loading) return;
+    onPlansChange?.(plans);
+  }, [loading, onPlansChange, plans]);
+
   const runAction = useCallback(async (label: string, runner: () => Promise<ChapterPlanBatchActionResponse | void>) => {
     setRunning(label);
     setError(null);
@@ -230,6 +242,8 @@ export function ChapterPlansSection({
         setActionSummary({
           label,
           partial: Boolean(result.partial),
+          usedFallback: Boolean(result.usedFallback),
+          fallbackReason: typeof result.fallbackReason === "string" ? result.fallbackReason : undefined,
           successChapters: Array.isArray(result.successChapters)
             ? [...result.successChapters]
             : Array.isArray(result.removedChapters)
@@ -536,14 +550,23 @@ export function ChapterPlansSection({
       )}
 
       {actionSummary && (
-        <div className="rounded-md border border-border/30 bg-secondary/20 px-2 py-1 text-[11px] text-foreground">
+        <div className={`rounded-md px-2 py-1 text-[11px] ${
+          actionSummary.usedFallback
+            ? "border border-amber-500/30 bg-amber-500/10 text-amber-700"
+            : "border border-border/30 bg-secondary/20 text-foreground"
+        }`}>
           <p className="font-medium">
             {actionSummary.label}
-            {actionSummary.partial ? "（部分成功）" : "（完成）"}
+            {actionSummary.usedFallback ? "（已兜底）" : actionSummary.partial ? "（部分成功）" : "（完成）"}
           </p>
           <p className="text-muted-foreground">
             成功 {actionSummary.successChapters.length} 章，失败 {actionSummary.failedChapters.length} 章
           </p>
+          {actionSummary.usedFallback && (
+            <p className="mt-1 text-amber-700/80">
+              {actionSummary.fallbackReason ?? "模型生成失败，已使用本地兜底。"}
+            </p>
+          )}
           {actionSummary.failedChapters.length > 0 && (
             <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
               {actionSummary.failedChapters.slice(0, 8).map((item) => (

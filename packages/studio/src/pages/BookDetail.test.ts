@@ -8,6 +8,7 @@ import {
   normalizeEditableStringList,
   buildScriptWorkspaceExtractionGroups,
   ProductionWorkspacePanel,
+  resolveDisplayedChapterPlans,
   reorderProductionEpisodeShots,
   shouldAutoOpenFirstChapter,
   updateProductionWorkspaceEpisode,
@@ -30,6 +31,44 @@ describe("shouldAutoOpenFirstChapter", () => {
 
   it("does not open when there are no chapters", () => {
     expect(shouldAutoOpenFirstChapter([], null)).toBe(false);
+  });
+});
+
+describe("resolveDisplayedChapterPlans", () => {
+  it("prefers the latest sidebar snapshot over stale api data", () => {
+    const apiData = {
+      count: 1,
+      plans: [
+        {
+          chapterNumber: 1,
+          chapterName: "旧方案",
+          highlight: "旧看点",
+          coreConflict: "旧冲突",
+          plotAndConflict: "旧剧情",
+          emotionalTone: "旧基调",
+          endingHook: "旧钩子",
+          status: "planned",
+          source: "ai",
+          version: 1,
+        },
+      ],
+    };
+    const snapshot = [
+      {
+        chapterNumber: 2,
+        chapterName: "新方案",
+        highlight: "新看点",
+        coreConflict: "新冲突",
+        plotAndConflict: "新剧情",
+        emotionalTone: "新基调",
+        endingHook: "新钩子",
+        status: "planned",
+        source: "ai",
+        version: 1,
+      },
+    ];
+
+    expect(resolveDisplayedChapterPlans(apiData, snapshot)).toEqual(snapshot);
   });
 });
 

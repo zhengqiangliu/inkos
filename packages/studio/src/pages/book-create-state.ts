@@ -1,4 +1,5 @@
 import type { BookCreationDraft, BookCreationWizardState, BookCreationWizardStep } from "@actalk/inkos-core";
+import type { SessionRuntime } from "../store/chat/types";
 import { fetchJson } from "../hooks/use-api";
 
 export type GenreLike = {
@@ -96,6 +97,7 @@ export type StepMarkdownSpec = {
 
 export type WizardStepHydrationStatus = "idle" | "loading" | "loaded" | "error";
 export type GenreSelectionSource = "unknown" | "auto" | "manual";
+export type IntroGenerationPhase = "idle" | "thinking" | "drafting";
 
 export type WizardAdvanceRequest = {
   readonly currentStep: BookCreationWizardStep;
@@ -754,6 +756,46 @@ export function composeIntroSeedText(blurb: string, storyBackground: string): st
   return parts.join("\n\n");
 }
 
+export function resolveIntroGenerationState(session?: Pick<SessionRuntime, "isStreaming" | "currentWizardStep" | "messages"> | null): {
+  readonly active: boolean;
+  readonly phase: IntroGenerationPhase;
+} {
+  if (!session?.isStreaming || session.currentWizardStep !== "intro") {
+    return { active: false, phase: "idle" };
+  }
+
+  const messages = session.messages ?? [];
+  let latestIntroUserIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role === "user" && message.wizardStep === "intro") {
+      latestIntroUserIndex = i;
+      break;
+    }
+  }
+
+  let currentAssistant: typeof messages[number] | null = null;
+  for (let i = messages.length - 1; i > latestIntroUserIndex; i -= 1) {
+    const message = messages[i];
+    if (message?.role === "assistant" && (message.wizardStep === "intro" || !message.wizardStep)) {
+      currentAssistant = message;
+      break;
+    }
+  }
+
+  if (!currentAssistant) {
+    return { active: true, phase: "thinking" };
+  }
+
+  const hasDraftText = Boolean(currentAssistant.content?.trim())
+    || Boolean(currentAssistant.parts?.some((part) => part.type === "text" && part.content.trim().length > 0));
+
+  return {
+    active: true,
+    phase: hasDraftText ? "drafting" : "thinking",
+  };
+}
+
 export function buildIntroCandidateBackfill(candidate: IntroCandidateLike): string {
   return composeIntroSeedText(candidate.blurb, candidate.storyBackground);
 }
@@ -801,6 +843,141 @@ export function looksLikeIntroBodyMarkdown(content: string): boolean {
     || /(^|\n)\s*##\s+(一句话卖点|故事概述|故事走向|主要人物成长路径|核心冲突|核心价值观)/.test(trimmed);
 }
 
+type IntroNarrativeField =
+  | "title"
+  | "blurb"
+  | "storyBackground"
+  | "plotDirection"
+  | "characterGrowth"
+  | "coreConflict"
+  | "coreValue"
+  | "style"
+  | "protagonist"
+  | "hook";
+
+const INTRO_NARRATIVE_LABELS: ReadonlyArray<{
+  readonly aliases: ReadonlyArray<string>;
+  readonly field: IntroNarrativeField;
+}> = [
+  { aliases: ["候选书名", "推荐书名", "书名"], field: "title" },
+  { aliases: ["一句话爆款卖点", "一句话爆点", "一句话卖点", "核心卖点", "卖点"], field: "blurb" },
+  { aliases: ["故事概述", "故事梗概", "故事背景", "背景"], field: "storyBackground" },
+  { aliases: ["故事走向", "故事主线", "剧情主线", "主线设计", "剧情走向"], field: "plotDirection" },
+  { aliases: ["主要人物成长路径", "人物成长路径", "人物成长", "主角成长", "角色成长", "成长路径"], field: "characterGrowth" },
+  { aliases: ["核心冲突", "主要冲突", "冲突焦点", "矛盾焦点"], field: "coreConflict" },
+  { aliases: ["核心价值观", "价值观", "立意", "主题表达"], field: "coreValue" },
+  { aliases: ["赛道定位", "题材定位", "风格定位"], field: "style" },
+  { aliases: ["主角人设", "核心人设", "主角设定", "人物设定"], field: "protagonist" },
+  { aliases: ["开篇钩子", "引爆点", "矛盾引爆点", "爽点设计", "情感张力"], field: "hook" },
+];
+
+const INTRO_NARRATIVE_LABEL_TO_FIELD = new Map<string, IntroNarrativeField>(
+  INTRO_NARRATIVE_LABELS.flatMap((entry) => entry.aliases.map((alias) => [alias, entry.field] as const)),
+);
+
+const INTRO_NARRATIVE_REGEX = new RegExp(
+  `(^|[\\n。！？!?；;])\\s*(${[...INTRO_NARRATIVE_LABEL_TO_FIELD.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})\\s*[：:]\\s*`,
+  "g",
+);
+
+function normalizeNarrativeIntroValue(text: string): string {
+  return text
+    .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function joinNarrativeIntroParts(parts: ReadonlyArray<string>): string {
+  const unique = Array.from(new Set(parts.map((part) => normalizeNarrativeIntroValue(part)).filter(Boolean)));
+  return unique.join("\n\n").trim();
+}
+
+function buildMeaningfulIntroBodyMarkdown(params: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly plotDirection?: string;
+  readonly characterGrowth?: string;
+  readonly coreConflict?: string;
+  readonly coreValue?: string;
+}): string {
+  const sections = [
+    params.blurb?.trim() ? `## 一句话卖点\n${params.blurb.trim()}` : undefined,
+    params.storyBackground?.trim() ? `## 故事概述\n${params.storyBackground.trim()}` : undefined,
+    params.plotDirection?.trim() ? `## 故事走向\n${params.plotDirection.trim()}` : undefined,
+    params.characterGrowth?.trim() ? `## 主要人物成长路径\n${params.characterGrowth.trim()}` : undefined,
+    params.coreConflict?.trim() ? `## 核心冲突\n${params.coreConflict.trim()}` : undefined,
+    params.coreValue?.trim() ? `## 核心价值观\n${params.coreValue.trim()}` : undefined,
+  ].filter((section): section is string => Boolean(section));
+  if (sections.length < 4) return "";
+  return ["# 简介正文", ...sections].join("\n\n").trim();
+}
+
+function synthesizeIntroMarkdownFromNarrative(input: string): string {
+  const source = input.trim();
+  if (!source) return "";
+
+  const matches = Array.from(source.matchAll(INTRO_NARRATIVE_REGEX));
+  if (matches.length < 4) return "";
+
+  const buckets: Record<Exclude<IntroNarrativeField, "title">, string[]> = {
+    blurb: [],
+    storyBackground: [],
+    plotDirection: [],
+    characterGrowth: [],
+    coreConflict: [],
+    coreValue: [],
+    style: [],
+    protagonist: [],
+    hook: [],
+  };
+
+  for (let i = 0; i < matches.length; i += 1) {
+    const current = matches[i];
+    const alias = current?.[2]?.trim() ?? "";
+    const field = INTRO_NARRATIVE_LABEL_TO_FIELD.get(alias);
+    if (!field || field === "title") continue;
+    const valueStart = (current?.index ?? 0) + current?.[0].length;
+    const valueEnd = matches[i + 1]?.index ?? source.length;
+    const value = normalizeNarrativeIntroValue(source.slice(valueStart, valueEnd));
+    if (!value) continue;
+    buckets[field].push(value);
+  }
+
+  const markdown = buildMeaningfulIntroBodyMarkdown({
+    blurb: joinNarrativeIntroParts([
+      ...buckets.blurb,
+      ...(buckets.blurb.length === 0 ? buckets.style.slice(0, 1) : []),
+      ...(buckets.blurb.length === 0 ? buckets.hook.slice(0, 1) : []),
+    ]),
+    storyBackground: joinNarrativeIntroParts([
+      ...buckets.storyBackground,
+      ...(buckets.storyBackground.length === 0 ? buckets.protagonist.slice(0, 1) : []),
+      ...(buckets.storyBackground.length === 0 ? buckets.hook.slice(0, 1) : []),
+    ]),
+    plotDirection: joinNarrativeIntroParts([
+      ...buckets.plotDirection,
+      ...(buckets.plotDirection.length === 0 ? buckets.hook.slice(0, 1) : []),
+    ]),
+    characterGrowth: joinNarrativeIntroParts([
+      ...buckets.characterGrowth,
+      ...(buckets.characterGrowth.length === 0 ? buckets.protagonist.slice(0, 1) : []),
+    ]),
+    coreConflict: joinNarrativeIntroParts([
+      ...buckets.coreConflict,
+      ...(buckets.coreConflict.length === 0 ? buckets.hook.slice(0, 1) : []),
+    ]),
+    coreValue: joinNarrativeIntroParts([
+      ...buckets.coreValue,
+      ...(buckets.coreValue.length === 0 ? buckets.style.slice(0, 1) : []),
+    ]),
+  });
+
+  return hasMeaningfulIntroMarkdown(markdown) ? markdown : "";
+}
+
 export function hasMeaningfulIntroMarkdown(content: string): boolean {
   const trimmed = content.trim();
   if (!looksLikeIntroBodyMarkdown(trimmed)) return false;
@@ -843,13 +1020,100 @@ function findIntroBodyStartIndex(content: string): number {
   return -1;
 }
 
+function dedupeIntroMarkdownSections(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return "";
+  const normalized = trimmed.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const result: string[] = [];
+  const seenSectionKeys = new Set<string>();
+  const seenSectionHeadings = new Set<string>();
+  const seenParagraphKeys = new Set<string>();
+
+  let index = 0;
+  while (index < lines.length) {
+    const rawLine = lines[index] ?? "";
+    const line = rawLine.trim();
+    if (!line) {
+      if (result[result.length - 1] !== "") result.push("");
+      index += 1;
+      continue;
+    }
+
+    if (/^#\s+/.test(line)) {
+      result.push(line);
+      index += 1;
+      continue;
+    }
+
+    if (/^##\s+/.test(line)) {
+      const heading = line.replace(/^##\s+/, "").trim();
+      const bucket: string[] = [];
+      index += 1;
+      while (index < lines.length) {
+        const candidate = lines[index] ?? "";
+        const trimmedCandidate = candidate.trim();
+        if (/^##\s+/.test(trimmedCandidate) || /^#\s+/.test(trimmedCandidate)) break;
+        bucket.push(candidate);
+        index += 1;
+      }
+      const body = bucket.join("\n").trim();
+      const sectionKey = `${heading}\n${body.replace(/\s+/g, " ").trim()}`;
+      if (body && (seenSectionKeys.has(sectionKey) || seenSectionHeadings.has(heading))) {
+        continue;
+      }
+      seenSectionKeys.add(sectionKey);
+      seenSectionHeadings.add(heading);
+      result.push(`## ${heading}`);
+      if (body) {
+        const paragraphs = body
+          .split(/\n{2,}/)
+          .map((part) => part.trim())
+          .filter(Boolean)
+          .filter((part) => {
+            const paragraphKey = part.replace(/\s+/g, " ").trim();
+            if (!paragraphKey) return false;
+            if (seenParagraphKeys.has(paragraphKey)) return false;
+            seenParagraphKeys.add(paragraphKey);
+            return true;
+          });
+        if (paragraphs.length > 0) {
+          result.push(paragraphs.join("\n\n"));
+        }
+      }
+      if (result[result.length - 1] !== "") result.push("");
+      continue;
+    }
+
+    const paragraph: string[] = [rawLine];
+    index += 1;
+    while (index < lines.length) {
+      const candidate = lines[index] ?? "";
+      const trimmedCandidate = candidate.trim();
+      if (!trimmedCandidate || /^#\s+/.test(trimmedCandidate) || /^##\s+/.test(trimmedCandidate)) break;
+      paragraph.push(candidate);
+      index += 1;
+    }
+    const body = paragraph.join("\n").trim();
+    const paragraphKey = body.replace(/\s+/g, " ").trim();
+    if (paragraphKey && !seenParagraphKeys.has(paragraphKey)) {
+      seenParagraphKeys.add(paragraphKey);
+      result.push(body);
+    }
+  }
+
+  return result.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function normalizeIntroMarkdownCandidate(content: string): string {
   const trimmed = content.trim();
   if (!trimmed) return "";
-  if (looksLikeIntroBodyMarkdown(trimmed)) return trimmed;
+  if (looksLikeIntroBodyMarkdown(trimmed)) return dedupeIntroMarkdownSections(trimmed);
   const startIndex = findIntroBodyStartIndex(trimmed);
-  if (startIndex < 0) return "";
-  return trimmed.split(/\r?\n/).slice(startIndex).join("\n").trim();
+  if (startIndex < 0) {
+    return dedupeIntroMarkdownSections(synthesizeIntroMarkdownFromNarrative(trimmed));
+  }
+  return dedupeIntroMarkdownSections(trimmed.split(/\r?\n/).slice(startIndex).join("\n").trim());
 }
 
 function scoreIntroMarkdownCandidate(content: string): number {
@@ -1211,6 +1475,119 @@ export function buildStepMarkdownDraft(
   language: "zh" | "en",
 ): string {
   return buildWizardStepSeedText(step, draft, language);
+}
+
+function normalizeWizardFieldLabel(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[：:]/g, "")
+    .replace(/\s+/g, "");
+}
+
+function resolveWizardFieldKey(
+  step: Exclude<BookCreationWizardStep, "intro">,
+  heading: string,
+): "worldPremise" | "settingNotes" | "novelOutline" | "conflictCore" | "volumeOutline" | "protagonist" | "supportingCast" | "characterMatrix" | "characterArc" | "relationshipMap" | null {
+  const normalized = normalizeWizardFieldLabel(heading);
+  switch (step) {
+    case "world":
+      if (normalized === "世界观" || normalized === "worldpremise") return "worldPremise";
+      if (normalized === "补充设定" || normalized === "settingnotes") return "settingNotes";
+      return null;
+    case "outline":
+      if (normalized === "大纲" || normalized === "小说大纲" || normalized === "outline" || normalized === "noveloutline") return "novelOutline";
+      if (normalized === "核心冲突" || normalized === "conflict" || normalized === "coreconflict") return "conflictCore";
+      return null;
+    case "volume":
+      if (normalized === "卷纲" || normalized === "卷纲方向" || normalized === "volumeoutline" || normalized === "volume") return "volumeOutline";
+      return null;
+    case "characters":
+      if (normalized === "主角" || normalized === "protagonist") return "protagonist";
+      if (normalized === "配角" || normalized === "supportingcast" || normalized === "关键配角" || normalized === "关键配角势力") return "supportingCast";
+      if (normalized === "角色矩阵" || normalized === "charactermatrix") return "characterMatrix";
+      return null;
+    case "arc":
+      if (normalized === "人物弧光" || normalized === "characterarc") return "characterArc";
+      return null;
+    case "relation":
+      if (normalized === "人物关系" || normalized === "relationshipmap") return "relationshipMap";
+      return null;
+  }
+}
+
+export function mergeWizardStepContentIntoDraft(
+  step: Exclude<BookCreationWizardStep, "intro">,
+  content: string,
+  draft: Partial<BookCreationDraft>,
+): Partial<BookCreationDraft> {
+  const trimmed = content.trim();
+  if (!trimmed) return draft;
+
+  if (step === "arc") {
+    return { ...draft, characterArc: trimmed };
+  }
+  if (step === "relation") {
+    return { ...draft, relationshipMap: trimmed };
+  }
+  if (step === "volume") {
+    return { ...draft, volumeOutline: trimmed };
+  }
+
+  const lines = trimmed.split(/\r?\n/);
+  const collected = new Map<string, string[]>();
+  let currentKey: ReturnType<typeof resolveWizardFieldKey> = step === "world"
+    ? ("worldPremise" as const)
+    : step === "outline"
+      ? ("novelOutline" as const)
+      : step === "characters"
+        ? ("protagonist" as const)
+        : null;
+
+  const pushLine = (key: string | null, line: string) => {
+    if (!key) return;
+    const list = collected.get(key) ?? [];
+    list.push(line);
+    collected.set(key, list);
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+    const headingMatch = line.trim().match(/^#{1,6}\s*(.+)$/);
+    if (headingMatch?.[1]) {
+      currentKey = resolveWizardFieldKey(step, headingMatch[1]);
+      continue;
+    }
+
+    const labelMatch = line.trim().match(/^([^：:]{1,30})[：:]\s*(.*)$/);
+    if (labelMatch?.[1]) {
+      const matchedKey = resolveWizardFieldKey(step, labelMatch[1]);
+      if (matchedKey) {
+        currentKey = matchedKey;
+        const value = labelMatch[2]?.trim() ?? "";
+        if (value) pushLine(currentKey, value);
+        continue;
+      }
+    }
+
+    if (!line.trim() && currentKey) {
+      pushLine(currentKey, "");
+      continue;
+    }
+    pushLine(currentKey, line);
+  }
+
+  const nextDraft: Partial<BookCreationDraft> = { ...draft };
+  for (const [key, valueLines] of collected.entries()) {
+    const value = valueLines.join("\n").trim();
+    if (!value) continue;
+    (nextDraft as Record<string, unknown>)[key] = value;
+  }
+
+  if (step === "world" && !nextDraft.worldPremise && trimmed) nextDraft.worldPremise = trimmed;
+  if (step === "outline" && !nextDraft.novelOutline && trimmed) nextDraft.novelOutline = trimmed;
+  if (step === "characters" && !nextDraft.protagonist && trimmed) nextDraft.protagonist = trimmed;
+  return nextDraft;
 }
 
 const WIZARD_SUMMARY_LANGUAGE_PATTERN = /已重写|已保存|相较|相比|本次|说明|总结|汇报|未改动其他任何页面|只重写这一页|仅重写|重新生成|已写入/i;
@@ -1706,10 +2083,30 @@ export function selectBookCreateDockMessages<T extends {
   readonly visibleMessages: ReadonlyArray<T>;
   readonly legacyMessageCount: number;
 } {
+  const taggedMessages = messages.filter((message) => message.wizardStep === currentStep);
+  const latestAssistantIndex = [...messages].reverse().findIndex((message) => message.role === "assistant" && !message.wizardStep);
+  const latestAssistant = latestAssistantIndex >= 0
+    ? messages[messages.length - 1 - latestAssistantIndex]
+    : undefined;
   return {
-    visibleMessages: messages.filter((message) => message.wizardStep === currentStep),
+    visibleMessages: taggedMessages.length > 0
+      ? taggedMessages
+      : (latestAssistant ? [latestAssistant] : []),
     legacyMessageCount: messages.filter((message) => !message.wizardStep).length,
   };
+}
+
+export function shouldAutoSyncVisibleWizardStep(params: {
+  readonly userPinnedWizardStep: boolean;
+  readonly visibleStep: BookCreationWizardStep;
+  readonly serverStep?: BookCreationWizardStep | null;
+  readonly wizardStepOrder: ReadonlyMap<BookCreationWizardStep, number>;
+}): boolean {
+  const { userPinnedWizardStep, visibleStep, serverStep, wizardStepOrder } = params;
+  if (!serverStep || userPinnedWizardStep) return false;
+  const serverIndex = wizardStepOrder.get(serverStep) ?? 0;
+  const visibleIndex = wizardStepOrder.get(visibleStep) ?? 0;
+  return serverIndex > visibleIndex;
 }
 
 export function rankIntroCandidates(
@@ -2225,10 +2622,15 @@ export function buildCreationDraftSummary(
     ? [
         draft.title ? { key: "title", label: "Title", value: draft.title } : undefined,
         draft.genre ? { key: "genre", label: "Genre", value: draft.genre } : undefined,
+        draft.platform ? { key: "platform", label: "Platform", value: draft.platform } : undefined,
+        typeof draft.targetChapters === "number" ? { key: "targetChapters", label: "Target Chapters", value: String(draft.targetChapters) } : undefined,
+        typeof draft.chapterWordCount === "number" ? { key: "chapterWordCount", label: "Words / Chapter", value: String(draft.chapterWordCount) } : undefined,
         draft.storyBackground ? { key: "storyBackground", label: "Story Background", value: draft.storyBackground } : undefined,
         draft.worldPremise ? { key: "worldPremise", label: "World", value: draft.worldPremise } : undefined,
+        draft.settingNotes ? { key: "settingNotes", label: "Setting Notes", value: draft.settingNotes } : undefined,
         draft.novelOutline ? { key: "novelOutline", label: "Novel Outline", value: draft.novelOutline } : undefined,
         draft.protagonist ? { key: "protagonist", label: "Protagonist", value: draft.protagonist } : undefined,
+        draft.supportingCast ? { key: "supportingCast", label: "Supporting Cast", value: draft.supportingCast } : undefined,
         draft.characterMatrix ? { key: "characterMatrix", label: "Character Matrix", value: draft.characterMatrix } : undefined,
         draft.characterArc ? { key: "characterArc", label: "Character Arc", value: draft.characterArc } : undefined,
         draft.relationshipMap ? { key: "relationshipMap", label: "Relationship Map", value: draft.relationshipMap } : undefined,
@@ -2239,10 +2641,15 @@ export function buildCreationDraftSummary(
     : [
         draft.title ? { key: "title", label: "书名", value: draft.title } : undefined,
         draft.genre ? { key: "genre", label: "题材", value: draft.genre } : undefined,
+        draft.platform ? { key: "platform", label: "平台", value: draft.platform } : undefined,
+        typeof draft.targetChapters === "number" ? { key: "targetChapters", label: "目标章数", value: String(draft.targetChapters) } : undefined,
+        typeof draft.chapterWordCount === "number" ? { key: "chapterWordCount", label: "每章字数", value: String(draft.chapterWordCount) } : undefined,
         draft.storyBackground ? { key: "storyBackground", label: "故事背景", value: draft.storyBackground } : undefined,
         draft.worldPremise ? { key: "worldPremise", label: "世界观", value: draft.worldPremise } : undefined,
+        draft.settingNotes ? { key: "settingNotes", label: "补充设定", value: draft.settingNotes } : undefined,
         draft.novelOutline ? { key: "novelOutline", label: "小说大纲", value: draft.novelOutline } : undefined,
         draft.protagonist ? { key: "protagonist", label: "主角", value: draft.protagonist } : undefined,
+        draft.supportingCast ? { key: "supportingCast", label: "配角", value: draft.supportingCast } : undefined,
         draft.characterMatrix ? { key: "characterMatrix", label: "角色矩阵", value: draft.characterMatrix } : undefined,
         draft.characterArc ? { key: "characterArc", label: "人物弧光", value: draft.characterArc } : undefined,
         draft.relationshipMap ? { key: "relationshipMap", label: "人物关系", value: draft.relationshipMap } : undefined,

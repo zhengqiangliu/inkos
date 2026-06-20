@@ -139,6 +139,7 @@ describe("interaction models", () => {
       concept: "港风商战悬疑，主角从灰产洗白。",
       title: "夜港账本",
       genre: "urban",
+      introCharacterNames: ["林砚", "陆沉"],
       readyToCreate: false,
     });
 
@@ -152,6 +153,7 @@ describe("interaction models", () => {
 
     const withDraft = updateCreationDraft(session, draft);
     expect(withDraft.creationDraft?.title).toBe("夜港账本");
+    expect(withDraft.creationDraft?.introCharacterNames).toEqual(["林砚", "陆沉"]);
     expect(clearCreationDraft(withDraft).creationDraft).toBeUndefined();
   });
 

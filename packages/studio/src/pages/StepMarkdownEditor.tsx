@@ -61,7 +61,7 @@ export function StepMarkdownEditor(props: {
             <Edit3 size={12} className="mr-1 inline-block" />
             {editing ? "预览" : "编辑"}
           </button>
-          {editing ? (
+          {editing && onSave ? (
             <button
               type="button"
               onClick={async () => {

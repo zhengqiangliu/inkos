@@ -101,6 +101,26 @@ function runOrThrow(command, args, options = {}) {
   }
 }
 
+function runOrThrowWithRetry(command, args, options = {}, retries = 2) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      if (attempt > 0) {
+        process.stdout.write(`\nRetrying install (${attempt}/${retries}) after transient failure...\n`);
+      }
+      runOrThrow(command, args, options);
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/ECONNRESET|network|read/i.test(message) || attempt === retries) {
+        throw error;
+      }
+    }
+  }
+  throw lastError ?? new Error("Install failed without a captured error.");
+}
+
 function captureOrThrow(command, args, options = {}) {
   const result = spawnSync(command, args, {
     stdio: ["ignore", "pipe", "pipe"],
@@ -179,7 +199,25 @@ async function main() {
   const studioTgz = await packAndGetTgzPath(npm, join(root, "packages", "studio"), outDir);
   const cliTgz = await packAndGetTgzPath(npm, join(root, "packages", "cli"), outDir);
 
-  runOrThrow(npm, ["i", "-g", "--force", coreTgz, studioTgz, cliTgz], { cwd: root });
+  runOrThrowWithRetry(
+    npm,
+    [
+      "i",
+      "-g",
+      "--force",
+      "--no-audit",
+      "--no-fund",
+      "--prefer-offline",
+      "--fetch-retries=5",
+      "--fetch-retry-factor=2",
+      "--fetch-retry-maxtimeout=60000",
+      coreTgz,
+      studioTgz,
+      cliTgz,
+    ],
+    { cwd: root },
+    2,
+  );
 
   process.stdout.write(
     "\nLocal upgrade completed.\n" +

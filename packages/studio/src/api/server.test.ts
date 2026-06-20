@@ -20,6 +20,7 @@ const loadChapterIndexMock = vi.fn();
 const loadBookConfigMock = vi.fn();
 const createLLMClientMock = vi.fn(() => ({}));
 const chatCompletionMock = vi.fn();
+let chapterDesignAgentMockMode: "normal" | "fallback" = "normal";
 const loadProjectConfigMock = vi.fn();
 const readVolumeMapMock = vi.fn(async (bookDir: string) => {
   const newPath = join(bookDir, "story", "outline", "volume_map.md");
@@ -461,7 +462,7 @@ vi.mock("@actalk/inkos-core", () => {
 
     async designBatch(input: { startChapter: number; count: number }): Promise<unknown[]> {
       const now = "2026-04-07T00:00:00.000Z";
-      return Array.from({ length: input.count }, (_value, index) => {
+      const plans = Array.from({ length: input.count }, (_value, index) => {
         const chapterNumber = input.startChapter + index;
         return {
           chapterNumber,
@@ -482,6 +483,13 @@ vi.mock("@actalk/inkos-core", () => {
           updatedAt: now,
         };
       });
+      if (chapterDesignAgentMockMode === "fallback") {
+        Object.assign(plans, {
+          usedFallback: true,
+          fallbackReason: "LLM 章节设计失败，已使用本地兜底。",
+        });
+      }
+      return plans;
     }
 
     async analyzeAndDesignChapter(input: { chapterNumber: number }): Promise<unknown> {
@@ -753,6 +761,7 @@ describe("createStudioServer daemon lifecycle", () => {
     createLLMClientMock.mockReset();
     createLLMClientMock.mockReturnValue({});
     chatCompletionMock.mockReset();
+    chapterDesignAgentMockMode = "normal";
     chatCompletionMock.mockResolvedValue({
       content: "pong",
       usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
@@ -3321,6 +3330,53 @@ describe("createStudioServer daemon lifecycle", () => {
     await expect(readFile(join(bookDir, "story", "volume_outline.md"), "utf-8")).resolves.toContain("总章数 20 章");
   });
 
+  it("updates book shell metadata including title through the book update endpoint", async () => {
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(bookDir, { recursive: true });
+    await writeFile(join(bookDir, "book.json"), JSON.stringify({
+      id: "demo-book",
+      title: "未命名书稿",
+      platform: "other",
+      genre: "other",
+      status: "outlining",
+      creationState: "wizard",
+      targetChapters: 200,
+      chapterWordCount: 3000,
+      language: "zh",
+      createdAt: "2026-04-12T00:00:00.000Z",
+      updatedAt: "2026-04-12T00:00:00.000Z",
+    }), "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "夜港账本",
+        genre: "urban",
+        platform: "tomato",
+        language: "zh",
+        targetChapters: 120,
+        chapterWordCount: 2800,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: true,
+      book: expect.objectContaining({
+        title: "夜港账本",
+        genre: "urban",
+        platform: "tomato",
+        targetChapters: 120,
+        chapterWordCount: 2800,
+      }),
+    });
+    await expect(readFile(join(bookDir, "book.json"), "utf-8")).resolves.toContain("\"title\": \"夜港账本\"");
+  });
+
   it("routes standalone audit through pipeline auditDraft", async () => {
     loadChapterIndexMock.mockResolvedValue([
       {
@@ -4628,6 +4684,34 @@ describe("createStudioServer daemon lifecycle", () => {
         action: "generate",
       }),
     ]));
+  });
+
+  it("reports fallback generation when the design agent returns fallback output", async () => {
+    chapterDesignAgentMockMode = "fallback";
+
+    const bookDir = join(root, "books", "demo-book");
+    await mkdir(join(bookDir, "story", "outline"), { recursive: true });
+    await mkdir(join(bookDir, "story", "state"), { recursive: true });
+    await writeFile(join(bookDir, "story", "outline", "volume_map.md"), "# 卷纲\n\n总章数 10 章", "utf-8");
+
+    const { createStudioServer } = await import("./server.js");
+    const app = createStudioServer(cloneProjectConfig() as never, root);
+
+    const response = await app.request("http://localhost/api/v1/books/demo-book/chapter-plans/generate-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ startChapter: 1, count: 1 }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      partial: true,
+      usedFallback: true,
+      fallbackReason: expect.stringContaining("兜底"),
+      successChapters: [1],
+      generatedCount: 1,
+    });
   });
 
   it("appends backfilled chapter plans to history", async () => {

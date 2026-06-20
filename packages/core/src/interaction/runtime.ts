@@ -9,7 +9,9 @@ import {
   bindActiveBook,
   clearCreationDraft,
   clearPendingDecision,
+  extractIntroCharacterNameHints,
   retreatCreationWizardState,
+  syncIntroCharacterNames,
   validateCreationDraftConsistency,
   updateCreationDraft,
   updateCreationWizard,
@@ -51,12 +53,13 @@ export interface InteractionRuntimeTools {
     input: string,
     existingDraft?: InteractionSession["creationDraft"],
     wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation",
+    themeGenre?: string,
   ) => Promise<unknown>;
   readonly advanceBookWizard?: (
     input: string,
     existingDraft?: InteractionSession["creationDraft"],
     wizardStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation",
-    nextStep?: "intro" | "world" | "outline" | "volume" | "characters" | "arc" | "relation",
+    themeGenre?: string,
   ) => Promise<unknown>;
   readonly createBook?: (input: {
     readonly title: string;
@@ -189,6 +192,7 @@ function renderCreationDraft(
         draft.language ? `- Language: ${draft.language}` : undefined,
         typeof draft.targetChapters === "number" ? `- Target Chapters: ${draft.targetChapters}` : undefined,
         typeof draft.chapterWordCount === "number" ? `- Chapter Word Count: ${draft.chapterWordCount}` : undefined,
+        draft.introCharacterNames?.length ? `- Intro Character Names: ${draft.introCharacterNames.join(", ")}` : undefined,
         draft.storyBackground ? `- Story Background: ${draft.storyBackground}` : undefined,
         draft.worldPremise ? `- World: ${draft.worldPremise}` : undefined,
         draft.novelOutline ? `- Novel Outline: ${draft.novelOutline}` : undefined,
@@ -210,6 +214,7 @@ function renderCreationDraft(
         draft.language ? `- 语言：${draft.language}` : undefined,
         typeof draft.targetChapters === "number" ? `- 目标章数：${draft.targetChapters}` : undefined,
         typeof draft.chapterWordCount === "number" ? `- 每章字数：${draft.chapterWordCount}` : undefined,
+        draft.introCharacterNames?.length ? `- 简介约定角色名：${draft.introCharacterNames.join("、")}` : undefined,
         draft.storyBackground ? `- 故事背景：${draft.storyBackground}` : undefined,
         draft.worldPremise ? `- 世界观：${draft.worldPremise}` : undefined,
         draft.novelOutline ? `- 小说大纲：${draft.novelOutline}` : undefined,
@@ -301,6 +306,7 @@ function collectDraftFieldSnapshot(draft: NonNullable<InteractionSession["creati
     ["chapterWordCount", draft.chapterWordCount],
     ["blurb", draft.blurb],
     ["storyBackground", draft.storyBackground],
+    ["introCharacterNames", draft.introCharacterNames?.join("、")],
     ["worldPremise", draft.worldPremise],
     ["settingNotes", draft.settingNotes],
     ["novelOutline", draft.novelOutline],
@@ -362,18 +368,19 @@ function normalizeCreationDraft(
     readonly keepNextQuestion?: boolean;
   } = {},
 ): NonNullable<InteractionSession["creationDraft"]> {
-  const draftFields = collectDraftFieldSnapshot(draft);
+  const syncedDraft = syncIntroCharacterNames(draft);
+  const draftFields = collectDraftFieldSnapshot(syncedDraft);
   const confirmedFields = [...new Set([
-    ...(draft.confirmedFields ?? []),
+    ...(syncedDraft.confirmedFields ?? []),
     ...(extras.confirmedFields ?? []),
   ])];
   return {
-    ...draft,
-    rawConcept: draft.rawConcept ?? draft.concept,
+    ...syncedDraft,
+    rawConcept: syncedDraft.rawConcept ?? syncedDraft.concept,
     draftFields,
     confirmedFields,
-    missingFields: [...(draft.missingFields ?? [])],
-    readyToCreate: extras.forceReadyToCreate ?? Boolean(draft.readyToCreate),
+    missingFields: [...(syncedDraft.missingFields ?? [])],
+    readyToCreate: extras.forceReadyToCreate ?? Boolean(syncedDraft.readyToCreate),
   };
 }
 
@@ -1180,7 +1187,12 @@ async function handleDraftLifecycleRequest(params: {
           targetStep,
         });
       }
-      const toolResult = await generateWizardStep(request.instruction ?? "", session.creationDraft, saveStep, targetStep);
+      const toolResult = await generateWizardStep(
+        request.instruction ?? "",
+        session.creationDraft,
+        targetStep,
+        request.themeGenre ?? request.genre ?? session.creationDraft?.genre,
+      );
       const metadata = extractToolMetadata(toolResult);
       const draft = metadata.details?.creationDraft as InteractionSession["creationDraft"] | undefined;
       if (!draft) {

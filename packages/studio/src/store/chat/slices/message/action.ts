@@ -426,6 +426,15 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           replaced = true;
           break;
         }
+        if (!replaced) {
+          for (let index = nextMessages.length - 1; index >= 0; index -= 1) {
+            const message = nextMessages[index];
+            if (message?.role !== "assistant" || message.wizardStep) continue;
+            nextMessages[index] = { ...message, content, wizardStep };
+            replaced = true;
+            break;
+          }
+        }
         if (replaced) {
           return { messages: nextMessages };
         }
@@ -716,6 +725,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
               isStopping: hasLiveStream ? runtime?.isStopping ?? false : false,
               stoppedByUser: hasLiveStream ? runtime?.stoppedByUser ?? false : false,
               currentRunId: hasLiveStream ? runtime?.currentRunId ?? null : null,
+              currentWizardStep: hasLiveStream ? runtime?.currentWizardStep ?? null : null,
               lastError: hasLiveStream ? runtime?.lastError ?? null : null,
               ...(detailDraft ? { creationDraft: detailDraft } : {}),
               ...(detailWizard ? { creationWizard: detailWizard } : {}),
@@ -777,12 +787,20 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   sendMessage: async (sessionId, text, activeBookId, options) => {
     const trimmed = text.trim();
     const session = get().sessions[sessionId];
-    if (!trimmed || !session || session.isStreaming) return null;
+    if (!trimmed || !session) return null;
+    if (session.isStreaming) {
+      get().addErrorMessage(
+        sessionId,
+        "当前仍有生成任务在进行中，请等待完成或先停止后再试。",
+        options?.wizardStep,
+      );
+      return null;
+    }
     const expectsPersistedWrite = Boolean(activeBookId && isExplicitWriteNextCommand(trimmed));
 
     if (!get().selectedModel) {
       get().addUserMessage(sessionId, trimmed, options?.wizardStep);
-      get().addErrorMessage(sessionId, "请选择一个模型。");
+      get().addErrorMessage(sessionId, "请选择一个模型。", options?.wizardStep);
       return null;
     }
 
@@ -863,6 +881,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
           sessionId,
           runId,
           ...(options?.wizardStep ? { wizardStep: options.wizardStep } : {} ),
+          ...(options?.themeGenre ? { themeGenre: options.themeGenre } : {}),
           ...(options?.wizardAdvance ? { wizardAdvance: options.wizardAdvance } : {}),
           model: get().selectedModel ?? undefined,
           service: get().selectedService ?? undefined,
@@ -967,6 +986,9 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         get().replaceStreamWithError(sessionId, streamTs, errorMessage, options?.wizardStep);
       } else {
         get().addErrorMessage(sessionId, errorMessage, options?.wizardStep);
+      }
+      if (options?.propagateErrors) {
+        throw error;
       }
       return null;
     } finally {

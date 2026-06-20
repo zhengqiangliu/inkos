@@ -53,7 +53,11 @@
       "PowerShell(node_modules\\\\.bin\\\\tsc --noEmit -p packages/studio/tsconfig.json 2>&1 | Select-Object -First 40)",
       "PowerShell(& \".\\\\node_modules\\\\.bin\\\\tsc.cmd\" --noEmit -p packages/core/tsconfig.json 2>&1 | Select-Object -First 40)",
       "PowerShell(& \".\\\\node_modules\\\\.bin\\\\tsc.cmd\" --noEmit -p packages/studio/tsconfig.json 2>&1 | Select-Object -First 40)",
-      "Bash(echo \"EXIT=$?\")"
+      "Bash(echo \"EXIT=$?\")",
+      "PowerShell(Get-Content F:\\\\InkOSv2\\\\MyInkos\\\\packages\\\\core\\\\src\\\\interaction\\\\project-tools.ts | Select-Object -Skip 833 -First 12 | ForEach-Object { [System.Text.Encoding]::UTF8.GetBytes\\($_\\) | ForEach-Object { \"$_ \" } })",
+      "PowerShell(Set-Content *)",
+      "PowerShell(git *)",
+      "PowerShell(npm test *)"
     ]
   }
 }

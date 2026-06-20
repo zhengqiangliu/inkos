@@ -20,6 +20,7 @@ import type { RadarSource } from "../agents/radar-source.js";
 import { readBookRules, readGenreProfile } from "../agents/rules-reader.js";
 import { analyzeAITells } from "../agents/ai-tells.js";
 import { analyzeSensitiveWords } from "../agents/sensitive-words.js";
+import { detectParagraphLengthDrift, detectParagraphShapeWarnings } from "../agents/post-write-validator.js";
 import { resolveDialogueQuotePolicy as resolveBookDialogueQuotePolicy } from "../utils/dialogue-quote-policy.js";
 import { StateManager } from "../state/manager.js";
 import { MemoryDB, type Fact, type StoredHook } from "../state/memory-db.js";
@@ -425,6 +426,12 @@ interface ReviewPreflightResult {
   readonly signals: ReadonlyArray<ReviewPreflightSignal>;
 }
 
+interface SupplementalAuditIssueContext {
+  readonly bookDir: string;
+  readonly chapterNumber: number;
+  readonly language: LengthLanguage;
+}
+
 class OutlineAnchorMismatchError extends Error {
   readonly chapterNumber: number;
 
@@ -469,13 +476,32 @@ const MIN_AUDIT_PASS_SCORE = 80;
 
 const AUTO_REVIEW_FINAL_NOTE_PREFIX = "[auto-review-final]";
 
+function resolveCanonicalAuditPassed(auditResult: Pick<AuditResult, "passed" | "issues">): boolean {
+  const score = estimateAuditScore(auditResult.issues);
+  if (score < MIN_AUDIT_PASS_SCORE) return false;
+  const severityCounts = countAuditIssueSeverities(auditResult.issues);
+  if (severityCounts.critical > 0) return false;
+  if (auditResult.passed) return true;
+  return auditResult.issues.length > 0;
+}
+
+function normalizeAuditPassedStatus<T extends AuditResult>(auditResult: T): T {
+  const passed = resolveCanonicalAuditPassed(auditResult);
+  if (auditResult.passed === passed) return auditResult;
+  return {
+    ...auditResult,
+    passed,
+  };
+}
+
 function buildReviseAuditSummaryFromResult(
   auditResult: AuditResult,
 ): ReviseAuditSummary {
+  const normalizedAudit = normalizeAuditPassedStatus(auditResult);
   const severityCounts = countAuditIssueSeverities(auditResult.issues);
   const issueCount = Array.isArray(auditResult.issues) ? auditResult.issues.length : 0;
   return {
-    passed: auditResult.passed,
+    passed: normalizedAudit.passed,
     score: estimateAuditScore(auditResult.issues),
     issueCount,
     severityCounts,
@@ -493,9 +519,10 @@ function buildAuditReportText(
   severityCounts: Readonly<{ critical: number; warning: number; info: number }>,
   issueCount: number,
 ): string {
+  const passed = resolveCanonicalAuditPassed(auditResult);
   const score = estimateAuditScore(auditResult.issues);
   const lines = [
-    auditResult.passed
+    passed
       ? issueCount > 0
         ? `审计通过，发现${issueCount}项非阻断问题。`
         : "审计通过。"
@@ -928,13 +955,14 @@ export class PipelineRunner {
     language: LengthLanguage;
     scoreIssues?: ReadonlyArray<AuditIssue>;
   }): AuditResult {
-    if (!params.auditResult.passed) return params.auditResult;
+    const normalizedAudit = normalizeAuditPassedStatus(params.auditResult);
+    if (!normalizedAudit.passed) return normalizedAudit;
     const scoreBasis = params.scoreIssues ?? params.auditResult.issues;
     const score = estimateAuditScore(scoreBasis);
-    if (score >= MIN_AUDIT_PASS_SCORE) return params.auditResult;
+    if (score >= MIN_AUDIT_PASS_SCORE) return normalizedAudit;
 
     const category = params.language === "en" ? "Score Gate" : "评分门禁";
-    const hasScoreGateIssue = params.auditResult.issues.some((issue) => issue.category === category);
+    const hasScoreGateIssue = normalizedAudit.issues.some((issue) => issue.category === category);
     const description = this.localize(params.language, {
       zh: `审计评分低于通过阈值（${score}/${MIN_AUDIT_PASS_SCORE}）。`,
       en: `Audit score is below the pass threshold (${score}/${MIN_AUDIT_PASS_SCORE}).`,
@@ -944,21 +972,21 @@ export class PipelineRunner {
       en: "Address warning-level issues and improve chapter quality before re-audit.",
     });
     const issues = hasScoreGateIssue
-      ? params.auditResult.issues
-      : [...params.auditResult.issues, {
+      ? normalizedAudit.issues
+      : [...normalizedAudit.issues, {
           severity: "info",
           category,
           description,
           suggestion,
         } satisfies AuditIssue];
     const summary = hasScoreGateIssue
-      ? params.auditResult.summary
-      : [params.auditResult.summary?.trim(), description]
+      ? normalizedAudit.summary
+      : [normalizedAudit.summary?.trim(), description]
         .filter((entry): entry is string => Boolean(entry && entry.length > 0))
         .join("\n");
 
     return {
-      ...params.auditResult,
+      ...normalizedAudit,
       passed: false,
       issues,
       summary,
@@ -2595,6 +2623,11 @@ export class PipelineRunner {
       restoreLostAuditIssues: (previous, next) => this.restoreLostAuditIssues(previous, next),
       analyzeAITells,
       analyzeSensitiveWords,
+      analyzeSupplementalIssues: (chapterContent) => this.analyzeSupplementalAuditIssues({
+        bookDir,
+        chapterNumber,
+        language: pipelineLang,
+      }, chapterContent),
       preflightSignals: reviewPreflight.signals,
       activeHookCount: activeHookCountForAudit,
       hookDebtContext: writeInput.chapterPlan
@@ -2944,40 +2977,6 @@ export class PipelineRunner {
         zh: "快速模式：已跳过真相文件状态校验。",
         en: "Quick mode: state validation for truth files skipped.",
       });
-    }
-
-    // 4.2 Final paragraph shape check on persisted content (post-normalize, post-revise)
-    {
-      const {
-        detectParagraphLengthDrift,
-        detectParagraphShapeWarnings,
-      } = await import("../agents/post-write-validator.js");
-      const chapDir = join(bookDir, "chapters");
-      const recentFiles = (await readdir(chapDir).catch(() => [] as string[]))
-        .filter((f) => f.endsWith(".md") && /^\d{4}/.test(f))
-        .sort()
-        .slice(-5);
-      const recentContent = (await Promise.all(
-        recentFiles.map((f) => readFile(join(chapDir, f), "utf-8").catch(() => "")),
-      )).join("\n\n");
-      const paragraphIssues = [
-        ...detectParagraphShapeWarnings(finalContent, pipelineLang),
-        ...detectParagraphLengthDrift(finalContent, recentContent, pipelineLang),
-      ];
-      if (paragraphIssues.length > 0) {
-        for (const issue of paragraphIssues) {
-          this.config.logger?.warn(`[paragraph] ${issue.description}`);
-        }
-        auditResult = {
-          ...auditResult,
-          issues: [...auditResult.issues, ...paragraphIssues.map((v) => ({
-            severity: v.severity as "warning",
-            category: "paragraph-shape",
-            description: v.description,
-            suggestion: v.suggestion,
-          }))],
-        };
-      }
     }
 
     const resolvedStatus = chapterStatus ?? (auditResult.passed ? "ready-for-review" : "audit-failed");
@@ -4943,12 +4942,18 @@ ${matrix}`,
       chapterContent: params.chapterContent,
       language: params.language,
     });
+    const supplementalIssues = await this.analyzeSupplementalAuditIssues({
+      bookDir: params.bookDir,
+      chapterNumber: params.chapterNumber,
+      language: params.language,
+    }, params.chapterContent);
     const hasBlockedWords = sensitiveResult.found.some((f) => f.severity === "block");
     const issues: ReadonlyArray<AuditIssue> = [
       ...llmAudit.issues,
       ...aiTells.issues,
       ...sensitiveResult.issues,
       ...longSpanFatigue.issues,
+      ...supplementalIssues,
     ];
     let auditResult: AuditResult = {
       passed: hasBlockedWords ? false : llmAudit.passed,
@@ -4969,6 +4974,7 @@ ${matrix}`,
     // (not by category name) so that an LLM-reported issue sharing a category
     // label with a long-span issue is still counted.
     const fatigueIssueSet = new Set<AuditIssue>(longSpanFatigue.issues as ReadonlyArray<AuditIssue>);
+    auditResult = normalizeAuditPassedStatus(auditResult);
     let revisionBlockingIssues = auditResult.issues.filter(
       (issue) => !fatigueIssueSet.has(issue),
     );
@@ -4981,6 +4987,7 @@ ${matrix}`,
       (issue) => !fatigueIssueSet.has(issue),
     );
 
+    auditResult = normalizeAuditPassedStatus(auditResult);
     return {
       auditResult,
       aiTellCount: countBlockingAITellIssues(aiTells.issues),
@@ -4988,6 +4995,56 @@ ${matrix}`,
       criticalCount: revisionBlockingIssues.filter((issue) => issue.severity === "critical").length,
       revisionBlockingIssues,
     };
+  }
+
+  private async analyzeSupplementalAuditIssues(
+    context: SupplementalAuditIssueContext,
+    chapterContent: string,
+  ): Promise<ReadonlyArray<AuditIssue>> {
+    const recentContent = await this.loadRecentChapterContentForAudit(
+      context.bookDir,
+      context.chapterNumber,
+    );
+    const paragraphIssues = [
+      ...detectParagraphShapeWarnings(chapterContent, context.language),
+      ...detectParagraphLengthDrift(chapterContent, recentContent, context.language),
+    ];
+    if (paragraphIssues.length === 0) {
+      return [];
+    }
+
+    for (const issue of paragraphIssues) {
+      this.config.logger?.warn(`[paragraph] ${issue.description}`);
+    }
+
+    return paragraphIssues.map((issue) => ({
+      severity: "warning",
+      category: "paragraph-shape",
+      description: issue.description,
+      suggestion: issue.suggestion,
+      ...(issue.issueId ? { issueId: issue.issueId } : {}),
+      ...(issue.dimensionId ? { dimensionId: issue.dimensionId } : {}),
+    }));
+  }
+
+  private async loadRecentChapterContentForAudit(
+    bookDir: string,
+    chapterNumber: number,
+  ): Promise<string> {
+    const chaptersDir = join(bookDir, "chapters");
+    const recentFiles = (await readdir(chaptersDir).catch(() => [] as string[]))
+      .filter((file) => file.endsWith(".md") && /^\d{4}/.test(file))
+      .map((file) => ({
+        file,
+        parsedChapter: Number.parseInt(file.slice(0, 4), 10),
+      }))
+      .filter((entry) => Number.isFinite(entry.parsedChapter) && entry.parsedChapter < chapterNumber)
+      .sort((left, right) => left.parsedChapter - right.parsedChapter)
+      .slice(-5);
+
+    return (await Promise.all(
+      recentFiles.map((entry) => readFile(join(chaptersDir, entry.file), "utf-8").catch(() => "")),
+    )).join("\n\n");
   }
 
   private buildPreflightSignalsSummary(

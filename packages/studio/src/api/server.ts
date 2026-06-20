@@ -3926,7 +3926,12 @@ function normalizeAuditDraftSummary(
     ? Math.max(1, Math.trunc(Number(auditResult.chapterNumber)))
     : 1;
   const basePassed = Boolean(auditResult.passed);
-  const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
+  const passed = resolveAuditPassedByScore(
+    basePassed,
+    score,
+    AUDIT_PASS_SCORE_THRESHOLD,
+    severityCounts,
+  );
   const failureGate = resolveAuditFailureGate({
     basePassed,
     score,
@@ -4515,7 +4520,12 @@ function normalizeReviseAuditSummary(
   const score = Number.isFinite(Number(payload.score))
     ? clampAuditScore(Number(payload.score))
     : estimateCanonicalAuditScore(issueTexts);
-  const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
+  const passed = resolveAuditPassedByScore(
+    basePassed,
+    score,
+    AUDIT_PASS_SCORE_THRESHOLD,
+    severityCounts,
+  );
   const failureGate = resolveAuditFailureGate({
     basePassed,
     score,
@@ -4568,7 +4578,12 @@ function normalizeWriteAuditSummary(
   const issueCount = issueTexts.length;
   const score = estimateCanonicalAuditScore(issueTexts);
   const basePassed = typeof payload.passed === "boolean" ? payload.passed : issueCount === 0;
-  const passed = resolveAuditPassedByScore(basePassed, score, AUDIT_PASS_SCORE_THRESHOLD);
+  const passed = resolveAuditPassedByScore(
+    basePassed,
+    score,
+    AUDIT_PASS_SCORE_THRESHOLD,
+    severityCounts,
+  );
   const failureGate = resolveAuditFailureGate({
     basePassed,
     score,
@@ -9901,6 +9916,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       forceStream?: boolean;
       responseFormat?: "json_object";
       wizardStep?: string;
+      themeGenre?: string;
       wizardAdvance?: {
         wizardStep: string;
         nextStep?: string;
@@ -9926,6 +9942,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
       forceStream: reqForceStream,
       responseFormat: reqResponseFormat,
       wizardStep: reqWizardStep,
+      themeGenre: reqThemeGenre,
       wizardAdvance: reqWizardAdvance,
     } = payload;
     const sessionId = reqSessionId;
@@ -10339,6 +10356,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         bookSession = appendBookSessionMessage(nextSession, {
           role: "assistant",
           content: responseText,
+          wizardStep: "intro",
           timestamp: assistantCheckpointTimestamp,
         });
         persistedBookSession = bookSession;
@@ -10370,6 +10388,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           wizardInput,
           bookSession.creationDraft,
           wizardStep,
+          reqThemeGenre ?? reqWizardAdvance?.genre ?? bookSession.creationDraft?.genre,
         );
         broadcast("thinking:end", { sessionId: streamSessionId, runId });
         const metadata = wizardToolResult && typeof wizardToolResult === "object" && "__interaction" in wizardToolResult
@@ -14661,6 +14680,9 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
   app.put("/api/v1/books/:id", async (c) => {
     const id = c.req.param("id");
     const updates = await c.req.json<{
+      title?: string;
+      genre?: string;
+      platform?: string;
       chapterWordCount?: number;
       targetChapters?: number;
       status?: string;
@@ -14668,8 +14690,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     }>();
     try {
       const book = await state.loadBookConfig(id);
+      const nextTitle = typeof updates.title === "string" ? updates.title.trim() : "";
+      const nextGenre = typeof updates.genre === "string" ? updates.genre.trim() : "";
+      const nextPlatform = typeof updates.platform === "string" ? updates.platform.trim() : "";
       const updated = {
         ...book,
+        ...(nextTitle ? { title: nextTitle } : {}),
+        ...(nextGenre ? { genre: nextGenre } : {}),
+        ...(nextPlatform ? { platform: nextPlatform as typeof book.platform } : {}),
         ...(updates.chapterWordCount !== undefined ? { chapterWordCount: Number(updates.chapterWordCount) } : {}),
         ...(updates.targetChapters !== undefined ? { targetChapters: Number(updates.targetChapters) } : {}),
         ...(updates.status !== undefined ? { status: updates.status as typeof book.status } : {}),
@@ -14677,6 +14705,7 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         updatedAt: new Date().toISOString(),
       };
       await state.saveBookConfig(id, updated);
+      broadcast("book:updated", { bookId: id, title: updated.title });
       return c.json({ ok: true, book: updated });
     } catch (e) {
       return c.json({ error: String(e) }, 500);
@@ -15783,6 +15812,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         existingPlans: existingPlans.filter((p: any) => p.chapterNumber < startChapter),
         language: book.language,
       });
+      const usedFallback = Boolean((plans as { usedFallback?: boolean }).usedFallback);
+      const fallbackReason = (plans as { fallbackReason?: string }).fallbackReason;
 
       // Merge with existing plans and save
       const merged = [...existingPlans];
@@ -15826,7 +15857,16 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
         historyEntries,
       });
 
-      return c.json({ ok: true, successChapters: plans.map((p) => p.chapterNumber) });
+      return c.json({
+        ok: !usedFallback,
+        partial: usedFallback,
+        successChapters: plans.map((p) => p.chapterNumber),
+        generatedCount: plans.length,
+        ...(usedFallback ? {
+          usedFallback: true,
+          fallbackReason: fallbackReason ?? "LLM 章节设计失败，已使用本地兜底。",
+        } : {}),
+      });
     } catch (e) {
       return c.json({ error: `生成失败: ${e}` }, 500);
     }
@@ -15931,6 +15971,8 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     const agent = await createDesignAgent();
     const allPlans: any[] = [];
     const failedChapters: Array<{ chapterNumber: number; reason: string }> = [];
+    let usedFallback = false;
+    let fallbackReason: string | undefined;
 
     for (const range of ranges) {
       try {
@@ -15944,7 +15986,13 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
           existingPlans: existingPlans.filter((p: any) => p.chapterNumber < range.start),
           language: book.language,
         });
+        const planUsedFallback = Boolean((plans as { usedFallback?: boolean }).usedFallback);
+        const planFallbackReason = (plans as { fallbackReason?: string }).fallbackReason;
         allPlans.push(...plans);
+        if (planUsedFallback) {
+          usedFallback = true;
+          fallbackReason = planFallbackReason ?? fallbackReason ?? "LLM 章节设计失败，已使用本地兜底。";
+        }
       } catch (e) {
         for (let ch = range.start; ch < range.start + range.count; ch++) {
           failedChapters.push({ chapterNumber: ch, reason: String(e) });
@@ -16001,9 +16049,14 @@ export function createStudioServer(initialConfig: ProjectConfig, root: string, o
     });
 
     return c.json({
-      ok: failedChapters.length === 0,
-      partial: failedChapters.length > 0 && allPlans.length > 0,
+      ok: failedChapters.length === 0 && !usedFallback,
+      partial: failedChapters.length > 0 && allPlans.length > 0 || usedFallback,
       successChapters: allPlans.map((p) => p.chapterNumber),
+      generatedCount: allPlans.length,
+      ...(usedFallback ? {
+        usedFallback: true,
+        fallbackReason: fallbackReason ?? "LLM 章节设计失败，已使用本地兜底。",
+      } : {}),
       failedChapters: failedChapters.length > 0 ? failedChapters : undefined,
     });
   });

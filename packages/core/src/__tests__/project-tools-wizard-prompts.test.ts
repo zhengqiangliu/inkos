@@ -16,6 +16,60 @@ describe("wizard prompt templates", () => {
     expect(prompt).not.toContain("卷纲规划");
   });
 
+  it("injects base params into downstream wizard prompts", () => {
+    const draft = {
+      title: "夜港账本",
+      genre: "urban",
+      genreAlias: "港风商战悬疑",
+      platform: "tomato",
+      language: "zh",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      blurb: "港口账本牵出灰产洗白风暴。",
+      storyBackground: "港城、账本、灰产洗白。",
+      worldPremise: "港口商战和地下账本交织。",
+      settingNotes: "灰产链条寄生在港区物流体系。",
+      novelOutline: "主角被旧账卷回局中。",
+      conflictCore: "洗白与旧债回潮正面碰撞。",
+      protagonist: "林砚，想洗白却被旧账拖回深水区。",
+      supportingCast: "港务老板、账房旧友、灰产白手套。",
+      volumeOutline: "第一卷查账，第二卷破局。",
+      characterArc: "林砚从自保转向主动反击。",
+      relationshipMap: "林砚 → 港务老板：合作与试探并存。",
+    } as any;
+
+    for (const step of ["world", "outline", "volume", "characters", "arc", "relation"] as const) {
+      const prompt = buildWizardPrompt(step, "generate", "生成当前页", draft);
+      expect(prompt).toContain("## 基础参数");
+      expect(prompt).toContain("书名：夜港账本");
+      expect(prompt).toContain("题材：urban");
+      expect(prompt).toContain("题材锚点：港风商战悬疑");
+      expect(prompt).toContain("平台：tomato");
+      expect(prompt).toContain("语言：zh");
+      expect(prompt).toContain("目标章数：120");
+      expect(prompt).toContain("每章字数：2800");
+    }
+  });
+
+  it("keeps wizard prompt constraint numbering sequential after appending fixed rules", () => {
+    const prompt = buildWizardPrompt("outline", "generate", "生成当前页", {
+      title: "夜港账本",
+      genre: "urban",
+      platform: "tomato",
+      targetChapters: 120,
+      chapterWordCount: 2800,
+      novelOutline: "主角被旧账卷回局中。",
+      conflictCore: "洗白与旧债回潮正面碰撞。",
+    } as any);
+
+    expect(prompt).toContain("1. 只补大纲页，不要写卷级结构或人物关系页。");
+    expect(prompt).toContain("7. 不要出现每卷、卷1、卷2、卷末收束等表述。");
+    expect(prompt).toContain("8. 只允许更新以下字段：novelOutline、conflictCore。其他字段必须保持草案原值。");
+    expect(prompt).toContain("9. 多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。");
+    expect(prompt).toContain("10. 正文必须直接从当前页标题或当前页结构进入，禁止以书名作为首行标题。");
+    expect(prompt).not.toContain("\n4. 只允许更新以下字段：novelOutline、conflictCore。其他字段必须保持草案原值。");
+  });
+
   it("renders a structured intro revision prompt", () => {
     const prompt = buildWizardPrompt(
       "intro",
@@ -61,6 +115,8 @@ describe("wizard prompt templates", () => {
     expect(prompt).toContain("目标章节数");
     expect(prompt).toContain("每章字数");
     expect(prompt).toContain("不要再次询问");
+    expect(prompt).toContain("必须服从 200 章的长篇节奏约束");
+    expect(prompt).toContain("禁止压缩成 100-150 章或更短篇幅的中短篇节奏");
   });
 
   it("keeps intro revision generation direct instead of question-driven", () => {
@@ -81,6 +137,40 @@ describe("wizard prompt templates", () => {
     expect(prompt).toContain("不要再次询问");
     expect(prompt).toContain("正文首行禁止显示书名");
     expect(prompt).not.toContain("请确认");
+  });
+
+  it("requires a title metadata line when intro generation starts without a title", () => {
+    const prompt = buildIntroRevisionPrompt({
+      mode: "generate",
+      userMessage: "请根据题材和卖点生成正文",
+      writingLanguage: "zh",
+      targetChapters: 120,
+      chapterWordCount: 3000,
+      existingDraft: {
+        blurb: "港口账本牵出灰产洗白风暴。",
+        storyBackground: "港城、账本、灰产洗白。",
+      } as any,
+    });
+
+    expect(prompt).toContain("当前还没有书名。你必须先单独输出一行“书名：<生成的书名>”");
+    expect(prompt).toContain("除了这一行“书名：...”元数据外");
+  });
+
+  it("treats the user input as constraints instead of body text", () => {
+    const prompt = buildIntroRevisionPrompt({
+      mode: "generate",
+      userMessage: "手工模式：请根据卖点和故事背景生成正文，不要直接复述要求。",
+      writingLanguage: "zh",
+      targetChapters: 120,
+      chapterWordCount: 3000,
+      existingDraft: {
+        blurb: "港口账本牵出灰产洗白风暴。",
+        storyBackground: "港城、账本、灰产洗白。",
+      } as any,
+    });
+
+    expect(prompt).toContain("用户输入只是创作素材和约束");
+    expect(prompt).toContain("不要原样复述用户输入");
   });
 
   it("normalizes structured intro output into plain markdown text", () => {
@@ -105,16 +195,34 @@ introMarkdown：
     expect(output).not.toContain("introMarkdown：");
   });
 
-  it("does not synthesize a duplicate title when title is only a field label", () => {
+  it("rejects field-label-only output instead of synthesizing a skeleton", () => {
     const output = normalizeIntroRevisionOutput(`title：不卷
 blurb：别人加班我下班。
 storyBackground：林晚，28岁，产品总监。`);
 
-    expect(output).not.toContain("title：");
-    expect(output).not.toContain("blurb：");
-    expect(output).not.toContain("storyBackground：");
+    expect(output).toBe("");
+  });
+
+  it("rebuilds intro markdown from narrative planning prose in manual mode", () => {
+    const output = normalizeIntroRevisionOutput(`赛道定位：都市商战爽文顶流赛道，节奏快、爽点密、复仇感强，适配番茄读者。
+核心卖点：港口旧账本牵出灰产洗白风暴，男主被逐出局后逆势翻盘。
+主角人设：江野，前明星销售，商业嗅觉敏锐，擅长从混乱里找杠杆。
+故事梗概：江野被合伙人踢出公司后，发现旧账本牵出港城物流和资本链条的黑幕，被迫卷回局中。
+剧情主线：他从自保查账走向主动掀桌，在旧债、资本和兄弟反目之间一路升级对抗。
+人物成长：江野从只想保住饭碗，走到敢于公开撕破灰色秩序。
+核心冲突：男主既要对抗灰产链条，也要面对昔日兄弟与资本集团的联合围堵。
+价值观：在灰色规则里，真正能站稳脚跟的不是投机，而是守住底线后的反击。`);
+
     expect(output).toContain("# 简介正文");
-    expect(output).toContain("别人加班我下班。");
+    expect(output).toContain("## 一句话卖点");
+    expect(output).toContain("## 故事概述");
+    expect(output).toContain("## 故事走向");
+    expect(output).toContain("## 主要人物成长路径");
+    expect(output).toContain("## 核心冲突");
+    expect(output).toContain("## 核心价值观");
+    expect(output).toContain("港口旧账本牵出灰产洗白风暴");
+    expect(output).not.toContain("赛道定位：");
+    expect(output).not.toContain("核心卖点：");
   });
 
   it("rejects intro progress text that is not markdown body", () => {
@@ -195,6 +303,36 @@ introMarkdown：
     expect(output).not.toContain("## 一句话卖点\n-");
   });
 
+  it("deduplicates repeated intro sections in normalized output", () => {
+    const output = normalizeIntroRevisionOutput(`# 简介正文
+
+## 一句话卖点
+港口账本牵出灰产洗白风暴。
+
+## 故事概述
+林砚被迫卷入港城旧债和灰产洗白链。
+
+## 故事概述
+重复的故事概述不应保留。
+
+## 故事走向
+他在自保、复仇和真相之间越陷越深。
+
+## 核心冲突
+他与灰产链条的对抗不断升级。
+
+## 核心冲突
+重复的核心冲突不应保留。
+
+## 核心价值观
+在灰色秩序中守住底线。`);
+
+    expect(output.split("## 故事概述").length - 1).toBe(1);
+    expect(output.split("## 核心冲突").length - 1).toBe(1);
+    expect(output).not.toContain("重复的故事概述不应保留。");
+    expect(output).not.toContain("重复的核心冲突不应保留。");
+  });
+
   it("prefers streamed intro markdown over a scaffold-like final completion result", async () => {
     const tools = createInteractionToolsFromDeps({
       config: {
@@ -233,6 +371,112 @@ introMarkdown：
     const interaction = (result as { __interaction?: { details?: { draftRaw?: string; creationDraft?: { draftFields?: { introMarkdown?: string } } } } }).__interaction;
     expect(interaction?.details?.draftRaw).toContain("林砚从被动防守到主动追索真相。");
     expect(interaction?.details?.creationDraft?.draftFields?.introMarkdown).toContain("林砚从被动防守到主动追索真相。");
+
+    chatCompletionSpy.mockRestore();
+  });
+
+  it("rejects intro outputs that only echo the user instruction", async () => {
+    const tools = createInteractionToolsFromDeps({
+      config: {
+        client: {} as any,
+        model: "test-model",
+        projectRoot: "/tmp/project",
+      },
+    } as any, new StateManager(await mkdtemp(join(tmpdir(), "inkos-intro-echo-"))), {
+      onDraftRawDelta: () => undefined,
+      onDraftTextDelta: () => undefined,
+    });
+
+    const chatCompletionSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: "请根据卖点和故事背景生成正文，不要直接复述要求。",
+      usage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      },
+    } as any);
+
+    const result = await tools.reviseBookIntro?.("请根据卖点和故事背景生成正文，不要直接复述要求。", {
+      concept: "港风商战悬疑",
+      title: "夜港账本",
+      genre: "urban",
+      blurb: "港口账本牵出灰产洗白风暴。",
+      storyBackground: "林砚被迫卷入港城旧债和灰产洗白链。",
+      missingFields: [],
+      readyToCreate: false,
+    } as any, "generate", "urban");
+
+    const interaction = result as {
+      __interaction?: {
+        details?: {
+          draftRaw?: string;
+          creationDraft?: {
+            draftFields?: {
+              introMarkdown?: string;
+            };
+          };
+        };
+      };
+    };
+
+    expect(interaction.__interaction?.details?.draftRaw).toBe("");
+    expect(interaction.__interaction?.details?.creationDraft?.draftFields?.introMarkdown).toBeUndefined();
+    chatCompletionSpy.mockRestore();
+  });
+
+  it("writes generated title back into the intro draft when the model emits title metadata", async () => {
+    const tools = createInteractionToolsFromDeps({
+      config: {
+        client: {} as any,
+        model: "test-model",
+        projectRoot: "/tmp/project",
+      },
+    } as any, new StateManager(await mkdtemp(join(tmpdir(), "inkos-intro-title-"))), {
+      onDraftRawDelta: () => undefined,
+      onDraftTextDelta: () => undefined,
+    });
+
+    const chatCompletionSpy = vi.spyOn(llmProvider, "chatCompletion").mockResolvedValue({
+      content: `书名：夜港账本
+
+# 简介正文
+
+## 一句话卖点
+港口账本牵出灰产洗白风暴。
+
+## 故事概述
+林砚被迫卷入港城旧债和灰产洗白链。
+
+## 故事走向
+他在自保、复仇和真相之间越陷越深。
+
+## 主要人物成长路径
+林砚从被动防守到主动追索真相。
+
+## 核心冲突
+他与灰产链条的对抗不断升级。
+
+## 核心价值观
+在灰色秩序中守住底线。`,
+      usage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      },
+    } as any);
+
+    const result = await tools.reviseBookIntro?.("根据种子生成正式简介", {
+      concept: "港风商战悬疑",
+      genre: "urban",
+      blurb: "港口账本牵出灰产洗白风暴。",
+      storyBackground: "林砚被迫卷入港城旧债和灰产洗白链。",
+      missingFields: [],
+      readyToCreate: false,
+    } as any, "generate", "urban");
+
+    const interaction = (result as { __interaction?: { details?: { creationDraft?: { title?: string; draftFields?: { introMarkdown?: string } } } } }).__interaction;
+    expect(interaction?.details?.creationDraft?.title).toBe("夜港账本");
+    expect(interaction?.details?.creationDraft?.draftFields?.introMarkdown).toContain("# 简介正文");
 
     chatCompletionSpy.mockRestore();
   });
@@ -327,6 +571,107 @@ introMarkdown：
     expect(prompt).toContain("参考结构应接近：核心关系 -> 对立关系 -> 隐藏联系 -> 潜在冲突");
   });
 
+  it("injects intro and structural context into world prompts", () => {
+    const prompt = buildWizardPrompt(
+      "world",
+      "generate",
+      "生成世界观正文",
+      {
+        blurb: "港口账本牵出灰产洗白风暴。",
+        storyBackground: "港城、账本、灰产洗白。",
+        worldPremise: "近未来港口城由资本与地下账本网共同支配。",
+        settingNotes: "账本网络决定势力分层与资源流向。",
+        novelOutline: "主角从被动自保转向主动掀桌。",
+        conflictCore: "洗白与旧债回潮的对撞。",
+      } as any,
+    );
+
+    expect(prompt).toContain("简介 / 卖点");
+    expect(prompt).toContain("故事背景");
+    expect(prompt).toContain("世界观草案");
+    expect(prompt).toContain("补充设定");
+    expect(prompt).toContain("小说大纲");
+    expect(prompt).toContain("核心冲突");
+  });
+
+  it("injects intro, world, and character context into outline prompts", () => {
+    const prompt = buildWizardPrompt(
+      "outline",
+      "generate",
+      "生成小说大纲正文",
+      {
+        blurb: "港口账本牵出灰产洗白风暴。",
+        storyBackground: "林砚在港城被旧账拖回灰产洗白局，陆沉和秦鸢分别从码头与商会两端逼近他。",
+        worldPremise: "近未来港口城由资本与地下账本网共同支配。",
+        settingNotes: "账本网络决定势力分层与资源流向。",
+        novelOutline: "主角从被动自保转向主动掀桌。",
+        conflictCore: "洗白与旧债回潮的对撞。",
+        protagonist: "林砚",
+        supportingCast: "陆沉、秦鸢",
+      } as any,
+    );
+
+    expect(prompt).toContain("简介 / 卖点");
+    expect(prompt).toContain("故事背景");
+    expect(prompt).toContain("世界观与核心设定");
+    expect(prompt).toContain("补充设定");
+    expect(prompt).toContain("小说大纲草案");
+    expect(prompt).toContain("核心冲突");
+    expect(prompt).toContain("主角设定");
+    expect(prompt).toContain("关键配角 / 势力");
+    expect(prompt).toContain("简介已约定角色名");
+    expect(prompt).toContain("角色名：林砚、陆沉、秦鸢");
+    expect(prompt).toContain("当前页必须严格沿用这些名字");
+  });
+
+  it("injects story, world, and structure context into character prompts", () => {
+    const prompt = buildWizardPrompt(
+      "characters",
+      "generate",
+      "生成角色页正文",
+      {
+        blurb: "港口账本牵出灰产洗白风暴。",
+        storyBackground: "港城、账本、灰产洗白。",
+        worldPremise: "近未来港口城由资本与地下账本网共同支配。",
+        settingNotes: "账本网络决定势力分层与资源流向。",
+        novelOutline: "主角从被动自保转向主动掀桌。",
+        conflictCore: "洗白与旧债回潮的对撞。",
+        protagonist: "林砚",
+        supportingCast: "陆沉、秦鸢",
+        characterMatrix: "林砚负责破局，陆沉负责施压，秦鸢负责制造信息差。",
+      } as any,
+    );
+
+    expect(prompt).toContain("简介 / 卖点");
+    expect(prompt).toContain("故事背景");
+    expect(prompt).toContain("世界观与核心设定");
+    expect(prompt).toContain("补充设定");
+    expect(prompt).toContain("小说大纲");
+    expect(prompt).toContain("核心冲突");
+    expect(prompt).toContain("主角设定");
+    expect(prompt).toContain("关键配角 / 势力");
+    expect(prompt).toContain("角色矩阵草案");
+  });
+
+  it("prefers structured intro character names over free-text extraction in downstream prompts", () => {
+    const prompt = buildWizardPrompt(
+      "volume",
+      "generate",
+      "补齐卷纲规划",
+      {
+        concept: "港风商战悬疑",
+        blurb: "旧版简介里写过阿砚这个临时称呼。",
+        storyBackground: "林砚卷入港城旧债风暴。",
+        introCharacterNames: ["林砚", "陆沉", "秦鸢"],
+        missingFields: [],
+        readyToCreate: false,
+      } as any,
+    );
+
+    expect(prompt).toContain("角色名：林砚、陆沉、秦鸢");
+    expect(prompt).not.toContain("角色名：阿砚");
+  });
+
   it("injects genre constraints when a genre context is available", () => {
     const prompt = buildWizardPrompt(
       "intro",
@@ -374,6 +719,7 @@ introMarkdown：
         conflictCore: "主角与反派的资源争夺。",
         worldPremise: "近未来都市，资本与技术垄断并存。",
         settingNotes: "卷纲必须贴着主线推进，不要空转。",
+        targetChapters: 200,
       } as any,
     );
 
@@ -387,6 +733,9 @@ introMarkdown：
     expect(volumePrompt).toContain("小说大纲");
     expect(volumePrompt).toContain("核心冲突");
     expect(volumePrompt).toContain("卷纲必须和主线成长同步");
+    expect(volumePrompt).toContain("总卷数、各卷章节范围与卷间推进必须严格服从基础参数中的目标章数");
+    expect(volumePrompt).toContain("如果目标章数是 200 章，就按 200 章体量规划卷数、每卷跨度和阶段推进");
+    expect(volumePrompt).toContain("不得按 100-150 章或更短体量压缩分卷");
   });
 });
 

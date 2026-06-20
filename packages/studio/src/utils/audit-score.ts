@@ -47,8 +47,30 @@ export function resolveAuditPassedByScore(
   basePassed: boolean,
   score: number,
   passScoreThreshold = AUDIT_PASS_SCORE_THRESHOLD,
+  severityCounts?: AuditSeverityCounts,
 ): boolean {
-  return basePassed && score >= passScoreThreshold;
+  if (score < passScoreThreshold) return false;
+  if (basePassed) return true;
+  if (!severityCounts) return false;
+  const issueCount = severityCounts.critical + severityCounts.warning + severityCounts.info;
+  return severityCounts.critical === 0 && issueCount > 0;
+}
+
+export function resolveAuditPassed(args: {
+  readonly basePassed: boolean;
+  readonly score: number;
+  readonly severityCounts?: AuditSeverityCounts;
+  readonly issues?: ReadonlyArray<string>;
+  readonly passScoreThreshold?: number;
+}): boolean {
+  const severityCounts = args.severityCounts
+    ?? countAuditSeverityFromIssueTexts(args.issues ?? []);
+  return resolveAuditPassedByScore(
+    args.basePassed,
+    args.score,
+    args.passScoreThreshold ?? AUDIT_PASS_SCORE_THRESHOLD,
+    severityCounts,
+  );
 }
 
 export function resolveAuditFailureGate(args: {
@@ -58,11 +80,10 @@ export function resolveAuditFailureGate(args: {
   readonly passScoreThreshold?: number;
 }): AuditFailureGate {
   const passScoreThreshold = args.passScoreThreshold ?? AUDIT_PASS_SCORE_THRESHOLD;
-  if (resolveAuditPassedByScore(args.basePassed, args.score, passScoreThreshold)) return "none";
-  if (!args.basePassed && args.severityCounts.critical > 0) return "critical";
+  if (resolveAuditPassedByScore(args.basePassed, args.score, passScoreThreshold, args.severityCounts)) return "none";
+  if (args.severityCounts.critical > 0) return "critical";
   if (args.score < passScoreThreshold) return "score";
-  if (!args.basePassed) return "critical";
-  return "none";
+  return "critical";
 }
 
 export function scoreBadgeClass(score: number): string {

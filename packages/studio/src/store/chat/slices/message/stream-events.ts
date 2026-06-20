@@ -508,7 +508,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("thinking:start", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId)) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if (!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) return;
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
@@ -524,7 +525,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("thinking:delta", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId) || !data?.text) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if ((!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) || !data?.text) return;
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
@@ -553,7 +555,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("thinking:end", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId)) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if (!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) return;
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
@@ -584,7 +587,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("draft:delta", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId) || !data?.text) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if ((!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) || !data?.text) return;
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
@@ -600,7 +604,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("tool:start", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId) || !data?.tool) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if ((!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) || !data?.tool) return;
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
@@ -639,7 +644,7 @@ export function attachSessionStreamListeners({
             },
           });
 
-          return { messages: replaceLast(messages, mergeStreamMessage(stream, filtered)) };
+          return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, filtered), getWizardStep(runtime))) };
         }),
       }));
     } catch {
@@ -650,7 +655,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("tool:end", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId) || !data?.tool) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if ((!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) || !data?.tool) return;
       set((state) => ({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
@@ -683,7 +689,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("tool:update", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId) || !data?.tool) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if ((!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) || !data?.tool) return;
       const partialText = toPartialText(data.partialResult);
       if (!partialText) return;
       set((state) => ({
@@ -737,7 +744,8 @@ export function attachSessionStreamListeners({
   streamEs.addEventListener("log", (event: MessageEvent) => {
     try {
       const data = event.data ? JSON.parse(event.data) : null;
-      if (!sessionMatchesEvent(sessionId, data, runId)) return;
+      const legacyMatch = hasLegacySessionMatch(sessionId, data, runId);
+      if (!sessionMatchesEvent(sessionId, data, runId) && !legacyMatch) return;
       const message = data?.message as string | undefined;
       if (!message) return;
       if (shouldIgnoreHeartbeatLog(message)) return;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getBookBadgeInitial } from "./Sidebar";
+import { getBookBadgeInitial, shouldShowBookList } from "./Sidebar";
 
 describe("Sidebar book badge", () => {
   it("uses the first meaningful character of the book title", () => {
@@ -11,5 +11,10 @@ describe("Sidebar book badge", () => {
   it("falls back safely for empty titles", () => {
     expect(getBookBadgeInitial("")).toBe("?");
     expect(getBookBadgeInitial("   ")).toBe("?");
+  });
+
+  it("hides the book list while the create wizard is open", () => {
+    expect(shouldShowBookList("book-create")).toBe(false);
+    expect(shouldShowBookList("dashboard")).toBe(true);
   });
 });

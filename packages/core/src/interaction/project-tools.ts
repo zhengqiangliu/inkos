@@ -15,7 +15,12 @@ import { chatCompletion, chatWithTools } from "../index.js";
 import { readGenreProfile } from "../agents/rules-reader.js";
 import { executeEditTransaction } from "./edit-controller.js";
 import type { InteractionRuntimeTools } from "./runtime.js";
-import type { BookCreationDraft, BookCreationWizardStep } from "./session.js";
+import {
+  extractIntroCharacterNameHints,
+  syncIntroCharacterNames,
+  type BookCreationDraft,
+  type BookCreationWizardStep,
+} from "./session.js";
 import type { ParsedGenreProfile } from "../models/genre-profile.js";
 import { writeExportArtifact } from "./export-artifact.js";
 
@@ -104,6 +109,25 @@ function buildCreationExternalContext(input: {
   return sections.join("\n\n");
 }
 
+function buildIntroCharacterNameConstraintBlock(input?: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly introMarkdown?: string;
+  readonly draftFields?: Readonly<Record<string, string>>;
+  readonly protagonist?: string;
+  readonly supportingCast?: string;
+  readonly introCharacterNames?: ReadonlyArray<string>;
+}): string | undefined {
+  const names = extractIntroCharacterNameHints(input);
+  if (names.length === 0) return undefined;
+  return [
+    "## 简介已约定角色名",
+    `- 角色名：${names.join("、")}`,
+    "- 后续所有向导页必须沿用这些角色名称，不得擅自改名、替换、合并角色或新增别名，除非用户明确要求。",
+    "- 如果当前页需要补主角、配角、卷纲、大纲、人物弧光或人物关系，请优先围绕这些已约定角色展开。",
+  ].join("\n");
+}
+
 function parseIntroMarkdownDraft(input: string): { readonly blurb: string; readonly storyBackground: string } {
   const lines = input
     .split(/\r?\n/)
@@ -186,11 +210,11 @@ function parseIntroRevisionOutput(input: string): {
       continue;
     }
 
-    const match = trimmed.match(/^(title|blurb|storyBackground|introMarkdown)\s*[:：]\s*(.*)$/i);
+    const match = trimmed.match(/^(title|书名|blurb|storyBackground|introMarkdown)\s*[:：]\s*(.*)$/i);
     if (match) {
       const key = match[1]!.toLowerCase();
       const value = match[2]?.trim() ?? "";
-      if (key === "title" && value) title = value;
+      if ((key === "title" || key === "书名") && value) title = value;
       if (key === "blurb" && value) blurb = value;
       if (key === "storybackground" && value) storyBackground = value;
       if (key === "intromarkdown" && value) bodyLines.push(value);
@@ -206,6 +230,158 @@ function parseIntroRevisionOutput(input: string): {
     ...(storyBackground ? { storyBackground } : {}),
     body: bodyLines.join("\n").trim(),
   };
+}
+
+type IntroNarrativeField =
+  | "title"
+  | "blurb"
+  | "storyBackground"
+  | "plotDirection"
+  | "characterGrowth"
+  | "coreConflict"
+  | "coreValue"
+  | "style"
+  | "protagonist"
+  | "hook";
+
+const INTRO_NARRATIVE_LABELS: ReadonlyArray<{
+  readonly aliases: ReadonlyArray<string>;
+  readonly field: IntroNarrativeField;
+}> = [
+  { aliases: ["候选书名", "推荐书名", "书名"], field: "title" },
+  { aliases: ["一句话爆款卖点", "一句话爆点", "一句话卖点", "核心卖点", "卖点"], field: "blurb" },
+  { aliases: ["故事概述", "故事梗概", "故事背景", "背景"], field: "storyBackground" },
+  { aliases: ["故事走向", "故事主线", "剧情主线", "主线设计", "剧情走向"], field: "plotDirection" },
+  { aliases: ["主要人物成长路径", "人物成长路径", "人物成长", "主角成长", "角色成长", "成长路径"], field: "characterGrowth" },
+  { aliases: ["核心冲突", "主要冲突", "冲突焦点", "矛盾焦点"], field: "coreConflict" },
+  { aliases: ["核心价值观", "价值观", "立意", "主题表达"], field: "coreValue" },
+  { aliases: ["赛道定位", "题材定位", "风格定位"], field: "style" },
+  { aliases: ["主角人设", "核心人设", "主角设定", "人物设定"], field: "protagonist" },
+  { aliases: ["开篇钩子", "引爆点", "矛盾引爆点", "爽点设计", "情感张力"], field: "hook" },
+];
+
+const INTRO_NARRATIVE_LABEL_TO_FIELD = new Map<string, IntroNarrativeField>(
+  INTRO_NARRATIVE_LABELS.flatMap((entry) => entry.aliases.map((alias) => [alias, entry.field] as const)),
+);
+
+const INTRO_NARRATIVE_REGEX = new RegExp(
+  `(^|[\\n。！？!?；;])\\s*(${[...INTRO_NARRATIVE_LABEL_TO_FIELD.keys()]
+    .sort((a, b) => b.length - a.length)
+    .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|")})\\s*[：:]\\s*`,
+  "g",
+);
+
+function normalizeNarrativeIntroValue(text: string): string {
+  return text
+    .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function joinNarrativeIntroParts(parts: ReadonlyArray<string>): string {
+  const unique = Array.from(new Set(parts.map((part) => normalizeNarrativeIntroValue(part)).filter(Boolean)));
+  return unique.join("\n\n").trim();
+}
+
+function buildMeaningfulIntroBodyMarkdown(params: {
+  readonly title?: string;
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly plotDirection?: string;
+  readonly characterGrowth?: string;
+  readonly coreConflict?: string;
+  readonly coreValue?: string;
+}): string {
+  const sections = [
+    params.blurb?.trim() ? `## 一句话卖点\n${params.blurb.trim()}` : undefined,
+    params.storyBackground?.trim() ? `## 故事概述\n${params.storyBackground.trim()}` : undefined,
+    params.plotDirection?.trim() ? `## 故事走向\n${params.plotDirection.trim()}` : undefined,
+    params.characterGrowth?.trim() ? `## 主要人物成长路径\n${params.characterGrowth.trim()}` : undefined,
+    params.coreConflict?.trim() ? `## 核心冲突\n${params.coreConflict.trim()}` : undefined,
+    params.coreValue?.trim() ? `## 核心价值观\n${params.coreValue.trim()}` : undefined,
+  ].filter((section): section is string => Boolean(section));
+  if (sections.length < 4) {
+    return "";
+  }
+  return ["# 简介正文", ...sections].join("\n\n").trim();
+}
+
+function synthesizeIntroMarkdownFromNarrative(input: string): string {
+  const source = input.trim();
+  if (!source) return "";
+
+  const matches = Array.from(source.matchAll(INTRO_NARRATIVE_REGEX));
+  if (matches.length < 4) {
+    return "";
+  }
+
+  const buckets: Record<Exclude<IntroNarrativeField, "title">, string[]> = {
+    blurb: [],
+    storyBackground: [],
+    plotDirection: [],
+    characterGrowth: [],
+    coreConflict: [],
+    coreValue: [],
+    style: [],
+    protagonist: [],
+    hook: [],
+  };
+  let title = "";
+
+  for (let i = 0; i < matches.length; i += 1) {
+    const current = matches[i];
+    const alias = current?.[2]?.trim() ?? "";
+    const field = INTRO_NARRATIVE_LABEL_TO_FIELD.get(alias);
+    if (!field) continue;
+    const valueStart = (current?.index ?? 0) + current?.[0].length;
+    const valueEnd = matches[i + 1]?.index ?? source.length;
+    const value = normalizeNarrativeIntroValue(source.slice(valueStart, valueEnd));
+    if (!value) continue;
+    if (field === "title") {
+      if (!title) title = value;
+      continue;
+    }
+    buckets[field].push(value);
+  }
+
+  const blurb = joinNarrativeIntroParts([
+    ...buckets.blurb,
+    ...(buckets.blurb.length === 0 ? buckets.style.slice(0, 1) : []),
+    ...(buckets.blurb.length === 0 ? buckets.hook.slice(0, 1) : []),
+  ]);
+  const storyBackground = joinNarrativeIntroParts([
+    ...buckets.storyBackground,
+    ...(buckets.storyBackground.length === 0 ? buckets.protagonist.slice(0, 1) : []),
+    ...(buckets.storyBackground.length === 0 ? buckets.hook.slice(0, 1) : []),
+  ]);
+  const plotDirection = joinNarrativeIntroParts([
+    ...buckets.plotDirection,
+    ...(buckets.plotDirection.length === 0 ? buckets.hook.slice(0, 1) : []),
+  ]);
+  const characterGrowth = joinNarrativeIntroParts([
+    ...buckets.characterGrowth,
+    ...(buckets.characterGrowth.length === 0 ? buckets.protagonist.slice(0, 1) : []),
+  ]);
+  const coreConflict = joinNarrativeIntroParts([
+    ...buckets.coreConflict,
+    ...(buckets.coreConflict.length === 0 ? buckets.hook.slice(0, 1) : []),
+  ]);
+  const coreValue = joinNarrativeIntroParts([
+    ...buckets.coreValue,
+    ...(buckets.coreValue.length === 0 ? buckets.style.slice(0, 1) : []),
+  ]);
+
+  const markdown = buildMeaningfulIntroBodyMarkdown({
+    title,
+    blurb,
+    storyBackground,
+    plotDirection,
+    characterGrowth,
+    coreConflict,
+    coreValue,
+  });
+  return hasMeaningfulIntroMarkdown(markdown) ? markdown : "";
 }
 
 function findIntroBodyStartIndex(input: string): number {
@@ -238,20 +414,68 @@ export function normalizeIntroRevisionOutput(input: string): string {
   const parsed = parseIntroRevisionOutput(input);
   const body = extractIntroMarkdownBody(parsed.body);
   if (body && looksLikeIntroBodyMarkdown(body)) {
-    return body;
+    return dedupeIntroMarkdownSections(body);
   }
   const extractedFromRaw = extractIntroMarkdownBody(input);
   if (extractedFromRaw && looksLikeIntroBodyMarkdown(extractedFromRaw)) {
-    return extractedFromRaw;
+    return dedupeIntroMarkdownSections(extractedFromRaw);
   }
-  if (parsed.title || parsed.blurb || parsed.storyBackground) {
-    return buildFallbackIntroRevisionOutput({
-      title: parsed.title,
-      blurb: parsed.blurb,
-      storyBackground: parsed.storyBackground,
-    });
+  const synthesized = synthesizeIntroMarkdownFromNarrative(input);
+  if (synthesized) {
+    return dedupeIntroMarkdownSections(synthesized);
   }
   return "";
+}
+
+function dedupeIntroMarkdownSections(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return trimmed;
+
+  const dedupeTitles = new Set([
+    "一句话卖点",
+    "故事概述",
+    "故事走向",
+    "主要人物成长路径",
+    "核心冲突",
+    "核心价值观",
+  ]);
+  const lines = trimmed.split(/\r?\n/);
+  const output: string[] = [];
+  const seen = new Set<string>();
+  let skippingDuplicateSection = false;
+  let skipHeadingLevel = 0;
+
+  for (const line of lines) {
+    const trimmedLine = line.trim();
+    const headingMatch = trimmedLine.match(/^(#{1,6})\s*(.+)$/);
+    if (skippingDuplicateSection) {
+      if (!headingMatch) {
+        continue;
+      }
+      const headingLevel = headingMatch[1]!.length;
+      if (headingLevel > skipHeadingLevel) {
+        continue;
+      }
+      skippingDuplicateSection = false;
+    }
+
+    if (headingMatch) {
+      const headingLevel = headingMatch[1]!.length;
+      const headingTitle = headingMatch[2]!.trim();
+      if (headingLevel === 2 && dedupeTitles.has(headingTitle)) {
+        if (seen.has(headingTitle)) {
+          skippingDuplicateSection = true;
+          skipHeadingLevel = headingLevel;
+          continue;
+        }
+        seen.add(headingTitle);
+      }
+    }
+
+    output.push(line);
+  }
+
+  return output.join("\n").trim();
 }
 
 function looksLikeIntroBodyMarkdown(content: string): boolean {
@@ -375,7 +599,7 @@ function createIntroRevisionStreamNormalizer(): (chunk: string) => string {
         output.push(line);
         continue;
       }
-      const match = trimmed.match(/^(title|blurb|storyBackground|introMarkdown)\s*[:：]\s*(.*)$/i);
+      const match = trimmed.match(/^(title|书名|blurb|storyBackground|introMarkdown)\s*[:：]\s*(.*)$/i);
       if (match) {
         const key = match[1]!.toLowerCase();
         const value = match[2]?.trim() ?? "";
@@ -518,6 +742,88 @@ function buildVolumeOutlineContext(input: {
   return sections.join("\n\n");
 }
 
+function buildWorldContext(input: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly worldPremise?: string;
+  readonly settingNotes?: string;
+  readonly novelOutline?: string;
+  readonly conflictCore?: string;
+}): string | undefined {
+  const sections = [
+    input.blurb ? `## 简介 / 卖点\n${input.blurb}` : undefined,
+    input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
+    input.worldPremise ? `## 世界观草案\n${input.worldPremise}` : undefined,
+    input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
+    input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
+    input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
+  ].filter((section): section is string => Boolean(section?.trim()));
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join("\n\n");
+}
+
+function buildOutlineContext(input: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly worldPremise?: string;
+  readonly settingNotes?: string;
+  readonly novelOutline?: string;
+  readonly conflictCore?: string;
+  readonly protagonist?: string;
+  readonly supportingCast?: string;
+}): string | undefined {
+  const sections = [
+    input.blurb ? `## 简介 / 卖点\n${input.blurb}` : undefined,
+    input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
+    input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
+    input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
+    input.novelOutline ? `## 小说大纲草案\n${input.novelOutline}` : undefined,
+    input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
+    input.protagonist ? `## 主角设定\n${input.protagonist}` : undefined,
+    input.supportingCast ? `## 关键配角 / 势力\n${input.supportingCast}` : undefined,
+  ].filter((section): section is string => Boolean(section?.trim()));
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join("\n\n");
+}
+
+function buildCharactersContext(input: {
+  readonly blurb?: string;
+  readonly storyBackground?: string;
+  readonly worldPremise?: string;
+  readonly settingNotes?: string;
+  readonly novelOutline?: string;
+  readonly conflictCore?: string;
+  readonly protagonist?: string;
+  readonly supportingCast?: string;
+  readonly characterMatrix?: string;
+}): string | undefined {
+  const sections = [
+    input.blurb ? `## 简介 / 卖点\n${input.blurb}` : undefined,
+    input.storyBackground ? `## 故事背景\n${input.storyBackground}` : undefined,
+    input.worldPremise ? `## 世界观与核心设定\n${input.worldPremise}` : undefined,
+    input.settingNotes ? `## 补充设定\n${input.settingNotes}` : undefined,
+    input.novelOutline ? `## 小说大纲\n${input.novelOutline}` : undefined,
+    input.conflictCore ? `## 核心冲突\n${input.conflictCore}` : undefined,
+    input.protagonist ? `## 主角设定\n${input.protagonist}` : undefined,
+    input.supportingCast ? `## 关键配角 / 势力\n${input.supportingCast}` : undefined,
+    input.characterMatrix ? `## 角色矩阵草案\n${input.characterMatrix}` : undefined,
+  ].filter((section): section is string => Boolean(section?.trim()));
+
+  if (sections.length === 0) {
+    return undefined;
+  }
+
+  return sections.join("\n\n");
+}
+
 function buildCharacterArcContext(input: {
   readonly blurb?: string;
   readonly storyBackground?: string;
@@ -582,6 +888,36 @@ function buildRelationshipMapContext(input: {
   }
 
   return sections.join("\n\n");
+}
+
+function buildWizardBaseParamsContext(input?: {
+  readonly title?: string;
+  readonly genre?: string;
+  readonly genreAlias?: string;
+  readonly mappedGenreId?: string;
+  readonly platform?: string;
+  readonly language?: "zh" | "en";
+  readonly targetChapters?: number;
+  readonly chapterWordCount?: number;
+}): string | undefined {
+  if (!input) return undefined;
+
+  const themeGenre = input.genreAlias?.trim() || input.mappedGenreId?.trim() || input.genre?.trim() || "";
+  const rows = [
+    input.title?.trim() ? `- 书名：${input.title.trim()}` : undefined,
+    input.genre?.trim() ? `- 题材：${input.genre.trim()}` : undefined,
+    themeGenre ? `- 题材锚点：${themeGenre}` : undefined,
+    input.platform?.trim() ? `- 平台：${input.platform.trim()}` : undefined,
+    input.language?.trim() ? `- 语言：${input.language.trim()}` : undefined,
+    typeof input.targetChapters === "number" ? `- 目标章数：${input.targetChapters}` : undefined,
+    typeof input.chapterWordCount === "number" ? `- 每章字数：${input.chapterWordCount}` : undefined,
+  ].filter((row): row is string => Boolean(row?.trim()));
+
+  if (rows.length === 0) {
+    return undefined;
+  }
+
+  return ["## 基础参数", ...rows].join("\n");
 }
 
 function resolveTruthArtifactTarget(fileName: string): { readonly dir: "story" | "wizard"; readonly fileName: string } {
@@ -661,6 +997,9 @@ const WIZARD_STEP_PROMPTS: Record<BookCreationWizardStep, {
       "只补卷纲页，不要重写全书总大纲。",
       "每卷必须有明确推进目标和卷末收束点。",
       "卷纲必须和主线成长同步，不要空转。",
+      "总卷数、各卷章节范围与卷间推进必须严格服从基础参数中的目标章数；如果目标章数是 200 章，就按 200 章体量规划卷数、每卷跨度和阶段推进。",
+      "各卷章节范围相加必须能覆盖目标章数，不得按 100-150 章或更短体量压缩分卷，也不要留下大量未规划章节。",
+      "每卷章节跨度要和该卷承担的主冲突、成长阶段、卷末收束相匹配，不要出现卷数很少但单卷承载过多剧情，或卷数很多但每卷无实质推进的失衡规划。",
     ],
   },
   characters: {
@@ -733,7 +1072,7 @@ const INTRO_REVISION_SYSTEM_PROMPT = [
   "如果用户要求按题材生成，要优先遵守题材约束。",
   "如果用户要求修改或润色，要在保留原意的基础上优化表达和钩子。",
   "你只能输出一篇完整的 Markdown 正文，使用 ## 段落标题组织内容。",
-  "禁止输出 title、blurb、storyBackground、introMarkdown 之类的字段标签或结构化前缀。",
+  "如果当前还没有已定书名且任务要求生成书名，允许在正文前单独输出一行“书名：<生成的书名>”作为元数据；除此之外，禁止输出 title、blurb、storyBackground、introMarkdown 之类的字段标签或结构化前缀。",
   "每个段落都必须写出有信息量的实质正文，不能用占位符“-”“…”或空标题敷衍。",
   "不要反问用户确认参数；如果信息足够，直接生成完整正文或直接修改正文。",
 ].join(" ");
@@ -748,6 +1087,7 @@ export function buildWizardPrompt(
   userMessage: string,
   existingDraft?: BookCreationDraft,
   genreContext?: WizardGenreContext,
+  explicitGenre?: string,
 ): string {
   const template = step === "intro" && mode === "generate"
     ? INTRO_GENERATION_PROMPT
@@ -756,7 +1096,62 @@ export function buildWizardPrompt(
   const draftBlock = existingDraft
     ? ["## 当前草案", JSON.stringify(existingDraft, null, 2)].join("\n")
     : "## 当前草案\n（空）";
-  const stepContext = step === "volume"
+  const baseParamsContext = buildWizardBaseParamsContext(existingDraft);
+  const introCharacterNameBlock = step === "intro"
+    ? undefined
+    : buildIntroCharacterNameConstraintBlock({
+        blurb: existingDraft?.blurb,
+        storyBackground: existingDraft?.storyBackground,
+        introMarkdown: existingDraft?.introMarkdown,
+        draftFields: existingDraft?.draftFields,
+        protagonist: existingDraft?.protagonist,
+        supportingCast: existingDraft?.supportingCast,
+        introCharacterNames: existingDraft?.introCharacterNames,
+      });
+  const introCharacterNames = step === "intro"
+    ? []
+    : extractIntroCharacterNameHints({
+        blurb: existingDraft?.blurb,
+        storyBackground: existingDraft?.storyBackground,
+        introMarkdown: existingDraft?.introMarkdown,
+        draftFields: existingDraft?.draftFields,
+        protagonist: existingDraft?.protagonist,
+        supportingCast: existingDraft?.supportingCast,
+        introCharacterNames: existingDraft?.introCharacterNames,
+      });
+  const stepContext = step === "world"
+    ? buildWorldContext({
+        blurb: existingDraft?.blurb,
+        storyBackground: existingDraft?.storyBackground,
+        worldPremise: existingDraft?.worldPremise,
+        settingNotes: existingDraft?.settingNotes,
+        novelOutline: existingDraft?.novelOutline,
+        conflictCore: existingDraft?.conflictCore,
+      })
+    : step === "outline"
+      ? buildOutlineContext({
+          blurb: existingDraft?.blurb,
+          storyBackground: existingDraft?.storyBackground,
+          worldPremise: existingDraft?.worldPremise,
+          settingNotes: existingDraft?.settingNotes,
+          novelOutline: existingDraft?.novelOutline,
+          conflictCore: existingDraft?.conflictCore,
+          protagonist: existingDraft?.protagonist,
+          supportingCast: existingDraft?.supportingCast,
+        })
+      : step === "characters"
+        ? buildCharactersContext({
+            blurb: existingDraft?.blurb,
+            storyBackground: existingDraft?.storyBackground,
+            worldPremise: existingDraft?.worldPremise,
+            settingNotes: existingDraft?.settingNotes,
+            novelOutline: existingDraft?.novelOutline,
+            conflictCore: existingDraft?.conflictCore,
+            protagonist: existingDraft?.protagonist,
+            supportingCast: existingDraft?.supportingCast,
+            characterMatrix: existingDraft?.characterMatrix,
+          })
+        : step === "volume"
     ? buildVolumeOutlineContext({
         novelOutline: existingDraft?.novelOutline,
         conflictCore: existingDraft?.conflictCore,
@@ -811,24 +1206,39 @@ export function buildWizardPrompt(
         "## 题材规则正文",
         genreContext.body.trim() || "（无）",
       ].join("\n")
-    : "";
+    : explicitGenre
+      ? [
+          "## 题材约束",
+          `- 题材：${explicitGenre}`,
+          "- 必须严格遵守该题材的风格、世界观特征和常见设定。",
+          "- 禁止混入其他题材的专有名词、体系或世界规则。",
+        ].join("\n")
+      : "";
+  const constraints = [
+    ...template.constraints,
+    ...(introCharacterNames.length > 0
+      ? [`简介中已约定角色名：${introCharacterNames.join("、")}。当前页必须严格沿用这些名字，不得擅自改名、替换角色名称、合并角色或新增别名；如需补充角色相关内容，优先以这些名字为准。`]
+      : []),
+    `只允许更新以下字段：${allowedFields}。其他字段必须保持草案原值。`,
+    "多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。",
+    ...((step === "intro" || step === "world" || step === "outline")
+      ? ["正文必须直接从当前页标题或当前页结构进入，禁止以书名作为首行标题。"]
+      : []),
+  ];
 
   return [
     `当前步骤：${template.title}`,
     `模式：${modeLabel}`,
     "",
+    ...(baseParamsContext ? [baseParamsContext, ""] : []),
+    ...(introCharacterNameBlock ? [introCharacterNameBlock, ""] : []),
     ...(genreBlock ? [genreBlock, ""] : []),
     ...(stepContext ? [stepContext, ""] : []),
     "内容框架必须包含：",
     ...template.framework.map((item, index) => `${index + 1}. ${item}`),
     "",
     "约束：",
-    ...template.constraints.map((item, index) => `${index + 1}. ${item}`),
-    `4. 只允许更新以下字段：${allowedFields}。其他字段必须保持草案原值。`,
-    "5. 多轮修正时，如果用户只要求改一个字段，只改这个字段，不要顺手重写同页其他字段。",
-    (step === "intro" || step === "world" || step === "outline")
-      ? "6. 正文必须直接从当前页标题或当前页结构进入，禁止以书名作为首行标题。"
-      : "",
+    ...constraints.map((item, index) => `${index + 1}. ${item}`),
     "",
     draftBlock,
     "",
@@ -934,7 +1344,7 @@ function applyWizardStepDraft(
     }
   }
 
-  return draft;
+  return syncIntroCharacterNames(draft);
 }
 
 async function runWizardDraftTool(params: {
@@ -943,6 +1353,7 @@ async function runWizardDraftTool(params: {
   readonly mode: WizardMode;
   readonly input: string;
   readonly existingDraft?: BookCreationDraft;
+  readonly themeGenre?: string;
   readonly onThinkingDelta?: (text: string) => void;
   readonly onDraftDelta?: (text: string) => void;
   readonly onDraftRawDelta?: (text: string) => void;
@@ -952,11 +1363,12 @@ async function runWizardDraftTool(params: {
   readonly fieldsUpdated: ReadonlyArray<string>;
   readonly draftRaw: string;
 }> {
-  const { pipeline, step, mode, input, existingDraft } = params;
+  const { pipeline, step, mode, input, existingDraft, themeGenre } = params;
   const concept = input.trim() || existingDraft?.concept || getWizardStepTemplate(step).title;
   const projectRoot = pipeline.config?.projectRoot;
-  const genreContext = existingDraft?.genre && projectRoot
-    ? await readGenreProfile(projectRoot, existingDraft.genre).catch(() => null)
+  const effectiveGenre = themeGenre?.trim() || existingDraft?.genre;
+  const genreContext = effectiveGenre && projectRoot
+    ? await readGenreProfile(projectRoot, effectiveGenre).catch(() => null)
     : null;
 
   if (!pipeline.config?.client || !pipeline.config?.model) {
@@ -1006,7 +1418,7 @@ async function runWizardDraftTool(params: {
       },
       {
         role: "user",
-        content: buildWizardPrompt(step, mode, input, existingDraft, genreContext ?? undefined),
+        content: buildWizardPrompt(step, mode, input, existingDraft, genreContext ?? undefined, effectiveGenre),
       },
     ],
     [SAVE_BOOK_WIZARD_STEP_TOOL],
@@ -1095,13 +1507,15 @@ async function runIntroRevisionTool(params: {
     targetChapters,
     chapterWordCount,
   });
+  const needsGeneratedTitle = revisionKind === "generate" && !(existingDraft?.title?.trim());
 
   const attemptIntroGeneration = async (
     reinforce: string | undefined,
     stream: boolean,
-  ): Promise<string> => {
+  ): Promise<{ readonly body: string; readonly title?: string }> => {
     const emitDraftDelta = createIntroRevisionStreamNormalizer();
     let streamedDraft = "";
+    let streamedRaw = "";
     const result = await chatCompletion(
       pipeline.config!.client!,
       pipeline.config!.model!,
@@ -1113,6 +1527,7 @@ async function runIntroRevisionTool(params: {
         temperature: revisionKind === "polish" ? 0.25 : 0.35,
         onTextDelta: stream
           ? (text) => {
+              streamedRaw += text;
               const normalizedChunk = emitDraftDelta(text);
               if (normalizedChunk) {
                 streamedDraft += normalizedChunk;
@@ -1124,14 +1539,20 @@ async function runIntroRevisionTool(params: {
       },
     );
     const rawDraft = result.content.trim();
-    return stripLeadingBookTitleHeading(
-      pickBestIntroMarkdownCandidate([
+    const resolvedTitle = extractIntroTitleFromMarkdown(rawDraft)
+      ?? extractIntroTitleFromMarkdown(streamedRaw)
+      ?? existingDraft?.title?.trim();
+    return {
+      title: resolvedTitle,
+      body: stripLeadingBookTitleHeading(
+        pickBestIntroMarkdownCandidate([
         stream ? normalizeIntroRevisionOutput(streamedDraft) : undefined,
         normalizeIntroRevisionOutput(rawDraft),
         rawDraft,
       ]),
-      extractIntroTitleFromMarkdown(rawDraft) ?? existingDraft?.title,
-    );
+        resolvedTitle,
+      ),
+    };
   };
 
   const RETRY_REINFORCEMENT = [
@@ -1140,22 +1561,30 @@ async function runIntroRevisionTool(params: {
     "每个段落都要写出有信息量的实质内容，禁止任何字段标签、结构化前缀或占位符。",
   ].join("\n");
 
-  const candidates: string[] = [];
+  const candidates: Array<{ readonly body: string; readonly title?: string }> = [];
   let normalizedDraft = "";
+  let resolvedTitle = existingDraft?.title?.trim();
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const stream = attempt === 0;
+    const stream = true; // 所有重试都保持流式输出，让用户看到AI工作台的实时进度
     const candidate = await attemptIntroGeneration(attempt === 0 ? undefined : RETRY_REINFORCEMENT, stream);
-    if (candidate) candidates.push(candidate);
-    if (candidate && hasMeaningfulIntroMarkdown(candidate)) {
-      normalizedDraft = candidate;
+    if (candidate.body) candidates.push(candidate);
+    if (candidate.body && hasMeaningfulIntroMarkdown(candidate.body) && (!needsGeneratedTitle || candidate.title?.trim())) {
+      normalizedDraft = candidate.body;
+      resolvedTitle = candidate.title?.trim() || resolvedTitle;
       break;
     }
   }
   if (!normalizedDraft) {
-    normalizedDraft = pickBestIntroMarkdownCandidate(candidates);
+    const bestCandidate = candidates.reduce<{ readonly body: string; readonly title?: string } | null>((best, current) => {
+      if (!current.body) return best;
+      if (!best) return current;
+      return scoreIntroMarkdownCandidate(current.body) > scoreIntroMarkdownCandidate(best.body) ? current : best;
+    }, null);
+    normalizedDraft = bestCandidate?.body ?? "";
+    resolvedTitle = bestCandidate?.title?.trim() || resolvedTitle;
   }
   const parsedIntro = parseIntroMarkdownDraft(normalizedDraft);
-  const parsedTitle = extractIntroTitleFromMarkdown(normalizedDraft) ?? existingDraft?.title?.trim();
+  const parsedTitle = resolvedTitle ?? extractIntroTitleFromMarkdown(normalizedDraft) ?? existingDraft?.title?.trim();
   const normalizedArgs: Record<string, string> = {};
   if (parsedTitle) normalizedArgs.title = parsedTitle;
   if (parsedIntro.blurb) normalizedArgs.blurb = parsedIntro.blurb;
@@ -1164,6 +1593,19 @@ async function runIntroRevisionTool(params: {
 
   if (!normalizedArgs.title && existingDraft?.title?.trim()) {
     normalizedArgs.title = existingDraft.title.trim();
+  }
+  if (needsGeneratedTitle && !normalizedArgs.title?.trim()) {
+    const preservedDraft = applyFieldsToDraft(existingDraft, {}, concept);
+    return {
+      draft: {
+        ...preservedDraft,
+        draftFields: existingDraft?.draftFields,
+        readyToCreate: false,
+      },
+      responseText: "Agent 未生成可用书名，请补充题材/卖点后重试。",
+      fieldsUpdated: [],
+      draftRaw: "",
+    };
   }
 
   const introIsMeaningful = Boolean(normalizedArgs.introMarkdown)
@@ -1553,7 +1995,7 @@ function applyFieldsToDraft(
     }
   }
 
-  return draft;
+  return syncIntroCharacterNames(draft);
 }
 
 function buildLegacyDraftUserContent(input: string, existingDraft?: BookCreationDraft): string {
@@ -1575,6 +2017,10 @@ export function buildIntroRevisionPrompt(params: {
   readonly chapterWordCount?: number;
 }): string {
   const { mode, userMessage, existingDraft, genreContext, writingLanguage, targetChapters, chapterWordCount } = params;
+  const needsGeneratedTitle = mode === "generate" && !(existingDraft?.title?.trim());
+  const chapterScaleConstraint = typeof targetChapters === "number"
+    ? `7. 故事走向、主要人物成长路径、核心冲突的铺排必须服从 ${targetChapters} 章的长篇节奏约束；如果目标是 ${targetChapters} 章，就按 ${targetChapters} 章体量设计阶段推进、成长跨度和冲突升级，禁止压缩成 100-150 章或更短篇幅的中短篇节奏。`
+    : "7. 故事走向、主要人物成长路径、核心冲突的铺排必须服从既定目标章数，不要按更短篇幅压缩节奏。";
   const draftBlock = existingDraft
     ? ["## 当前草案", JSON.stringify(existingDraft, null, 2)].join("\n")
     : "## 当前草案\n（空）";
@@ -1620,12 +2066,18 @@ export function buildIntroRevisionPrompt(params: {
     "7. 核心价值观",
     "",
     "输出要求：",
-    "1. 只输出完整 Markdown 正文，不要输出 title、blurb、storyBackground、introMarkdown 这类字段标签。",
-    "2. 不要输出“title：”“blurb：”“storyBackground：”“introMarkdown：”这种结构化前缀。",
+    needsGeneratedTitle
+      ? "1. 当前还没有书名。你必须先单独输出一行“书名：<生成的书名>”，然后从下一行开始输出完整 Markdown 正文。"
+      : "1. 只输出完整 Markdown 正文，不要输出 title、blurb、storyBackground、introMarkdown 这类字段标签。",
+    needsGeneratedTitle
+      ? "2. 除了这一行“书名：...”元数据外，不要输出其他字段标签或结构化前缀。"
+      : "2. 不要输出“title：”“blurb：”“storyBackground：”“introMarkdown：”这种结构化前缀。",
     "3. 正文首行禁止显示书名，不要输出“# 书名”或任何把书名放在第一行的标题。",
     "4. 不要输出“以上是草案”“如果你确认”等前后缀说明。",
     "5. 不要扩写到世界观、人物关系、卷纲或章节目录。",
     "6. 不要再次询问写作语言、目标章节数、每章字数；它们已经确定。",
+    chapterScaleConstraint,
+    "8. 用户输入只是创作素材和约束，不要原样复述用户输入，也不要把要求改写成正文内容。",
     "",
     draftBlock,
     "",
@@ -1783,13 +2235,14 @@ export function createInteractionToolsFromDeps(
         },
       };
     },
-    saveBookWizardStep: async (input, existingDraft, wizardStep = "intro") => {
+    saveBookWizardStep: async (input, existingDraft, wizardStep = "intro", themeGenre) => {
       const result = await runWizardDraftTool({
         pipeline: instrumentedPipeline,
         step: wizardStep,
         mode: "modify",
         input,
         existingDraft,
+        themeGenre,
         onThinkingDelta: hooks?.onThinkingDelta,
         onDraftDelta: hooks?.onDraftTextDelta,
         onDraftRawDelta: hooks?.onDraftRawDelta,
@@ -1805,13 +2258,14 @@ export function createInteractionToolsFromDeps(
         },
       };
     },
-    advanceBookWizard: async (input, existingDraft, wizardStep = "intro") => {
+    advanceBookWizard: async (input, existingDraft, wizardStep = "intro", themeGenre) => {
       const result = await runWizardDraftTool({
         pipeline: instrumentedPipeline,
         step: wizardStep,
         mode: "generate",
         input,
         existingDraft,
+        themeGenre,
         onThinkingDelta: hooks?.onThinkingDelta,
         onDraftDelta: hooks?.onDraftTextDelta,
         onDraftRawDelta: hooks?.onDraftRawDelta,

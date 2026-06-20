@@ -128,6 +128,13 @@ interface ChapterPlansResponse {
   readonly plans: ReadonlyArray<ChapterPlan>;
 }
 
+export function resolveDisplayedChapterPlans(
+  chapterPlansData: ChapterPlansResponse | null,
+  chapterPlansSnapshot: ReadonlyArray<ChapterPlan> | null,
+): ReadonlyArray<ChapterPlan> {
+  return chapterPlansSnapshot ?? chapterPlansData?.plans ?? [];
+}
+
 type ReaderMode = "chapter" | "design" | "outline" | "truth" | "script" | "production";
 
 interface ChapterMeta {
@@ -2443,6 +2450,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
   const [auditHistoryChapter, setAuditHistoryChapter] = useState<number | null>(null);
   const [planEditorChapter, setPlanEditorChapter] = useState<number | null>(null);
   const [planEditorSource, setPlanEditorSource] = useState<"manual" | "ai">("manual");
+  const [chapterPlansSnapshot, setChapterPlansSnapshot] = useState<ReadonlyArray<ChapterPlan> | null>(null);
   const [chapterPlansRefreshKey, setChapterPlansRefreshKey] = useState(0);
   const [scriptSaving, setScriptSaving] = useState(false);
   const [scriptGenerating, setScriptGenerating] = useState(false);
@@ -2545,7 +2553,11 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     });
   }, [artifactChapter, data, openChapterArtifact, readerMode]);
 
-  const chapterPlans = chapterPlansData?.plans ?? [];
+  useEffect(() => {
+    setChapterPlansSnapshot(chapterPlansData?.plans ?? null);
+  }, [chapterPlansData]);
+
+  const chapterPlans = resolveDisplayedChapterPlans(chapterPlansData ?? null, chapterPlansSnapshot);
   const selectedPlan = useMemo(() => {
     if (chapterPlans.length === 0) return null;
     if (selectedPlanChapter === null) return chapterPlans[0] ?? null;
@@ -3062,6 +3074,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
                 targetChapters={targetChapters}
                 refreshToken={chapterPlansRefreshKey}
                 onRefresh={() => setChapterPlansRefreshKey((value) => value + 1)}
+                onPlansChange={setChapterPlansSnapshot}
                 onSelectChapter={setSelectedPlanChapter}
                 selectedChapter={selectedPlanChapter ?? chapterPlans[0]?.chapterNumber ?? null}
                 chapterNumbers={chapters.map((chapter) => chapter.number)}

@@ -7,7 +7,7 @@ import type { MessageAuditSummary } from "../../store/chat/types";
 import type { ChapterAuditReport } from "../../shared/contracts";
 import { SidebarCard } from "./SidebarCard";
 import { cn } from "../../lib/utils";
-import { estimateAuditScoreFromIssueTexts, scoreBadgeClass } from "../../utils/audit-score";
+import { estimateAuditScoreFromIssueTexts, resolveAuditPassed, scoreBadgeClass } from "../../utils/audit-score";
 import { describeChapterAutoReview } from "../../utils/auto-review-display";
 import { resolveBookAgentInstruction } from "../../utils/agent-instruction";
 import { resolveLatestChapterAuditReport } from "../../utils/chapter-audit";
@@ -148,7 +148,13 @@ function normalizeAuditFailureGate(raw: unknown): MessageAuditSummary["failureGa
 
 function historyEntryToAuditSummary(entry: ChapterAuditReport | undefined, chapter: number): MessageAuditSummary | undefined {
   if (!entry) return undefined;
-  const passed = entry.passed && Math.trunc(entry.score) >= AUDIT_PASS_SCORE_THRESHOLD;
+  const passed = resolveAuditPassed({
+    basePassed: Boolean(entry.passed),
+    score: entry.score,
+    severityCounts: entry.severityCounts,
+    issues: entry.issues,
+    passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+  });
   return {
     chapter,
     passed,
@@ -194,7 +200,13 @@ export function normalizeAuditSummary(raw: unknown, chapterHint?: number): Messa
   const issueCount = Number.isFinite(issueCountRaw)
     ? Math.max(0, Math.trunc(issueCountRaw))
     : issues.length;
-  const passed = Boolean(payload.passed) && Math.trunc(scoreRaw) >= AUDIT_PASS_SCORE_THRESHOLD;
+  const passed = resolveAuditPassed({
+    basePassed: Boolean(payload.passed),
+    score: scoreRaw,
+    severityCounts,
+    issues,
+    passScoreThreshold: AUDIT_PASS_SCORE_THRESHOLD,
+  });
   return {
     chapter,
     passed,
@@ -1488,6 +1500,12 @@ export function ChaptersSection({
                 tabIndex={0}
                 onClick={() => handleOpenChapterEditor(ch)}
                 onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
+                  if (event.key === "F2") {
+                    event.preventDefault();
+                    beginTitleEdit(ch);
+                    return;
+                  }
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
                     handleOpenChapterEditor(ch);
@@ -1557,20 +1575,26 @@ export function ChaptersSection({
                         )}
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          beginTitleEdit(ch);
-                        }}
-                        className="w-full min-w-0 text-left transition-colors hover:text-foreground"
-                        title="点击修改章节名称"
-                      >
-                        <div className="truncate">
-                          {String(ch.number).padStart(2, "0")} {ch.title || t("chapter.label").replace("{n}", String(ch.number))}
+                      <div className="flex min-w-0 items-center gap-1">
+                        <div className="group/title inline-flex min-w-0 max-w-full items-center gap-1">
+                          <div className="truncate transition-colors group-hover/title:text-foreground">
+                            {String(ch.number).padStart(2, "0")} {ch.title || t("chapter.label").replace("{n}", String(ch.number))}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              beginTitleEdit(ch);
+                            }}
+                            className="h-4 w-4 shrink-0 rounded-sm text-muted-foreground opacity-0 transition-all hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:text-primary focus-visible:opacity-100 group-hover/title:opacity-100 group-focus-within/title:opacity-100"
+                            title={`修改第${ch.number}章名称`}
+                            aria-label={`修改第${ch.number}章名称`}
+                          >
+                            <Pencil size={10} />
+                          </button>
                         </div>
-                      </button>
+                      </div>
                     )}
                     {degradedReason && (
                       <div className="mt-0.5 truncate text-[10px] text-orange-600/90" title={degradedReason}>

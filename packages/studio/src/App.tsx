@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useHashRoute } from "./hooks/use-hash-route";
 import type { HashRoute } from "./hooks/use-hash-route";
 import { Sidebar } from "./components/Sidebar";
@@ -79,10 +79,10 @@ export function App() {
 
   useSessionEvents(sse, route, setRoute);
 
-  const openBookCreate = (bookId?: string) => {
+  const openBookCreate = useCallback((bookId?: string) => {
     setBookCreateInstanceId((current) => current + 1);
     setRoute(bookId ? { page: "book-create", bookId } : { page: "book-create" });
-  };
+  }, [setRoute]);
 
   const nav = useMemo(() => ({
     toDashboard: () => setRoute({ page: "dashboard" }),

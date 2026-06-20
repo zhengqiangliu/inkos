@@ -78,6 +78,39 @@ describe("attachSessionStreamListeners", () => {
     expect(last?.thinkingStreaming).toBe(true);
   });
 
+  it("attaches the current wizard step when tool events create the stream message", () => {
+    const eventSource = new MockEventSource();
+    const state = createState({
+      s1: createSessionRuntime({
+        sessionId: "s1",
+        bookId: null,
+        title: "draft",
+        currentWizardStep: "intro",
+      }),
+    });
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 102,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    eventSource.emit("tool:start", {
+      sessionId: "s1",
+      runId: "r1",
+      id: "t-intro",
+      tool: "sub_agent",
+      args: { agent: "architect" },
+    });
+
+    const session = state.get().sessions.s1;
+    const last = session.messages[session.messages.length - 1];
+    expect(last?.wizardStep).toBe("intro");
+  });
+
   it("marks latest thinking part ended even when last part is tool", () => {
     const eventSource = new MockEventSource();
     const state = createState();
@@ -300,6 +333,89 @@ describe("attachSessionStreamListeners", () => {
     if (tool?.type === "tool") {
       expect(tool.execution.stages?.[0]?.progress?.elapsedMs).toBe(3000);
       expect(tool.execution.stages?.[0]?.progress?.status).toBe("thinking");
+    }
+  });
+
+  it("accepts legacy intro stream events without runId for the same session", () => {
+    const eventSource = new MockEventSource();
+    const state = createState({
+      s1: createSessionRuntime({
+        sessionId: "s1",
+        bookId: null,
+        title: "draft",
+        currentWizardStep: "intro",
+      }),
+    });
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 210,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    eventSource.emit("thinking:start", { sessionId: "s1" });
+    eventSource.emit("thinking:delta", { sessionId: "s1", text: "先整理简介结构" });
+    eventSource.emit("draft:delta", { sessionId: "s1", text: "# 简介正文\n\n## 一句话卖点\n账本牵出旧债。" });
+    eventSource.emit("thinking:end", { sessionId: "s1" });
+
+    const session = state.get().sessions.s1;
+    const last = session.messages[session.messages.length - 1];
+    expect(last?.wizardStep).toBe("intro");
+    expect(last?.thinking).toBe("先整理简介结构");
+    expect(last?.content).toContain("账本牵出旧债");
+  });
+
+  it("accepts legacy tool events without runId for the same wizard session", () => {
+    const eventSource = new MockEventSource();
+    const state = createState({
+      s1: createSessionRuntime({
+        sessionId: "s1",
+        bookId: null,
+        title: "draft",
+        currentWizardStep: "world",
+      }),
+    });
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 211,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    eventSource.emit("tool:start", {
+      sessionId: "s1",
+      id: "t-world",
+      tool: "sub_agent",
+      args: { agent: "architect" },
+    });
+    eventSource.emit("tool:update", {
+      sessionId: "s1",
+      id: "t-world",
+      tool: "sub_agent",
+      partialResult: { text: "正在整理世界观规则" },
+    });
+    eventSource.emit("tool:end", {
+      sessionId: "s1",
+      id: "t-world",
+      tool: "sub_agent",
+      isError: false,
+      result: "ok",
+    });
+
+    const session = state.get().sessions.s1;
+    const last = session.messages[session.messages.length - 1];
+    expect(last?.wizardStep).toBe("world");
+    const tool = last?.parts?.find((part) => part.type === "tool");
+    expect(tool?.type).toBe("tool");
+    if (tool?.type === "tool") {
+      expect(tool.execution.logs).toContain("正在整理世界观规则");
+      expect(tool.execution.status).toBe("completed");
     }
   });
 
@@ -1111,5 +1227,59 @@ describe("attachSessionStreamListeners", () => {
         reviseRoundsUsed: 1,
       });
     }
+  });
+
+  it("preserves currentWizardStep during streaming when runtime is updated", () => {
+    const eventSource = new MockEventSource();
+    const state = createState({
+      s1: createSessionRuntime({
+        sessionId: "s1",
+        bookId: "book-1",
+        title: "demo",
+        currentWizardStep: "intro",
+      }),
+    });
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 200,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    // 开始流式输出
+    eventSource.emit("thinking:start", { sessionId: "s1", runId: "r1" });
+    eventSource.emit("thinking:delta", { sessionId: "s1", runId: "r1", text: "分析简介结构..." });
+
+    // 验证初始流式消息带有 wizardStep
+    let session = state.get().sessions.s1;
+    let last = session.messages[session.messages.length - 1];
+    expect(last?.wizardStep).toBe("intro");
+
+    // 模拟流式期间有其他更新（例如 session 被刷新）但保持流式状态
+    // 这模拟 loadSessionDetail 在流式期间被调用的场景
+    const currentState = state.get();
+    state.set({
+      sessions: {
+        ...currentState.sessions,
+        s1: {
+          ...currentState.sessions.s1!,
+          // 模拟 loadSessionDetail 的行为：hasLiveStream=true 时保留 currentWizardStep
+          currentWizardStep: currentState.sessions.s1!.currentWizardStep,
+        },
+      },
+    });
+
+    // 继续流式输出
+    eventSource.emit("thinking:delta", { sessionId: "s1", runId: "r1", text: "生成正文..." });
+
+    // 验证 currentWizardStep 被保留，后续流式消息依然带有 wizardStep
+    session = state.get().sessions.s1;
+    expect(session.currentWizardStep).toBe("intro");
+    last = session.messages[session.messages.length - 1];
+    expect(last?.wizardStep).toBe("intro");
+    expect(last?.thinking).toBe("分析简介结构...生成正文...");
   });
 });

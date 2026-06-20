@@ -41,6 +41,11 @@ export interface DesignBatchInput {
   readonly language?: string;
 }
 
+export type DesignBatchResult = ChapterPlan[] & {
+  usedFallback?: boolean;
+  fallbackReason?: string;
+};
+
 export interface AnalyzeChapterInput {
   readonly book: BookConfig;
   readonly bookDir: string;
@@ -170,7 +175,7 @@ export class ChapterDesignAgent extends BaseAgent {
    * Design multiple chapters in batch.
    * Reads more context to ensure coherence across chapters.
    */
-  async designBatch(input: DesignBatchInput): Promise<ChapterPlan[]> {
+  async designBatch(input: DesignBatchInput): Promise<DesignBatchResult> {
     const language = input.language ?? input.book.language ?? "zh";
 
     const context = await this.loadContext({
@@ -182,7 +187,7 @@ export class ChapterDesignAgent extends BaseAgent {
     });
 
     if (typeof context.outlineChapterLimit === "number" && input.startChapter > context.outlineChapterLimit) {
-      return [];
+      return Object.assign([], { usedFallback: false }) as DesignBatchResult;
     }
 
     const effectiveCount = typeof context.outlineChapterLimit === "number"
@@ -190,7 +195,7 @@ export class ChapterDesignAgent extends BaseAgent {
       : Math.max(0, input.count);
 
     if (effectiveCount <= 0) {
-      return [];
+      return Object.assign([], { usedFallback: false }) as DesignBatchResult;
     }
 
     const messages = [
@@ -207,7 +212,7 @@ export class ChapterDesignAgent extends BaseAgent {
       }
       const now = new Date().toISOString();
 
-      return parsed.map((p, index) => {
+      const plans = parsed.map((p, index) => {
         const plan = ChapterPlanSchema.parse({
           chapterNumber: input.startChapter + index,
           chapterName: p.chapterName,
@@ -236,8 +241,18 @@ export class ChapterDesignAgent extends BaseAgent {
         });
         return this.applyHookDebtBudget(plan, context.pendingHooks, input.startChapter + index, context.outlineChapterLimit);
       });
-    } catch {
-      return this.buildFallbackBatchPlans(input, context);
+      return Object.assign(plans, {
+        usedFallback: false,
+        fallbackReason: undefined,
+      }) as DesignBatchResult;
+    } catch (error) {
+      const fallbackReason = error instanceof Error
+        ? error.message
+        : String(error || "LLM 章节设计失败，已使用本地兜底。");
+      return Object.assign(this.buildFallbackBatchPlans(input, context), {
+        usedFallback: true,
+        fallbackReason,
+      }) as DesignBatchResult;
     }
   }
 

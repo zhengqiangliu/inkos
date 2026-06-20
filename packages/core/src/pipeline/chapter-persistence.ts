@@ -2,6 +2,7 @@ import type { AuditIssue, AuditResult } from "../agents/continuity.js";
 import type { ChapterAuditReport, ChapterMeta } from "../models/chapter.js";
 import type { LengthTelemetry } from "../models/length-governance.js";
 import { buildStateDegradedReviewNote } from "./chapter-state-recovery.js";
+import { estimateAuditScoreDetailed } from "../utils/audit-issue-classification.js";
 
 export interface ChapterPersistenceUsage {
   readonly promptTokens: number;
@@ -20,9 +21,8 @@ function countAuditIssueSeverities(issues: ReadonlyArray<AuditIssue>): Readonly<
   }, { critical: 0, warning: 0, info: 0 });
 }
 
-function estimateAuditScore(severityCounts: Readonly<{ critical: number; warning: number; info: number }>): number {
-  const raw = 100 - severityCounts.critical * 35 - severityCounts.warning * 12;
-  return Math.max(0, Math.min(100, raw));
+function estimateAuditScore(auditResult: AuditResult): number {
+  return estimateAuditScoreDetailed(auditResult.issues);
 }
 
 function resolveAuditFailureGate(auditResult: AuditResult): "none" | "critical" | "score" {
@@ -45,7 +45,7 @@ export function buildChapterAuditHistoryEntry(auditResult: AuditResult, auditedA
     auditedAt,
     passed: auditResult.passed,
     issueCount: auditResult.issues.length,
-    score: estimateAuditScore(severityCounts),
+    score: estimateAuditScore(auditResult),
     summary: typeof auditResult.summary === "string" && auditResult.summary.trim().length > 0
       ? auditResult.summary.trim()
       : undefined,

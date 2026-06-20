@@ -81,6 +81,10 @@ export function getBookBadgeInitial(title: string): string {
   return /[a-z]/i.test(fallback) ? fallback.toUpperCase() : fallback;
 }
 
+export function shouldShowBookList(activePage: string): boolean {
+  return activePage !== "book-create";
+}
+
 export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCollapsed }: SidebarProps) {
   const { data, refetch: refetchBooks } = useApi<{ books: ReadonlyArray<BookSummary> }>("/books");
   const { data: daemon, refetch: refetchDaemon } = useApi<{ running: boolean }>("/daemon");
@@ -88,6 +92,7 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
   const loadSessionList = useChatStore((s) => s.loadSessionList);
 
   const books = data?.books ?? [];
+  const showBookList = shouldShowBookList(activePage);
 
   useEffect(() => {
     const recent = sse.messages.at(-1);
@@ -154,7 +159,7 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
         </div>
 
         <div className={`flex-1 overflow-y-auto ${collapsed ? "px-2 py-2" : "px-4 py-2"} space-y-6`}>
-          <div>
+          {showBookList ? <div>
             {!collapsed && (
               <div className="px-3 mb-3 flex items-center justify-between">
                 <span className="text-[11px] uppercase tracking-widest text-muted-foreground font-bold">{t("nav.books")}</span>
@@ -263,7 +268,7 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                 <div className="px-3 py-6 text-xs text-muted-foreground/50 italic text-center">{t("dash.noBooks")}</div>
               )}
             </div>
-          </div>
+          </div> : null}
 
           <div>
             {!collapsed && (

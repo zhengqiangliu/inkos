@@ -64,6 +64,25 @@ describe("StepMarkdownEditor", () => {
     expect(html).toContain("保存");
   });
 
+  it("hides the save action when no save handler is provided", () => {
+    const html = renderToStaticMarkup(
+      createElement(StepMarkdownEditor, {
+        spec: {
+          title: "简介正文",
+          description: "编辑正文并允许 AI 修改。",
+          sections: [{ key: "introMarkdown", title: "正文", placeholder: "正文..." }],
+        },
+        value: "## 简介\n\n当前正文",
+        editing: true,
+        onToggleEditing: () => undefined,
+        onValueChange: () => undefined,
+        onAiModify: () => undefined,
+      })
+    );
+
+    expect(html).not.toContain("保存");
+  });
+
   it("keeps ai actions visible in editing mode", () => {
     const html = renderToStaticMarkup(
       createElement(StepMarkdownEditor, {
