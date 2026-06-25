@@ -481,8 +481,7 @@ function resolveCanonicalAuditPassed(auditResult: Pick<AuditResult, "passed" | "
   if (score < MIN_AUDIT_PASS_SCORE) return false;
   const severityCounts = countAuditIssueSeverities(auditResult.issues);
   if (severityCounts.critical > 0) return false;
-  if (auditResult.passed) return true;
-  return auditResult.issues.length > 0;
+  return auditResult.passed;
 }
 
 function normalizeAuditPassedStatus<T extends AuditResult>(auditResult: T): T {
@@ -956,7 +955,6 @@ export class PipelineRunner {
     scoreIssues?: ReadonlyArray<AuditIssue>;
   }): AuditResult {
     const normalizedAudit = normalizeAuditPassedStatus(params.auditResult);
-    if (!normalizedAudit.passed) return normalizedAudit;
     const scoreBasis = params.scoreIssues ?? params.auditResult.issues;
     const score = estimateAuditScore(scoreBasis);
     if (score >= MIN_AUDIT_PASS_SCORE) return normalizedAudit;

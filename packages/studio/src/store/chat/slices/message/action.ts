@@ -578,7 +578,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     }
   },
 
-  createSession: async (bookId) => {
+  createSession: async (bookId, options) => {
     const data = await fetchJson<SessionResponse>("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -588,6 +588,8 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     if (!sessionId) {
       throw new Error("Failed to create session");
     }
+
+    const shouldActivate = options?.activate !== false;
 
     set((state) => {
       const runtime = createSessionRuntime({
@@ -607,7 +609,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
             [sessionId],
           ),
         },
-        activeSessionId: sessionId,
+        activeSessionId: shouldActivate ? sessionId : state.activeSessionId,
       };
     });
 

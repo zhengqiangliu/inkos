@@ -44,4 +44,40 @@ describe("selected model persistence", () => {
       }),
     });
   });
+
+  it("does not steal the active session when createSession is called with activate false", async () => {
+    const store = createTestStore();
+    const fetchJsonMock = vi.mocked(fetchJson);
+    fetchJsonMock.mockResolvedValue({
+      session: {
+        sessionId: "session-new",
+        bookId: "book-b",
+        title: "Book B",
+      },
+    } as never);
+
+    store.setState((state) => ({
+      ...state,
+      activeSessionId: "session-a",
+      sessions: {
+        ...state.sessions,
+        "session-a": {
+          ...state.sessions["session-a"],
+          sessionId: "session-a",
+          bookId: "book-a",
+          title: "Book A",
+        },
+      },
+      sessionIdsByBook: {
+        ...state.sessionIdsByBook,
+        "book-a": ["session-a"],
+      },
+    }));
+
+    const sessionId = await store.getState().createSession("book-b", { activate: false });
+
+    expect(sessionId).toBe("session-new");
+    expect(store.getState().activeSessionId).toBe("session-a");
+    expect(store.getState().sessionIdsByBook["book-b"]).toContain("session-new");
+  });
 });

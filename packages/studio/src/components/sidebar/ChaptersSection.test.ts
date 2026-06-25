@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  chapterTaskScopeKey,
+  chapterTaskScopeKeysDiffer,
   describeAutoReviewState,
   extractAutoReviewFinalReason,
   extractChapterNumberFromPayload,
@@ -57,6 +59,17 @@ describe("chapterAuditScoreBadgeClass", () => {
     expect(chapterAuditScoreBadgeClass(80)).toContain("emerald");
     expect(chapterAuditScoreBadgeClass(84)).toContain("emerald");
     expect(chapterAuditScoreBadgeClass(85)).toContain("emerald");
+  });
+});
+
+describe("chapterTaskScopeKey", () => {
+  it("isolates chapter runtime state by book id", () => {
+    expect(chapterTaskScopeKey("book-a", 12)).toBe("book-a::12");
+    expect(chapterTaskScopeKeysDiffer("book-a", 12, "book-b", 12)).toBe(true);
+  });
+
+  it("treats the same book and chapter as the same runtime slot", () => {
+    expect(chapterTaskScopeKeysDiffer("book-a", 12, "book-a", 12)).toBe(false);
   });
 });
 

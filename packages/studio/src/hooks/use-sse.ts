@@ -27,6 +27,17 @@ const STATE_EVENTS: ReadonlySet<string> = new Set([
   "book-task:resume",
 ]);
 
+const NOISY_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
+  "thinking:delta",
+  "draft:delta",
+  "tool:update",
+  "chapter:delta",
+  "batch:progress",
+  "persist:check",
+  "persist:repair",
+  "ping",
+]);
+
 export const STUDIO_SSE_EVENTS = [
   "book:creating",
   "book:created",
@@ -122,8 +133,9 @@ export function useSSE(url = "/api/v1/events") {
         if (STATE_EVENTS.has(e.type)) {
           setStateMessages((prev) => [...prev.slice(-49), msg]);
         }
-        // 所有事件仍写入 messages（保持向后兼容），但 messages 只保留100条
-        setMessages((prev) => [...prev.slice(-99), msg]);
+        if (!NOISY_MESSAGE_EVENTS.has(e.type)) {
+          setMessages((prev) => [...prev.slice(-99), msg]);
+        }
       } catch {
         // ignore parse errors
       }

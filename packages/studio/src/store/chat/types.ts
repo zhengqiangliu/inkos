@@ -278,7 +278,12 @@ export interface MessageActions {
   addErrorMessage: (sessionId: string, errorMsg: string, wizardStep?: import("@actalk/inkos-core").BookCreationWizardStep) => void;
   loadSessionMessages: (sessionId: string, msgs: ReadonlyArray<SessionMessage>) => void;
   loadSessionList: (bookId: string | null) => Promise<void>;
-  createSession: (bookId: string | null) => Promise<string>;
+  createSession: (
+    bookId: string | null,
+    options?: {
+      readonly activate?: boolean;
+    },
+  ) => Promise<string>;
   createDraftSession: (bookId: string | null) => string;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;

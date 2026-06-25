@@ -1,10 +1,16 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const BASE = "/api/v1";
 const API_INVALIDATE_EVENT = "inkos:api-invalidate";
 
 interface ApiInvalidateDetail {
   readonly paths: ReadonlyArray<string>;
+}
+
+interface ApiRequestTracker {
+  beginRequest: () => number;
+  isCurrent: (requestId: number) => boolean;
+  dispose: () => void;
 }
 
 export class ApiRequestError extends Error {
@@ -101,6 +107,23 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
   return [];
 }
 
+export function createApiRequestTracker(): ApiRequestTracker {
+  let currentRequestId = 0;
+  let active = true;
+
+  return {
+    beginRequest: () => {
+      currentRequestId += 1;
+      return currentRequestId;
+    },
+    isCurrent: (requestId) => active && requestId === currentRequestId,
+    dispose: () => {
+      active = false;
+      currentRequestId += 1;
+    },
+  };
+}
+
 export function invalidateApiPaths(paths: ReadonlyArray<string>): void {
   if (!paths.length || typeof window === "undefined") {
     return;
@@ -195,6 +218,14 @@ export function useApi<T>(path: string) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const trackerRef = useRef<ApiRequestTracker | null>(null);
+  if (!trackerRef.current) {
+    trackerRef.current = createApiRequestTracker();
+  }
+
+  useEffect(() => () => {
+    trackerRef.current?.dispose();
+  }, []);
 
   const refetch = useCallback(async () => {
     const url = buildApiUrl(path);
@@ -205,14 +236,18 @@ export function useApi<T>(path: string) {
       return;
     }
 
+    const requestId = trackerRef.current?.beginRequest() ?? 0;
     setLoading(true);
     setError(null);
     try {
       const json = await fetchJson<T>(url);
+      if (!trackerRef.current?.isCurrent(requestId)) return;
       setData(json);
     } catch (e) {
+      if (!trackerRef.current?.isCurrent(requestId)) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      if (!trackerRef.current?.isCurrent(requestId)) return;
       setLoading(false);
     }
   }, [path]);

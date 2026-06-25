@@ -80,6 +80,7 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const sessionLoadSeqRef = useRef(0);
 
   const isZh = t("nav.connected") === "\u5DF2\u8FDE\u63A5";
   const hasBook = Boolean(activeBookId);
@@ -175,31 +176,41 @@ export function ChatPage({ activeBookId, nav, theme, t, sse: _sse }: ChatPagePro
   // Entering a book loads its latest session.
   useEffect(() => {
     let cancelled = false;
+    const loadSeq = sessionLoadSeqRef.current + 1;
+    sessionLoadSeqRef.current = loadSeq;
+    const isStale = () => cancelled || sessionLoadSeqRef.current !== loadSeq;
 
     void (async () => {
       if (activeBookId) {
         await loadSessionList(activeBookId);
-        if (cancelled) return;
+        if (isStale()) return;
 
         const state = useChatStore.getState();
         const currentSession = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
         if (currentSession?.bookId === activeBookId) {
+          if (isStale()) return;
+          activateSession(currentSession.sessionId);
           await loadSessionDetail(currentSession.sessionId);
           return;
         }
         const ids = state.sessionIdsByBook[activeBookId] ?? [];
         if (ids.length > 0) {
+          if (isStale()) return;
           activateSession(ids[0]);
           await loadSessionDetail(ids[0]);
           return;
         }
 
-        await createSession(activeBookId);
+        const created = await createSession(activeBookId, { activate: false });
+        if (isStale()) return;
+        activateSession(created);
         return;
       }
 
-      if (cancelled) return;
-      await createSession(null);
+      if (isStale()) return;
+      const created = await createSession(null, { activate: false });
+      if (isStale()) return;
+      activateSession(created);
     })();
 
   return () => {

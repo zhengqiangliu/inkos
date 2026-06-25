@@ -115,6 +115,19 @@ export function chapterAuditScoreBadgeClass(score: number): string {
   return "bg-destructive/10 text-destructive";
 }
 
+export function chapterTaskScopeKey(bookId: string, chapterNum: number): string {
+  return `${bookId}::${chapterNum}`;
+}
+
+export function chapterTaskScopeKeysDiffer(
+  leftBookId: string,
+  leftChapterNum: number,
+  rightBookId: string,
+  rightChapterNum: number,
+): boolean {
+  return chapterTaskScopeKey(leftBookId, leftChapterNum) !== chapterTaskScopeKey(rightBookId, rightChapterNum);
+}
+
 function normalizeAuditIssueTexts(raw: unknown, limit = 6): string[] {
   if (!Array.isArray(raw)) return [];
   const result: string[] = [];
@@ -351,22 +364,22 @@ export function ChaptersSection({
   hidePassedAuditSummary = false,
 }: ChaptersSectionProps) {
   const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
-  const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<number>>([]);
-  const [auditingChapters, setAuditingChapters] = useState<ReadonlyArray<number>>([]);
-  const [autoReviewStateByChapter, setAutoReviewStateByChapter] = useState<Readonly<Record<number, AutoReviewChapterState>>>({});
-  const [deletingChapters, setDeletingChapters] = useState<ReadonlyArray<number>>([]);
-  const [approvingChapters, setApprovingChapters] = useState<ReadonlyArray<number>>([]);
-  const [repairingChapters, setRepairingChapters] = useState<ReadonlyArray<number>>([]);
+  const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<string>>([]);
+  const [auditingChapters, setAuditingChapters] = useState<ReadonlyArray<string>>([]);
+  const [autoReviewStateByChapter, setAutoReviewStateByChapter] = useState<Readonly<Record<string, AutoReviewChapterState>>>({});
+  const [deletingChapters, setDeletingChapters] = useState<ReadonlyArray<string>>([]);
+  const [approvingChapters, setApprovingChapters] = useState<ReadonlyArray<string>>([]);
+  const [repairingChapters, setRepairingChapters] = useState<ReadonlyArray<string>>([]);
   const [expandedAuditHistoryChapters, setExpandedAuditHistoryChapters] = useState<ReadonlyArray<number>>([]);
   const [auditingImpacted, setAuditingImpacted] = useState(false);
   const [editingChapterNum, setEditingChapterNum] = useState<number | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
   const [titleError, setTitleError] = useState<string | null>(null);
-  const rewriteFallbackTimers = useRef<Map<number, number>>(new Map());
-  const auditFallbackTimers = useRef<Map<number, number>>(new Map());
-  const approveFallbackTimers = useRef<Map<number, number>>(new Map());
-  const deleteFallbackTimers = useRef<Map<number, number>>(new Map());
+  const rewriteFallbackTimers = useRef<Map<string, number>>(new Map());
+  const auditFallbackTimers = useRef<Map<string, number>>(new Map());
+  const approveFallbackTimers = useRef<Map<string, number>>(new Map());
+  const deleteFallbackTimers = useRef<Map<string, number>>(new Map());
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const refreshRequestSeqRef = useRef(0);
   const lastProcessedSseMessageRef = useRef<SSEMessage | null>(null);
@@ -386,6 +399,11 @@ export function ChaptersSection({
   const chapterLabel = useCallback(
     (chapterNum: number) => t("chapter.label").replace("{n}", String(chapterNum)),
     [t],
+  );
+
+  const getScopedChapterKey = useCallback(
+    (chapterNum: number) => chapterTaskScopeKey(bookId, chapterNum),
+    [bookId],
   );
 
   const refreshChapters = useCallback(() => {
@@ -464,6 +482,33 @@ export function ChaptersSection({
     setDraftTitle("");
     setSavingTitle(false);
     setTitleError(null);
+    setRewritingChapters([]);
+    setAuditingChapters([]);
+    setAutoReviewStateByChapter({});
+    setDeletingChapters([]);
+    setApprovingChapters([]);
+    setRepairingChapters([]);
+    setAuditingImpacted(false);
+    if (auditRefreshTimerRef.current !== null) {
+      window.clearTimeout(auditRefreshTimerRef.current);
+      auditRefreshTimerRef.current = null;
+    }
+    for (const timerId of rewriteFallbackTimers.current.values()) {
+      window.clearTimeout(timerId);
+    }
+    rewriteFallbackTimers.current.clear();
+    for (const timerId of auditFallbackTimers.current.values()) {
+      window.clearTimeout(timerId);
+    }
+    auditFallbackTimers.current.clear();
+    for (const timerId of approveFallbackTimers.current.values()) {
+      window.clearTimeout(timerId);
+    }
+    approveFallbackTimers.current.clear();
+    for (const timerId of deleteFallbackTimers.current.values()) {
+      window.clearTimeout(timerId);
+    }
+    deleteFallbackTimers.current.clear();
   }, [bookId]);
 
   useEffect(() => {
@@ -494,35 +539,35 @@ export function ChaptersSection({
     [],
   );
 
-  const clearRewriteFallback = useCallback((chapterNum: number) => {
-    const timerId = rewriteFallbackTimers.current.get(chapterNum);
+  const clearRewriteFallback = useCallback((chapterKey: string) => {
+    const timerId = rewriteFallbackTimers.current.get(chapterKey);
     if (timerId !== undefined) {
       window.clearTimeout(timerId);
-      rewriteFallbackTimers.current.delete(chapterNum);
+      rewriteFallbackTimers.current.delete(chapterKey);
     }
   }, []);
 
-  const clearAuditFallback = useCallback((chapterNum: number) => {
-    const timerId = auditFallbackTimers.current.get(chapterNum);
+  const clearAuditFallback = useCallback((chapterKey: string) => {
+    const timerId = auditFallbackTimers.current.get(chapterKey);
     if (timerId !== undefined) {
       window.clearTimeout(timerId);
-      auditFallbackTimers.current.delete(chapterNum);
+      auditFallbackTimers.current.delete(chapterKey);
     }
   }, []);
 
-  const clearApproveFallback = useCallback((chapterNum: number) => {
-    const timerId = approveFallbackTimers.current.get(chapterNum);
+  const clearApproveFallback = useCallback((chapterKey: string) => {
+    const timerId = approveFallbackTimers.current.get(chapterKey);
     if (timerId !== undefined) {
       window.clearTimeout(timerId);
-      approveFallbackTimers.current.delete(chapterNum);
+      approveFallbackTimers.current.delete(chapterKey);
     }
   }, []);
 
-  const clearDeleteFallback = useCallback((chapterNum: number) => {
-    const timerId = deleteFallbackTimers.current.get(chapterNum);
+  const clearDeleteFallback = useCallback((chapterKey: string) => {
+    const timerId = deleteFallbackTimers.current.get(chapterKey);
     if (timerId !== undefined) {
       window.clearTimeout(timerId);
-      deleteFallbackTimers.current.delete(chapterNum);
+      deleteFallbackTimers.current.delete(chapterKey);
     }
   }, []);
 
@@ -666,10 +711,11 @@ export function ChaptersSection({
 
   const scheduleRewriteFallback = useCallback(
     (chapterNum: number) => {
-      clearRewriteFallback(chapterNum);
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearRewriteFallback(chapterKey);
       const actionLabel = t("book.rewrite");
       const timeoutId = window.setTimeout(() => {
-        setRewritingChapters((prev) => prev.filter((n) => n !== chapterNum));
+        setRewritingChapters((prev) => prev.filter((key) => key !== chapterKey));
         pushActionFailedMessage(
           actionLabel,
           chapterNum,
@@ -678,19 +724,20 @@ export function ChaptersSection({
             chapter: chapterLabel(chapterNum),
           }),
         );
-        rewriteFallbackTimers.current.delete(chapterNum);
+        rewriteFallbackTimers.current.delete(chapterKey);
       }, 180000);
-      rewriteFallbackTimers.current.set(chapterNum, timeoutId);
+      rewriteFallbackTimers.current.set(chapterKey, timeoutId);
     },
-    [chapterLabel, clearRewriteFallback, pushActionFailedMessage, t],
+    [chapterLabel, clearRewriteFallback, getScopedChapterKey, pushActionFailedMessage, t],
   );
 
   const scheduleApproveFallback = useCallback(
     (chapterNum: number) => {
-      clearApproveFallback(chapterNum);
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearApproveFallback(chapterKey);
       const actionLabel = t("book.approve");
       const timeoutId = window.setTimeout(() => {
-        setApprovingChapters((prev) => prev.filter((n) => n !== chapterNum));
+        setApprovingChapters((prev) => prev.filter((key) => key !== chapterKey));
         pushActionFailedMessage(
           actionLabel,
           chapterNum,
@@ -699,19 +746,20 @@ export function ChaptersSection({
             chapter: chapterLabel(chapterNum),
           }),
         );
-        approveFallbackTimers.current.delete(chapterNum);
+        approveFallbackTimers.current.delete(chapterKey);
       }, 180000);
-      approveFallbackTimers.current.set(chapterNum, timeoutId);
+      approveFallbackTimers.current.set(chapterKey, timeoutId);
     },
-    [chapterLabel, clearApproveFallback, pushActionFailedMessage, t],
+    [chapterLabel, clearApproveFallback, getScopedChapterKey, pushActionFailedMessage, t],
   );
 
   const scheduleAuditFallback = useCallback(
     (chapterNum: number) => {
-      clearAuditFallback(chapterNum);
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearAuditFallback(chapterKey);
       const actionLabel = t("book.audit");
       const timeoutId = window.setTimeout(() => {
-        setAuditingChapters((prev) => prev.filter((n) => n !== chapterNum));
+        setAuditingChapters((prev) => prev.filter((key) => key !== chapterKey));
         pushActionFailedMessage(
           actionLabel,
           chapterNum,
@@ -720,19 +768,20 @@ export function ChaptersSection({
             chapter: chapterLabel(chapterNum),
           }),
         );
-        auditFallbackTimers.current.delete(chapterNum);
+        auditFallbackTimers.current.delete(chapterKey);
       }, AUDIT_ACTION_TIMEOUT_MS);
-      auditFallbackTimers.current.set(chapterNum, timeoutId);
+      auditFallbackTimers.current.set(chapterKey, timeoutId);
     },
-    [chapterLabel, clearAuditFallback, pushActionFailedMessage, t],
+    [chapterLabel, clearAuditFallback, getScopedChapterKey, pushActionFailedMessage, t],
   );
 
   const scheduleDeleteFallback = useCallback(
     (chapterNum: number) => {
-      clearDeleteFallback(chapterNum);
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearDeleteFallback(chapterKey);
       const actionLabel = t("common.delete");
       const timeoutId = window.setTimeout(() => {
-        setDeletingChapters((prev) => prev.filter((n) => n !== chapterNum));
+        setDeletingChapters((prev) => prev.filter((key) => key !== chapterKey));
         pushActionFailedMessage(
           actionLabel,
           chapterNum,
@@ -741,11 +790,11 @@ export function ChaptersSection({
             chapter: chapterLabel(chapterNum),
           }),
         );
-        deleteFallbackTimers.current.delete(chapterNum);
+        deleteFallbackTimers.current.delete(chapterKey);
       }, 180000);
-      deleteFallbackTimers.current.set(chapterNum, timeoutId);
+      deleteFallbackTimers.current.set(chapterKey, timeoutId);
     },
-    [chapterLabel, clearDeleteFallback, pushActionFailedMessage, t],
+    [chapterLabel, clearDeleteFallback, getScopedChapterKey, pushActionFailedMessage, t],
   );
 
   const chapterNumFromEventData = useCallback((data: unknown): number | null => {
@@ -798,6 +847,7 @@ export function ChaptersSection({
     if (message.event === "audit:start") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
+      const chapterKey = getScopedChapterKey(chapterNum);
       const roundRaw = Number((data as { round?: unknown } | null)?.round);
       const maxRoundsRaw = Number((data as { maxRounds?: unknown } | null)?.maxRounds);
       if (
@@ -810,10 +860,10 @@ export function ChaptersSection({
         const maxRounds = Math.trunc(maxRoundsRaw);
         setAutoReviewStateByChapter((prev) => ({
           ...prev,
-          [chapterNum]: { phase: "audit", round, maxRounds },
+          [chapterKey]: { phase: "audit", round, maxRounds },
         }));
       }
-      setAuditingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+      setAuditingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
       scheduleAuditFallback(chapterNum);
       return;
     }
@@ -822,6 +872,7 @@ export function ChaptersSection({
       const chapterNum = chapterNumFromEventData(data);
       const autoTriggeredByAudit = Boolean((data as { autoTriggeredByAudit?: unknown } | null)?.autoTriggeredByAudit);
       if (chapterNum === null || !autoTriggeredByAudit) return;
+      const chapterKey = getScopedChapterKey(chapterNum);
       const roundRaw = Number((data as { round?: unknown } | null)?.round);
       const maxRoundsRaw = Number((data as { maxRounds?: unknown } | null)?.maxRounds);
       if (
@@ -834,10 +885,10 @@ export function ChaptersSection({
         const maxRounds = Math.trunc(maxRoundsRaw);
         setAutoReviewStateByChapter((prev) => ({
           ...prev,
-          [chapterNum]: { phase: "revise", round, maxRounds },
+          [chapterKey]: { phase: "revise", round, maxRounds },
         }));
       }
-      setAuditingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+      setAuditingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
       scheduleAuditFallback(chapterNum);
       return;
     }
@@ -861,8 +912,9 @@ export function ChaptersSection({
     if (message.event === "rewrite:complete") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
-      clearRewriteFallback(chapterNum);
-      setRewritingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearRewriteFallback(chapterKey);
+      setRewritingChapters((prev) => prev.filter((key) => key !== chapterKey));
       bumpBookDataVersion();
       refreshChapters();
       pushActionCompletedMessage(t("book.rewrite"), chapterNum);
@@ -872,8 +924,9 @@ export function ChaptersSection({
     if (message.event === "rewrite:error") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum !== null) {
-        clearRewriteFallback(chapterNum);
-        setRewritingChapters((prev) => prev.filter((n) => n !== chapterNum));
+        const chapterKey = getScopedChapterKey(chapterNum);
+        clearRewriteFallback(chapterKey);
+        setRewritingChapters((prev) => prev.filter((key) => key !== chapterKey));
         pushActionFailedMessage(t("book.rewrite"), chapterNum, data?.error ?? t("sidebar.chapter.rewriteFailed"));
         return;
       }
@@ -892,6 +945,7 @@ export function ChaptersSection({
     if (message.event === "audit:complete") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
+      const chapterKey = getScopedChapterKey(chapterNum);
       const audit = normalizeAuditSummary(data, chapterNum);
       if (audit) {
         latestAuditSummaryByChapterRef.current.set(chapterNum, audit);
@@ -906,23 +960,23 @@ export function ChaptersSection({
       const stopReasonRaw = (data as { autoReviewStopReason?: unknown } | null)?.autoReviewStopReason;
       const stopReason = typeof stopReasonRaw === "string" ? stopReasonRaw.trim() : "";
       if (shouldContinueAutoCycle) {
-        setAuditingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+        setAuditingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
         scheduleAuditFallback(chapterNum);
         const round = Math.trunc(roundRaw);
         const maxRounds = Math.trunc(maxRoundsRaw);
         setAutoReviewStateByChapter((prev) => ({
           ...prev,
-          [chapterNum]: { phase: "audit", round, maxRounds },
+          [chapterKey]: { phase: "audit", round, maxRounds },
         }));
       } else {
-        clearAuditFallback(chapterNum);
-        setAuditingChapters((prev) => prev.filter((n) => n !== chapterNum));
+        clearAuditFallback(chapterKey);
+        setAuditingChapters((prev) => prev.filter((key) => key !== chapterKey));
         if (hasAutoRound && !passed && roundRaw > maxRoundsRaw) {
           const round = Math.trunc(roundRaw);
           const maxRounds = Math.trunc(maxRoundsRaw);
           setAutoReviewStateByChapter((prev) => ({
             ...prev,
-            [chapterNum]: {
+            [chapterKey]: {
               phase: "stopped",
               round,
               maxRounds,
@@ -931,9 +985,9 @@ export function ChaptersSection({
           }));
         } else {
           setAutoReviewStateByChapter((prev) => {
-            if (!(chapterNum in prev)) return prev;
+            if (!(chapterKey in prev)) return prev;
             const next = { ...prev };
-            delete next[chapterNum];
+            delete next[chapterKey];
             return next;
           });
         }
@@ -1035,12 +1089,13 @@ export function ChaptersSection({
     if (message.event === "audit:error") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum !== null) {
-        clearAuditFallback(chapterNum);
-        setAuditingChapters((prev) => prev.filter((n) => n !== chapterNum));
+        const chapterKey = getScopedChapterKey(chapterNum);
+        clearAuditFallback(chapterKey);
+        setAuditingChapters((prev) => prev.filter((key) => key !== chapterKey));
         setAutoReviewStateByChapter((prev) => {
-          if (!(chapterNum in prev)) return prev;
+          if (!(chapterKey in prev)) return prev;
           const next = { ...prev };
-          delete next[chapterNum];
+          delete next[chapterKey];
           return next;
         });
         if (typeof data?.runId === "string" && data.runId.trim().length > 0) {
@@ -1071,8 +1126,9 @@ export function ChaptersSection({
     if (message.event === "approve:complete") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
-      clearApproveFallback(chapterNum);
-      setApprovingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearApproveFallback(chapterKey);
+      setApprovingChapters((prev) => prev.filter((key) => key !== chapterKey));
       bumpBookDataVersion();
       refreshChapters();
       pushActionCompletedMessage(t("book.approve"), chapterNum);
@@ -1082,8 +1138,9 @@ export function ChaptersSection({
     if (message.event === "approve:error") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
-      clearApproveFallback(chapterNum);
-      setApprovingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearApproveFallback(chapterKey);
+      setApprovingChapters((prev) => prev.filter((key) => key !== chapterKey));
       pushActionFailedMessage(t("book.approve"), chapterNum, data?.error ?? t("book.approve"));
       return;
     }
@@ -1091,8 +1148,9 @@ export function ChaptersSection({
     if (message.event === "delete:complete") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
-      clearDeleteFallback(chapterNum);
-      setDeletingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearDeleteFallback(chapterKey);
+      setDeletingChapters((prev) => prev.filter((key) => key !== chapterKey));
       bumpBookDataVersion();
       refreshChapters();
       pushActionCompletedMessage(t("common.delete"), chapterNum);
@@ -1102,8 +1160,9 @@ export function ChaptersSection({
     if (message.event === "delete:error") {
       const chapterNum = chapterNumFromEventData(data);
       if (chapterNum === null) return;
-      clearDeleteFallback(chapterNum);
-      setDeletingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      const chapterKey = getScopedChapterKey(chapterNum);
+      clearDeleteFallback(chapterKey);
+      setDeletingChapters((prev) => prev.filter((key) => key !== chapterKey));
       pushActionFailedMessage(t("common.delete"), chapterNum, data?.error ?? t("sidebar.chapter.deleteFailed"));
       return;
     }
@@ -1122,6 +1181,7 @@ export function ChaptersSection({
     clearApproveFallback,
     clearDeleteFallback,
     clearRewriteFallback,
+    getScopedChapterKey,
     pushAuditResultMessage,
     pushActionCompletedMessage,
     pushActionFailedMessage,
@@ -1248,8 +1308,9 @@ export function ChaptersSection({
     const brief = window.prompt(t("sidebar.chapter.rewritePrompt"), "");
     if (brief === null) return;
     const actionLabel = t("book.rewrite");
+    const chapterKey = getScopedChapterKey(chapterNum);
     const chapter = chapters.find((item) => item.number === chapterNum);
-    setRewritingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+    setRewritingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
     scheduleRewriteFallback(chapterNum);
     try {
       const language = actionLabel.toLowerCase().includes("rewrite") ? "en" : "zh";
@@ -1283,20 +1344,21 @@ export function ChaptersSection({
       pushActionFailedMessage(actionLabel, chapterNum, e instanceof Error ? e.message : t("sidebar.chapter.rewriteFailed"));
       alert(e instanceof Error ? e.message : t("sidebar.chapter.rewriteFailed"));
     } finally {
-      clearRewriteFallback(chapterNum);
-      setRewritingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      clearRewriteFallback(chapterKey);
+      setRewritingChapters((prev) => prev.filter((key) => key !== chapterKey));
     }
   };
 
   const handleAudit = async (chapterNum: number) => {
     const actionLabel = t("book.audit");
+    const chapterKey = getScopedChapterKey(chapterNum);
     setAutoReviewStateByChapter((prev) => {
-      if (!(chapterNum in prev)) return prev;
+      if (!(chapterKey in prev)) return prev;
       const next = { ...prev };
-      delete next[chapterNum];
+      delete next[chapterKey];
       return next;
     });
-    setAuditingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+    setAuditingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
     scheduleAuditFallback(chapterNum);
     try {
       const instruction = actionLabel.toLowerCase().includes("audit")
@@ -1307,8 +1369,8 @@ export function ChaptersSection({
       pushActionFailedMessage(actionLabel, chapterNum, e instanceof Error ? e.message : t("sidebar.chapter.auditActionFailed"));
       alert(e instanceof Error ? e.message : t("sidebar.chapter.auditActionFailed"));
     } finally {
-      clearAuditFallback(chapterNum);
-      setAuditingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      clearAuditFallback(chapterKey);
+      setAuditingChapters((prev) => prev.filter((key) => key !== chapterKey));
     }
   };
 
@@ -1319,8 +1381,9 @@ export function ChaptersSection({
     if (!confirmed) return;
 
     const actionLabel = t("common.delete");
+    const chapterKey = getScopedChapterKey(chapterNum);
     pushActionStartMessage(actionLabel, chapterNum);
-    setDeletingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+    setDeletingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
     scheduleDeleteFallback(chapterNum);
     try {
       await fetchWithTimeout(
@@ -1331,8 +1394,8 @@ export function ChaptersSection({
         chapterNum,
       );
     } catch (e) {
-      clearDeleteFallback(chapterNum);
-      setDeletingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      clearDeleteFallback(chapterKey);
+      setDeletingChapters((prev) => prev.filter((key) => key !== chapterKey));
       pushActionFailedMessage(actionLabel, chapterNum, e instanceof Error ? e.message : t("sidebar.chapter.deleteFailed"));
       alert(e instanceof Error ? e.message : t("sidebar.chapter.deleteFailed"));
     }
@@ -1340,8 +1403,9 @@ export function ChaptersSection({
 
   const handleApprove = async (chapterNum: number) => {
     const actionLabel = t("book.approve");
+    const chapterKey = getScopedChapterKey(chapterNum);
     pushActionStartMessage(actionLabel, chapterNum);
-    setApprovingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+    setApprovingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
     scheduleApproveFallback(chapterNum);
     try {
       await fetchWithTimeout(
@@ -1352,8 +1416,8 @@ export function ChaptersSection({
         chapterNum,
       );
     } catch (e) {
-      clearApproveFallback(chapterNum);
-      setApprovingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      clearApproveFallback(chapterKey);
+      setApprovingChapters((prev) => prev.filter((key) => key !== chapterKey));
       pushActionFailedMessage(actionLabel, chapterNum, e instanceof Error ? e.message : actionLabel);
       alert(e instanceof Error ? e.message : actionLabel);
     }
@@ -1361,7 +1425,8 @@ export function ChaptersSection({
 
   const handleRepair = async (chapterNum: number) => {
     const actionLabel = "修复";
-    setRepairingChapters((prev) => (prev.includes(chapterNum) ? prev : [...prev, chapterNum]));
+    const chapterKey = getScopedChapterKey(chapterNum);
+    setRepairingChapters((prev) => (prev.includes(chapterKey) ? prev : [...prev, chapterKey]));
     try {
       const instruction = `修复第${chapterNum}章落库和索引`;
       await dispatchAgentInstruction(instruction);
@@ -1372,7 +1437,7 @@ export function ChaptersSection({
       pushActionFailedMessage(actionLabel, chapterNum, e instanceof Error ? e.message : "修复失败");
       alert(e instanceof Error ? e.message : "修复失败");
     } finally {
-      setRepairingChapters((prev) => prev.filter((n) => n !== chapterNum));
+      setRepairingChapters((prev) => prev.filter((key) => key !== chapterKey));
     }
   };
 
@@ -1454,15 +1519,16 @@ export function ChaptersSection({
       ) : (
         <ul className={cn("space-y-1 overflow-y-auto overflow-x-hidden", listClassName ?? "max-h-52")}>
           {visibleChapters.map((ch) => {
+            const chapterKey = getScopedChapterKey(ch.number);
             const meta = STATUS_META[ch.status] ?? {
               symbol: "○",
               color: "text-muted-foreground",
               badge: "bg-muted/40 text-muted-foreground",
             };
-            const rewriting = rewritingChapters.includes(ch.number);
-            const auditing = auditingChapters.includes(ch.number);
-            const deleting = deletingChapters.includes(ch.number);
-            const approving = approvingChapters.includes(ch.number);
+            const rewriting = rewritingChapters.includes(chapterKey);
+            const auditing = auditingChapters.includes(chapterKey);
+            const deleting = deletingChapters.includes(chapterKey);
+            const approving = approvingChapters.includes(chapterKey);
             const auditHistory = Array.isArray(ch.auditHistory) ? ch.auditHistory : [];
             const latestAuditHistory = auditHistory[auditHistory.length - 1];
             const latestStructuredAudit = ch.audit ?? historyEntryToAuditSummary(latestAuditHistory, ch.number);
@@ -1478,7 +1544,7 @@ export function ChaptersSection({
               audit: latestStructuredAudit,
               auditIssues: chapterIssues,
             });
-            const autoReviewDisplay = describeChapterAutoReview(autoReviewStateByChapter[ch.number]);
+            const autoReviewDisplay = describeChapterAutoReview(autoReviewStateByChapter[chapterKey]);
             const autoReviewHint = autoReviewDisplay?.text ?? persistedAutoReviewReason;
             const autoReviewToneClass = autoReviewDisplay?.tone === "danger"
               ? "text-red-700/90"
@@ -1654,12 +1720,12 @@ export function ChaptersSection({
                       <button
                         type="button"
                         onClick={() => handleRepair(ch.number)}
-                        disabled={repairingChapters.includes(ch.number) || ch.status !== "state-degraded"}
+                        disabled={repairingChapters.includes(chapterKey) || ch.status !== "state-degraded"}
                         className="h-5 w-5 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-orange-600 hover:bg-orange-500/10 transition-colors disabled:opacity-50"
                         title="修复"
                         aria-label="修复"
                       >
-                        {repairingChapters.includes(ch.number) ? <Loader2 size={12} className="animate-spin" /> : <Wrench size={12} />}
+                        {repairingChapters.includes(chapterKey) ? <Loader2 size={12} className="animate-spin" /> : <Wrench size={12} />}
                       </button>
                       <button
                         type="button"

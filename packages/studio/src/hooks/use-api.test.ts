@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildApiUrl, deriveInvalidationPaths, fetchJson } from "./use-api";
+import { buildApiUrl, createApiRequestTracker, deriveInvalidationPaths, fetchJson } from "./use-api";
 
 describe("buildApiUrl", () => {
   it("returns null for blank paths so callers can skip requests", () => {
@@ -47,6 +47,27 @@ describe("fetchJson", () => {
     );
 
     await expect(fetchJson("/books/../bad", {}, { fetchImpl })).rejects.toThrow("Invalid book ID: ../bad");
+  });
+});
+
+describe("createApiRequestTracker", () => {
+  it("treats only the latest request as current", () => {
+    const tracker = createApiRequestTracker();
+
+    const first = tracker.beginRequest();
+    const second = tracker.beginRequest();
+
+    expect(tracker.isCurrent(first)).toBe(false);
+    expect(tracker.isCurrent(second)).toBe(true);
+  });
+
+  it("invalidates outstanding requests after dispose", () => {
+    const tracker = createApiRequestTracker();
+
+    const requestId = tracker.beginRequest();
+    tracker.dispose();
+
+    expect(tracker.isCurrent(requestId)).toBe(false);
   });
 });
 

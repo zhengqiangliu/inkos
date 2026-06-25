@@ -68,6 +68,7 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const quickMenuTimerRef = useRef<number | null>(null);
+  const sessionLoadSeqRef = useRef(0);
   const [quickMenuOpen, setQuickMenuOpen] = useState(false);
   const stopping = activeSession?.isStopping ?? false;
   const canStop = Boolean(activeSessionId) && (loading || stopping);
@@ -122,30 +123,38 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
 
   useEffect(() => {
     let cancelled = false;
+    const loadSeq = sessionLoadSeqRef.current + 1;
+    sessionLoadSeqRef.current = loadSeq;
+    const isStale = () => cancelled || sessionLoadSeqRef.current !== loadSeq;
+
     void (async () => {
       await loadSessionList(bookId);
-      if (cancelled) return;
+      if (isStale()) return;
       const state = useChatStore.getState();
       const preferredSessionId = readBookDetailSessionId(bookId);
       const preferredSession = preferredSessionId ? state.sessions[preferredSessionId] : null;
       if (preferredSessionId && preferredSession?.bookId === bookId) {
+        if (isStale()) return;
         activateSession(preferredSessionId);
         await loadSessionDetail(preferredSessionId);
         return;
       }
       const currentSession = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
       if (currentSession?.bookId === bookId) {
+        if (isStale()) return;
         activateSession(currentSession.sessionId);
         await loadSessionDetail(currentSession.sessionId);
         return;
       }
       const ids = state.sessionIdsByBook[bookId] ?? [];
       if (ids.length > 0) {
+        if (isStale()) return;
         activateSession(ids[0]);
         await loadSessionDetail(ids[0]);
         return;
       }
-      const created = await createSession(bookId);
+      const created = await createSession(bookId, { activate: false });
+      if (isStale()) return;
       activateSession(created);
       await loadSessionDetail(created);
     })();

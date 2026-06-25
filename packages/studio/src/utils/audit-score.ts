@@ -50,10 +50,9 @@ export function resolveAuditPassedByScore(
   severityCounts?: AuditSeverityCounts,
 ): boolean {
   if (score < passScoreThreshold) return false;
-  if (basePassed) return true;
-  if (!severityCounts) return false;
-  const issueCount = severityCounts.critical + severityCounts.warning + severityCounts.info;
-  return severityCounts.critical === 0 && issueCount > 0;
+  if (!severityCounts) return basePassed;
+  if (severityCounts.critical > 0) return false;
+  return basePassed;
 }
 
 export function resolveAuditPassed(args: {
