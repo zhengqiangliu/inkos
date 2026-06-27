@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { Users, ChevronDown } from "lucide-react";
-import { useChatStore } from "../../store/chat";
-import { fetchJson } from "../../hooks/use-api";
+import { useApi } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
 import { cn } from "../../lib/utils";
 
@@ -100,20 +99,11 @@ interface CharacterSectionProps {
 }
 
 export function CharacterSection({ bookId }: CharacterSectionProps) {
-  const [characters, setCharacters] = useState<CharacterInfo[]>([]);
-  const bookDataVersion = useChatStore((s) => s.bookDataVersion);
-
-  useEffect(() => {
-    fetchJson<{ content: string | null }>(`/books/${bookId}/truth/character_matrix.md`)
-      .then((data) => {
-        if (data.content) {
-          setCharacters(parseCharacterMatrix(data.content));
-        } else {
-          setCharacters([]);
-        }
-      })
-      .catch(() => setCharacters([]));
-  }, [bookId, bookDataVersion]);
+  const { data } = useApi<{ content: string | null }>(`/books/${bookId}/truth/character_matrix.md`);
+  const characters = useMemo(
+    () => (data?.content ? parseCharacterMatrix(data.content) : []),
+    [data?.content],
+  );
 
   if (characters.length === 0) return null;
 

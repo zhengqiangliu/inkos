@@ -7,6 +7,7 @@ import type {
   MessagePart,
   SessionResponse,
   SessionSummary,
+  SessionRuntime,
 } from "../../types";
 import { fetchJson } from "../../../../hooks/use-api";
 import { withErrorGuidance } from "../../../../utils/error-guidance";
@@ -50,6 +51,15 @@ function resolveCustomServiceName(service: string): string {
   const rawName = service.startsWith("custom:") ? decodeURIComponent(service.slice("custom:".length)) : "";
   const name = rawName.trim();
   return name.length > 0 ? name : "Custom";
+}
+
+function hasLoadedSessionDetail(session: SessionRuntime | undefined): boolean {
+  if (!session) return false;
+  if (session.detailLoaded) return true;
+  return session.messages.length > 0
+    || Boolean(session.creationDraft)
+    || Boolean(session.creationWizard)
+    || session.isDraft;
 }
 
 interface AgentRunStatusResponse {
@@ -592,14 +602,15 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
     const shouldActivate = options?.activate !== false;
 
     set((state) => {
-      const runtime = createSessionRuntime({
-        sessionId,
-        bookId: data.session?.bookId ?? bookId ?? null,
-        title: data.session?.title ?? null,
-      });
-      return {
-        sessions: {
-          ...state.sessions,
+        const runtime = createSessionRuntime({
+          sessionId,
+          bookId: data.session?.bookId ?? bookId ?? null,
+          title: data.session?.title ?? null,
+          detailLoaded: true,
+        });
+        return {
+          sessions: {
+            ...state.sessions,
           [sessionId]: runtime,
         },
         sessionIdsByBook: {
@@ -628,6 +639,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
         bookId,
         title: null,
         hasWizardStepMessage: true,
+        detailLoaded: true,
         isDraft: true,
       });
       return {
@@ -696,6 +708,11 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
   },
 
   loadSessionDetail: async (sessionId) => {
+    const existing = get().sessions[sessionId];
+    if (hasLoadedSessionDetail(existing)) {
+      return;
+    }
+
     try {
       const data = await fetchJson<SessionResponse>(`/sessions/${sessionId}`);
       const detail = data.session;
@@ -721,6 +738,7 @@ export const createMessageSlice: StateCreator<ChatStore, [], [], MessageActions>
               ...nextRuntime,
               bookId: nextBookId,
               title: detail.title ?? runtime?.title ?? null,
+              detailLoaded: true,
               messages: hasLiveStream ? runtime?.messages ?? messages : messages,
               stream: runtime?.stream ?? null,
               isStreaming: hasLiveStream ? runtime?.isStreaming ?? false : false,

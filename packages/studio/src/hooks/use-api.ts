@@ -13,6 +13,15 @@ interface ApiRequestTracker {
   dispose: () => void;
 }
 
+interface ApiCacheEntry<T = unknown> {
+  readonly data: T;
+  readonly updatedAt: number;
+}
+
+const API_CACHE_TTL_MS = 30_000;
+const apiResponseCache = new Map<string, ApiCacheEntry>();
+const apiInFlightRequests = new Map<string, Promise<unknown>>();
+
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -90,6 +99,16 @@ export function deriveInvalidationPaths(path: string): ReadonlyArray<string> {
     return ["/api/v1/books", `/api/v1/books/${checklistAction[1]}`, `/api/v1/books/${checklistAction[1]}/task-checklist`];
   }
 
+  const truthFileAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/truth\/(.+)$/);
+  if (truthFileAction) {
+    return [
+      "/api/v1/books",
+      `/api/v1/books/${truthFileAction[1]}`,
+      `/api/v1/books/${truthFileAction[1]}/truth`,
+      normalized,
+    ];
+  }
+
   const scriptWorkspaceAction = normalized.match(/^\/api\/v1\/books\/([^/]+)\/script-workspace(?:\/generate)?$/);
   if (scriptWorkspaceAction) {
     return ["/api/v1/books", `/api/v1/books/${scriptWorkspaceAction[1]}`, `/api/v1/books/${scriptWorkspaceAction[1]}/script-workspace`];
@@ -127,6 +146,10 @@ export function createApiRequestTracker(): ApiRequestTracker {
 export function invalidateApiPaths(paths: ReadonlyArray<string>): void {
   if (!paths.length || typeof window === "undefined") {
     return;
+  }
+
+  for (const path of paths) {
+    clearApiCache(path);
   }
 
   window.dispatchEvent(new CustomEvent<ApiInvalidateDetail>(API_INVALIDATE_EVENT, {
@@ -214,6 +237,103 @@ export async function fetchJson<T>(
   return await res.json() as T;
 }
 
+function shouldUseSharedGetRequest(init?: RequestInit): boolean {
+  const method = init?.method?.trim().toUpperCase();
+  if (!method || method === "GET") {
+    return !init?.body;
+  }
+  return false;
+}
+
+function readApiCache<T>(url: string): ApiCacheEntry<T> | null {
+  const entry = apiResponseCache.get(url) as ApiCacheEntry<T> | undefined;
+  if (!entry) return null;
+  if (Date.now() - entry.updatedAt > API_CACHE_TTL_MS) {
+    apiResponseCache.delete(url);
+    return null;
+  }
+  return entry;
+}
+
+function writeApiCache<T>(url: string, data: T): void {
+  apiResponseCache.set(url, {
+    data,
+    updatedAt: Date.now(),
+  });
+}
+
+export async function fetchCachedJson<T>(
+  path: string,
+  init: RequestInit = {},
+  deps?: { readonly fetchImpl?: typeof fetch },
+): Promise<T> {
+  const url = buildApiUrl(path);
+  if (!url) {
+    throw new Error("API path is required");
+  }
+
+  if (!shouldUseSharedGetRequest(init) || deps?.fetchImpl) {
+    const data = await fetchJson<T>(url, init, deps);
+    if (shouldUseSharedGetRequest(init)) {
+      writeApiCache(url, data);
+    }
+    return data;
+  }
+
+  const cached = readApiCache<T>(url);
+  if (cached) {
+    return cached.data;
+  }
+
+  const existing = apiInFlightRequests.get(url) as Promise<T> | undefined;
+  if (existing) {
+    return existing;
+  }
+
+  const request = fetchJson<T>(url, init)
+    .then((data) => {
+      writeApiCache(url, data);
+      return data;
+    })
+    .finally(() => {
+      apiInFlightRequests.delete(url);
+    });
+
+  apiInFlightRequests.set(url, request);
+  return request;
+}
+
+export async function prefetchApiPath<T>(path: string): Promise<T | null> {
+  const url = buildApiUrl(path);
+  if (!url) {
+    return null;
+  }
+
+  try {
+    return await fetchCachedJson<T>(url);
+  } catch {
+    return null;
+  }
+}
+
+export function primeApiCache<T>(path: string, data: T): void {
+  const url = buildApiUrl(path);
+  if (!url) return;
+  writeApiCache(url, data);
+}
+
+export function clearApiCache(path?: string): void {
+  if (!path) {
+    apiResponseCache.clear();
+    apiInFlightRequests.clear();
+    return;
+  }
+  const url = buildApiUrl(path);
+  if (!url) return;
+  apiResponseCache.delete(url);
+  apiInFlightRequests.delete(url);
+}
+
 export function useApi<T>(path: string) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
@@ -237,10 +357,17 @@ export function useApi<T>(path: string) {
     }
 
     const requestId = trackerRef.current?.beginRequest() ?? 0;
-    setLoading(true);
     setError(null);
+    const cached = readApiCache<T>(url);
+    if (cached) {
+      setData(cached.data);
+      setLoading(false);
+    } else {
+      setData(null);
+      setLoading(true);
+    }
     try {
-      const json = await fetchJson<T>(url);
+      const json = await fetchCachedJson<T>(url);
       if (!trackerRef.current?.isCurrent(requestId)) return;
       setData(json);
     } catch (e) {
@@ -283,6 +410,7 @@ export async function postApi<T>(path: string, body?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
+  clearApiCache(path);
   invalidateApiPaths(deriveInvalidationPaths(path));
   return result;
 }
@@ -293,6 +421,7 @@ export async function putApi<T>(path: string, body?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
+  clearApiCache(path);
   invalidateApiPaths(deriveInvalidationPaths(path));
   return result;
 }
@@ -303,6 +432,7 @@ export async function patchApi<T>(path: string, body?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
+  clearApiCache(path);
   invalidateApiPaths(deriveInvalidationPaths(path));
   return result;
 }
@@ -311,6 +441,7 @@ export async function deleteApi<T>(path: string): Promise<T> {
   const result = await fetchJson<T>(path, {
     method: "DELETE",
   });
+  clearApiCache(path);
   invalidateApiPaths(deriveInvalidationPaths(path));
   return result;
 }

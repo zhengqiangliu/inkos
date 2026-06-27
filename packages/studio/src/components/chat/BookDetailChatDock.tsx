@@ -4,6 +4,7 @@ import type { TFunction } from "../../hooks/use-i18n";
 import type { SSEMessage } from "../../hooks/use-sse";
 import { chatSelectors, useChatStore } from "../../store/chat";
 import { useServiceStore } from "../../store/service";
+import type { SessionRuntime } from "../../store/chat/types";
 import { usePersistedModelSelection } from "../../hooks/use-persisted-model-selection";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from "../ui/dropdown-menu";
 import { ChatMessage } from "./ChatMessage";
@@ -86,13 +87,22 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
   const [executionCollapsed, setExecutionCollapsed] = useState(false);
   const [panelMode, setPanelMode] = useState<"chat" | "tasks">("chat");
   const [nowTick, setNowTick] = useState(() => Date.now());
+  const [modelPickerOpened, setModelPickerOpened] = useState(false);
 
-  useEffect(() => { void fetchServices(); }, [fetchServices]);
+  const sessionHasDetail = (session: SessionRuntime | null | undefined) => Boolean(
+    session && (session.detailLoaded || session.messages.length > 0 || session.creationDraft || session.creationWizard || session.isDraft)
+  );
+
   useEffect(() => {
+    if (panelMode !== "chat") return;
+    void fetchServices();
+  }, [fetchServices, panelMode]);
+  useEffect(() => {
+    if (!modelPickerOpened) return;
     for (const svc of services) {
       if (svc.connected) void fetchModels(svc.service);
     }
-  }, [services, fetchModels]);
+  }, [fetchModels, modelPickerOpened, services]);
 
   const groupedModels = useMemo(() => (
     services
@@ -136,27 +146,33 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
       if (preferredSessionId && preferredSession?.bookId === bookId) {
         if (isStale()) return;
         activateSession(preferredSessionId);
-        await loadSessionDetail(preferredSessionId);
+        if (!sessionHasDetail(preferredSession)) {
+          await loadSessionDetail(preferredSessionId);
+        }
         return;
       }
       const currentSession = state.activeSessionId ? state.sessions[state.activeSessionId] : null;
       if (currentSession?.bookId === bookId) {
         if (isStale()) return;
         activateSession(currentSession.sessionId);
-        await loadSessionDetail(currentSession.sessionId);
+        if (!sessionHasDetail(currentSession)) {
+          await loadSessionDetail(currentSession.sessionId);
+        }
         return;
       }
       const ids = state.sessionIdsByBook[bookId] ?? [];
       if (ids.length > 0) {
+        const firstSession = state.sessions[ids[0]] ?? null;
         if (isStale()) return;
         activateSession(ids[0]);
-        await loadSessionDetail(ids[0]);
+        if (!sessionHasDetail(firstSession)) {
+          await loadSessionDetail(ids[0]);
+        }
         return;
       }
       const created = await createSession(bookId, { activate: false });
       if (isStale()) return;
       activateSession(created);
-      await loadSessionDetail(created);
     })();
     return () => { cancelled = true; };
   }, [activateSession, bookId, createSession, loadSessionDetail, loadSessionList]);
@@ -316,7 +332,10 @@ export function BookDetailChatDock({ bookId, nav, theme, t, sse, width = 580, la
           <div className="shrink-0 flex flex-col items-end gap-1 text-right">
             {modelPickerStatus === "ready" ? (
               <DropdownMenu>
-                <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-md border border-border/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
+                <DropdownMenuTrigger
+                  className="inline-flex items-center gap-1 rounded-md border border-border/50 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                  onPointerDown={() => setModelPickerOpened(true)}
+                >
                   <span className="max-w-[180px] truncate">{selectedModel ?? "选择模型"}</span>
                   <ChevronDown size={14} />
                 </DropdownMenuTrigger>

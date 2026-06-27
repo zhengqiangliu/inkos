@@ -198,6 +198,7 @@ export function App() {
             <div className="absolute inset-0 flex min-w-0">
               {route.page === "book" ? (
                 <BookDetail
+                  key={route.bookId}
                   bookId={route.bookId}
                   nav={nav}
                   theme={theme}

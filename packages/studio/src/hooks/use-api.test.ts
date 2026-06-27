@@ -1,5 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
-import { buildApiUrl, createApiRequestTracker, deriveInvalidationPaths, fetchJson } from "./use-api";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import {
+  buildApiUrl,
+  clearApiCache,
+  createApiRequestTracker,
+  deriveInvalidationPaths,
+  fetchCachedJson,
+  fetchJson,
+  primeApiCache,
+} from "./use-api";
+
+beforeEach(() => {
+  clearApiCache();
+  vi.unstubAllGlobals();
+});
 
 describe("buildApiUrl", () => {
   it("returns null for blank paths so callers can skip requests", () => {
@@ -47,6 +60,40 @@ describe("fetchJson", () => {
     );
 
     await expect(fetchJson("/books/../bad", {}, { fetchImpl })).rejects.toThrow("Invalid book ID: ../bad");
+  });
+});
+
+describe("fetchCachedJson", () => {
+  it("reuses the same in-flight GET request for identical paths", async () => {
+    const controller: { resolve: ((value: Response) => void) | null } = { resolve: null };
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => {
+      controller.resolve = resolve;
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = fetchCachedJson<{ ok: boolean }>("/books");
+    const second = fetchCachedJson<{ ok: boolean }>("/books");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    if (!controller.resolve) {
+      throw new Error("fetch resolver was not captured");
+    }
+    controller.resolve(new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }));
+
+    await expect(first).resolves.toEqual({ ok: true });
+    await expect(second).resolves.toEqual({ ok: true });
+  });
+
+  it("returns cached data without calling fetch again", async () => {
+    primeApiCache("/books/demo", { id: "demo" });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchCachedJson<{ id: string }>("/books/demo")).resolves.toEqual({ id: "demo" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -101,6 +148,15 @@ describe("deriveInvalidationPaths", () => {
       "/api/v1/books/demo",
       "/api/v1/books/demo/tasks",
       "/api/v1/tasks",
+    ]);
+  });
+
+  it("refreshes truth file views after truth file mutations", () => {
+    expect(deriveInvalidationPaths("/books/demo/truth/story_bible.md")).toEqual([
+      "/api/v1/books",
+      "/api/v1/books/demo",
+      "/api/v1/books/demo/truth",
+      "/api/v1/books/demo/truth/story_bible.md",
     ]);
   });
 

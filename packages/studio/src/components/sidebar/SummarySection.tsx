@@ -1,7 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { useChatStore } from "../../store/chat";
 import type { BookSummary } from "../../store/chat";
-import { fetchJson } from "../../hooks/use-api";
+import { useApi } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
 
 function parseStoryBible(content: string): BookSummary {
@@ -30,16 +30,15 @@ interface SummarySectionProps {
 export function SummarySection({ bookId }: SummarySectionProps) {
   const summary = useChatStore((s) => s.bookSummary);
   const setBookSummary = useChatStore((s) => s.setBookSummary);
-  const bookDataVersion = useChatStore((s) => s.bookDataVersion);
+  const { data } = useApi<{ content: string | null }>(`/books/${bookId}/truth/story_bible.md`);
+  const parsedSummary = useMemo(
+    () => (data?.content ? parseStoryBible(data.content) : null),
+    [data?.content],
+  );
 
   useEffect(() => {
-    setBookSummary(null);
-    fetchJson<{ content: string | null }>(`/books/${bookId}/truth/story_bible.md`)
-      .then((data) => {
-        if (data.content) setBookSummary(parseStoryBible(data.content));
-      })
-      .catch(() => {});
-  }, [bookId, bookDataVersion, setBookSummary]);
+    setBookSummary(parsedSummary);
+  }, [parsedSummary, setBookSummary]);
 
   if (!summary) return null;
 

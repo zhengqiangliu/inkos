@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useApi } from "../hooks/use-api";
+import { prefetchApiPath, useApi } from "../hooks/use-api";
 import type { SSEMessage } from "../hooks/use-sse";
 import { shouldRefetchBookCollections, shouldRefetchDaemonStatus } from "../hooks/use-book-activity";
 import type { TFunction } from "../hooks/use-i18n";
@@ -105,12 +105,20 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
     void loadSessionList(null);
   }, [bookDataVersion, loadSessionList]);
 
+  const prefetchBook = (book: BookSummary) => {
+    if (resolveBookPrimaryNavigation(book) === "book-create") {
+      return;
+    }
+    void prefetchApiPath(`/books/${book.id}`);
+    void loadSessionList(book.id);
+  };
+
   const openBook = (book: BookSummary) => {
     if (resolveBookPrimaryNavigation(book) === "book-create") {
       nav.toBookCreate(book.id);
       return;
     }
-    void loadSessionList(book.id);
+    prefetchBook(book);
     nav.toBook(book.id);
   };
 
@@ -214,6 +222,8 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                             <button
                               type="button"
                               onClick={() => openBook(book)}
+                              onPointerEnter={() => prefetchBook(book)}
+                              onFocus={() => prefetchBook(book)}
                               className={`grid h-10 w-10 place-items-center rounded-full border transition-colors ${
                                 isDrafting ? "border-amber-400/30 bg-amber-500/10 text-amber-700" : isActiveBook ? "border-primary bg-primary/10 text-primary" : "border-transparent text-muted-foreground hover:border-border/60 hover:bg-secondary/40 hover:text-foreground"
                               }`}
@@ -240,6 +250,8 @@ export function Sidebar({ nav, activePage, sse, t, collapsed = false, onToggleCo
                         <button
                           type="button"
                           onClick={() => openBook(book)}
+                          onPointerEnter={() => prefetchBook(book)}
+                          onFocus={() => prefetchBook(book)}
                           className={`flex min-w-0 flex-1 items-center gap-1.5 px-2 py-1.5 rounded-md text-sm transition-colors ${
                             isActiveBook ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground hover:bg-secondary/30"
                           }`}

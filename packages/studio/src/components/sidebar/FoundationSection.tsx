@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import { FileText } from "lucide-react";
 import { useChatStore } from "../../store/chat";
-import { fetchJson } from "../../hooks/use-api";
+import { useApi } from "../../hooks/use-api";
 import { SidebarCard } from "./SidebarCard";
 import { getArtifactLabel } from "../../utils/book-artifacts";
 
@@ -26,17 +26,14 @@ interface FoundationSectionProps {
 }
 
 export function FoundationSection({ bookId }: FoundationSectionProps) {
-  const [files, setFiles] = useState<ReadonlyArray<TruthFileInfo>>([]);
   const openArtifact = useChatStore((s) => s.openArtifact);
-  const bookDataVersion = useChatStore((s) => s.bookDataVersion);
+  const { data } = useApi<{ files: TruthFileInfo[] }>(`/books/${bookId}/truth`);
+  const files = data?.files ?? [];
 
-  useEffect(() => {
-    fetchJson<{ files: TruthFileInfo[] }>(`/books/${bookId}/truth`)
-      .then((data) => setFiles(data.files))
-      .catch(() => setFiles([]));
-  }, [bookId, bookDataVersion]);
-
-  const available = FOUNDATION_FILES.filter((f) => files.some((tf) => tf.name === f.file));
+  const available = useMemo(
+    () => FOUNDATION_FILES.filter((f) => files.some((tf) => tf.name === f.file)),
+    [files],
+  );
   if (available.length === 0) return null;
 
   return (

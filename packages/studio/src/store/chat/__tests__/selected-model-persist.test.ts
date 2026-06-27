@@ -80,4 +80,45 @@ describe("selected model persistence", () => {
     expect(store.getState().activeSessionId).toBe("session-a");
     expect(store.getState().sessionIdsByBook["book-b"]).toContain("session-new");
   });
+
+  it("marks created sessions as detail loaded to avoid immediate follow-up fetches", async () => {
+    const store = createTestStore();
+    const fetchJsonMock = vi.mocked(fetchJson);
+    fetchJsonMock.mockResolvedValue({
+      session: {
+        sessionId: "session-new",
+        bookId: "book-b",
+        title: "Book B",
+      },
+    } as never);
+
+    const sessionId = await store.getState().createSession("book-b", { activate: false });
+
+    expect(store.getState().sessions[sessionId]?.detailLoaded).toBe(true);
+  });
+
+  it("skips session detail fetch when runtime already has loaded detail", async () => {
+    const store = createTestStore();
+    const fetchJsonMock = vi.mocked(fetchJson);
+
+    store.setState((state) => ({
+      ...state,
+      sessions: {
+        ...state.sessions,
+        "session-a": {
+          ...state.sessions["session-a"],
+          sessionId: "session-a",
+          bookId: "book-a",
+          title: "Book A",
+          detailLoaded: true,
+          messages: [{ role: "assistant", content: "cached", timestamp: 1 }],
+          isDraft: false,
+        },
+      },
+    }));
+
+    await store.getState().loadSessionDetail("session-a");
+
+    expect(fetchJsonMock).not.toHaveBeenCalled();
+  });
 });

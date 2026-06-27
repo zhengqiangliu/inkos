@@ -231,6 +231,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
   const [taskTokenSamplesByKey, setTaskTokenSamplesByKey] = useState<Record<string, ReadonlyArray<TaskTokenSample>>>({});
   const [updatingTaskKey, setUpdatingTaskKey] = useState<string | null>(null);
   const [deleteConfirmTask, setDeleteConfirmTask] = useState<BookTask | null>(null);
+  const [taskModelPickerOpened, setTaskModelPickerOpened] = useState(false);
   const createTaskQuickModeHidden = taskType === "audit";
   const createTaskWordCountHidden = taskType === "audit";
 
@@ -265,15 +266,22 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
     });
   }, [data?.tasks]);
 
-  useEffect(() => {
-    void fetchServices();
-  }, [fetchServices]);
+  const ensureTaskModelsLoaded = () => {
+    if (taskModelPickerOpened) return;
+    setTaskModelPickerOpened(true);
+  };
 
   useEffect(() => {
+    if (!taskModelPickerOpened) return;
+    void fetchServices();
+  }, [fetchServices, taskModelPickerOpened]);
+
+  useEffect(() => {
+    if (!taskModelPickerOpened) return;
     for (const service of services) {
       if (service.connected) void fetchModels(service.service);
     }
-  }, [fetchModels, services]);
+  }, [fetchModels, services, taskModelPickerOpened]);
 
   const selectedTask = useMemo(() => {
     if (!tasks.length) return null;
@@ -634,6 +642,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
             setSelectedModel(model, service);
           }}
           onQuickModeChange={setQuickMode}
+          onModelMenuOpen={ensureTaskModelsLoaded}
           onManageModels={onManageModels}
           className="rounded-xl border border-border/40 bg-background/40 p-4"
           label="任务设置"
@@ -742,6 +751,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
                           onQuickModeChange={(next) => {
                             void handleUpdateTaskSettings(task, { quickMode: next });
                           }}
+                          onModelMenuOpen={ensureTaskModelsLoaded}
                           onManageModels={onManageModels}
                           className="mt-2"
                           label="运行配置"
@@ -843,6 +853,7 @@ export function BookTaskPanel({ bookId, nextChapter, targetChapters, chapterWord
                 onQuickModeChange={(next) => {
                   void handleUpdateTaskSettings(detailTask, { quickMode: next });
                 }}
+                onModelMenuOpen={ensureTaskModelsLoaded}
                 onManageModels={onManageModels}
                 className="rounded-xl border border-border/40 bg-background/35 p-3"
                 label="运行配置"

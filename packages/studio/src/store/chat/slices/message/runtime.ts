@@ -153,6 +153,7 @@ export function createSessionRuntime(input: {
   bookId: string | null;
   title: string | null;
   hasWizardStepMessage?: boolean;
+  detailLoaded?: boolean;
   messages?: ReadonlyArray<Message>;
   currentWizardStep?: Message["wizardStep"] | null;
   creationDraft?: SessionRuntime["creationDraft"];
@@ -164,6 +165,7 @@ export function createSessionRuntime(input: {
     bookId: input.bookId,
     title: input.title,
     hasWizardStepMessage: input.hasWizardStepMessage,
+    detailLoaded: input.detailLoaded ?? false,
     messages: input.messages ?? [],
     currentWizardStep: input.currentWizardStep ?? null,
     stream: null,
@@ -238,7 +240,12 @@ export function upsertSessionSummary(
   return {
     ...sessions,
     [summary.sessionId]: existing
-      ? { ...existing, bookId: summary.bookId, title: summary.title, hasWizardStepMessage: summary.hasWizardStepMessage ?? existing.hasWizardStepMessage }
+      ? {
+          ...existing,
+          bookId: summary.bookId,
+          title: summary.title,
+          hasWizardStepMessage: summary.hasWizardStepMessage ?? existing.hasWizardStepMessage,
+        }
       : createSessionRuntime(summary),
   };
 }

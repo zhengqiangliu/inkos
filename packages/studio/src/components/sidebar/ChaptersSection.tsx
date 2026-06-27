@@ -57,6 +57,7 @@ interface ChaptersSectionProps {
   readonly bookId: string;
   readonly t: TFunction;
   readonly sse: { messages: ReadonlyArray<SSEMessage> };
+  readonly initialChapters?: ReadonlyArray<ChapterMeta>;
   readonly className?: string;
   readonly listClassName?: string;
   readonly filter?: "all" | "pending-review" | "failed";
@@ -357,13 +358,14 @@ export function ChaptersSection({
   bookId,
   t,
   sse,
+  initialChapters = [],
   className,
   listClassName,
   filter = "all",
   onOpenAuditHistory,
   hidePassedAuditSummary = false,
 }: ChaptersSectionProps) {
-  const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
+  const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>(initialChapters);
   const [rewritingChapters, setRewritingChapters] = useState<ReadonlyArray<string>>([]);
   const [auditingChapters, setAuditingChapters] = useState<ReadonlyArray<string>>([]);
   const [autoReviewStateByChapter, setAutoReviewStateByChapter] = useState<Readonly<Record<string, AutoReviewChapterState>>>({});
@@ -454,6 +456,10 @@ export function ChaptersSection({
   useEffect(() => {
     refreshChapters();
   }, [bookDataVersion, refreshChapters]);
+
+  useEffect(() => {
+    setChapters(initialChapters);
+  }, [initialChapters]);
 
   useEffect(() => {
     latestAuditSummaryByChapterRef.current.clear();

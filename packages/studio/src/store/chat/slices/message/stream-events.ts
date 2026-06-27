@@ -8,6 +8,7 @@ import type {
   MessageAuditSummary,
   MessagePart,
   PipelineStage,
+  ToolExecution,
 } from "../../types";
 import { shouldRefreshSidebarForTool } from "../../message-policy";
 import {
@@ -227,6 +228,67 @@ function resolveTelemetryToolId(parts: MessagePart[] | undefined): string | unde
     }
   }
   return undefined;
+}
+
+function isRunScopedFallbackToolId(toolId: string, runId: string): boolean {
+  return toolId === `telemetry-${runId}`
+    || toolId === `review-${runId}`
+    || toolId === `persist-${runId}`;
+}
+
+function reconcileToolStartParts(args: {
+  readonly parts: MessagePart[];
+  readonly runId: string;
+  readonly toolId: string;
+  readonly tool: string;
+  readonly agent?: string;
+  readonly toolArgs?: Record<string, unknown>;
+  readonly stages?: PipelineStage[];
+}): MessagePart[] {
+  const existingToolIndex = findLatestPartIndex(
+    args.parts,
+    (part) => part.type === "tool" && part.execution.id === args.toolId,
+  );
+  const fallbackToolIndex = existingToolIndex >= 0
+    ? -1
+    : findLatestPartIndex(
+      args.parts,
+      (part) => part.type === "tool" && isRunScopedFallbackToolId(part.execution.id, args.runId),
+    );
+  const absorbIndex = existingToolIndex >= 0 ? existingToolIndex : fallbackToolIndex;
+  const absorbedExecution = absorbIndex >= 0 && args.parts[absorbIndex]?.type === "tool"
+    ? (args.parts[absorbIndex] as Extract<MessagePart, { type: "tool" }>).execution
+    : undefined;
+
+  const filtered = args.parts.filter((part, index) => {
+    if (part.type !== "tool") return true;
+    if (index === absorbIndex) return false;
+    if (part.execution.id.startsWith(`telemetry-${args.runId}`)) return false;
+    if (part.execution.id === args.toolId) return false;
+    return true;
+  });
+
+  const execution: ToolExecution = {
+    ...(absorbedExecution ?? {}),
+    id: args.toolId,
+    tool: args.tool,
+    ...(args.agent ? { agent: args.agent } : {}),
+    label: resolveExecutionLabel(args.tool, args.agent, args.toolArgs),
+    status: "running",
+    ...(args.toolArgs ? { args: args.toolArgs } : {}),
+    ...(args.stages ? { stages: args.stages } : {}),
+    startedAt: absorbedExecution?.startedAt ?? Date.now(),
+    completedAt: undefined,
+    result: undefined,
+    error: undefined,
+  };
+
+  const insertAt = absorbIndex >= 0 ? Math.min(absorbIndex, filtered.length) : filtered.length;
+  filtered.splice(insertAt, 0, {
+    type: "tool",
+    execution,
+  });
+  return filtered;
 }
 
 function inferAgentFromLog(message: string): string | undefined {
@@ -610,8 +672,6 @@ export function attachSessionStreamListeners({
         sessions: updateSession(state.sessions, sessionId, (runtime) => {
           const [messages, stream] = getOrCreateStream(runtime.messages, streamTs);
           const parts = [...(stream.parts ?? [])];
-
-
           const agent = data.tool === "sub_agent" ? (data.args?.agent as string | undefined) : undefined;
           const stages: PipelineStage[] | undefined = Array.isArray(data.stages) && data.stages.length > 0
             ? (data.stages as string[]).map((label, index) => ({
@@ -620,30 +680,15 @@ export function attachSessionStreamListeners({
               ...(index === 0 ? { activatedAt: Date.now() } : {}),
             }))
             : undefined;
-
-          // Tool starts often create a full execution with stages, while log-based
-          // estimates (e.g. ensureFallbackExecutionPart) may have left a stale
-          // telemetry-only entry behind. Remove any such placeholder for this runId.
-          const filtered = parts.filter((p) => p.type !== "tool" || !p.execution.id.startsWith(`telemetry-${runId}`));
-
-          filtered.push({
-            type: "tool",
-            execution: {
-              id: data.id as string,
-              tool: data.tool as string,
-              agent,
-              label: resolveExecutionLabel(
-                data.tool as string,
-                agent,
-                data.args as Record<string, unknown> | undefined,
-              ),
-              status: "running",
-              args: data.args as Record<string, unknown> | undefined,
-              stages,
-              startedAt: Date.now(),
-            },
+          const filtered = reconcileToolStartParts({
+            parts,
+            runId,
+            toolId: data.id as string,
+            tool: data.tool as string,
+            agent,
+            toolArgs: data.args as Record<string, unknown> | undefined,
+            stages,
           });
-
           return { messages: replaceLast(messages, applyWizardStepToStreamMessage(mergeStreamMessage(stream, filtered), getWizardStep(runtime))) };
         }),
       }));

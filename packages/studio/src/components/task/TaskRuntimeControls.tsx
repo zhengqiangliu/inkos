@@ -19,6 +19,7 @@ export interface TaskRuntimeControlsProps {
   readonly inline?: boolean;
   readonly onModelChange: (model: string, service: string) => void;
   readonly onQuickModeChange: (next: boolean) => void;
+  readonly onModelMenuOpen?: () => void;
   readonly onManageModels?: () => void;
   readonly className?: string;
   readonly label?: string;
@@ -35,6 +36,7 @@ export function TaskRuntimeControls({
   inline = false,
   onModelChange,
   onQuickModeChange,
+  onModelMenuOpen,
   onManageModels,
   className,
   label,
@@ -58,7 +60,7 @@ export function TaskRuntimeControls({
           <span className="shrink-0 text-[11px] font-medium text-muted-foreground">{resolvedLabel}</span>
           {groupedModels.length > 0 ? (
             <DropdownMenu>
-              <DropdownMenuTrigger disabled={!editable} className={triggerClassName}>
+              <DropdownMenuTrigger disabled={!editable} className={triggerClassName} onPointerDown={onModelMenuOpen} onFocus={onModelMenuOpen}>
                 <span className="max-w-[220px] truncate">{modelText}</span>
                 <ChevronDown size={14} className="shrink-0 text-muted-foreground" />
               </DropdownMenuTrigger>
@@ -125,7 +127,7 @@ export function TaskRuntimeControls({
       <span className="shrink-0 text-[11px] font-medium text-muted-foreground">{resolvedLabel}</span>
       {groupedModels.length > 0 ? (
         <DropdownMenu>
-          <DropdownMenuTrigger disabled={!editable} className={triggerClassName}>
+          <DropdownMenuTrigger disabled={!editable} className={triggerClassName} onPointerDown={onModelMenuOpen} onFocus={onModelMenuOpen}>
             <span className="max-w-[220px] truncate">{modelText}</span>
             <ChevronDown size={14} className="shrink-0 text-muted-foreground" />
           </DropdownMenuTrigger>

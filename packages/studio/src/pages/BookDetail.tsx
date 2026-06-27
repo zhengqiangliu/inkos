@@ -2431,17 +2431,22 @@ export function ProductionWorkspacePanel({
 }
 
 export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
+  const [readerMode, setReaderMode] = useState<ReaderMode>("chapter");
+  const shouldLoadTruthFiles = readerMode === "truth";
+  const shouldLoadChapterPlans = readerMode === "design";
+  const shouldLoadScriptWorkspace = readerMode === "script";
+  const shouldLoadProductionWorkspace = readerMode === "production";
+  const shouldLoadTaskChecklist = readerMode === "script";
   const { data, loading, error } = useApi<BookData>(`/books/${bookId}`);
-  const { data: truthData } = useApi<TruthFilesResponse>(`/books/${bookId}/truth`);
-  const { data: chapterPlansData, refetch: refetchChapterPlans } = useApi<ChapterPlansResponse>(`/books/${bookId}/chapter-plans`);
-  const { data: scriptWorkspaceData, refetch: refetchScriptWorkspace } = useApi<ScriptWorkspaceResponse>(`/books/${bookId}/script-workspace`);
-  const { data: productionWorkspaceData, refetch: refetchProductionWorkspace } = useApi<ProductionWorkspaceResponse>(`/books/${bookId}/production-workspace`);
-  const { data: directorPlanData, refetch: refetchDirectorPlan } = useApi<DirectorPlanResponse>(`/books/${bookId}/director-plan`);
-  const { data: assetLibraryData, refetch: refetchAssetLibrary } = useApi<AssetLibraryResponse>(`/books/${bookId}/asset-library`);
-  const { data: taskChecklistData, refetch: refetchTaskChecklist } = useApi<TaskChecklistResponse>(`/books/${bookId}/task-checklist`);
+  const { data: truthData } = useApi<TruthFilesResponse>(shouldLoadTruthFiles ? `/books/${bookId}/truth` : "");
+  const { data: chapterPlansData, refetch: refetchChapterPlans } = useApi<ChapterPlansResponse>(shouldLoadChapterPlans ? `/books/${bookId}/chapter-plans` : "");
+  const { data: scriptWorkspaceData, refetch: refetchScriptWorkspace } = useApi<ScriptWorkspaceResponse>(shouldLoadScriptWorkspace ? `/books/${bookId}/script-workspace` : "");
+  const { data: productionWorkspaceData, refetch: refetchProductionWorkspace } = useApi<ProductionWorkspaceResponse>(shouldLoadProductionWorkspace ? `/books/${bookId}/production-workspace` : "");
+  const { data: directorPlanData, refetch: refetchDirectorPlan } = useApi<DirectorPlanResponse>(shouldLoadProductionWorkspace ? `/books/${bookId}/director-plan` : "");
+  const { data: assetLibraryData, refetch: refetchAssetLibrary } = useApi<AssetLibraryResponse>(shouldLoadProductionWorkspace ? `/books/${bookId}/asset-library` : "");
+  const { data: taskChecklistData, refetch: refetchTaskChecklist } = useApi<TaskChecklistResponse>(shouldLoadTaskChecklist ? `/books/${bookId}/task-checklist` : "");
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [readerMode, setReaderMode] = useState<ReaderMode>("chapter");
   const [selectedPlanChapter, setSelectedPlanChapter] = useState<number | null>(null);
   const [historyChapter, setHistoryChapter] = useState<number | null>(null);
   const [scriptHistoryOpen, setScriptHistoryOpen] = useState(false);
@@ -2474,6 +2479,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
   const artifactFile = useChatStore((s) => s.artifactFile);
   const artifactSource = useChatStore((s) => s.artifactSource);
   const openArtifact = useChatStore((s) => s.openArtifact);
+  const closeArtifact = useChatStore((s) => s.closeArtifact);
   const truthFilesToShow = truthData?.files ?? [];
   const [leftWidth, setLeftWidth] = useState(() => clampWidth(readStoredWidth(DETAIL_LEFT_WIDTH_KEY, DETAIL_LEFT_DEFAULT), DETAIL_LEFT_MIN, DETAIL_LEFT_MAX));
   const [rightWidth, setRightWidth] = useState(() => clampWidth(readStoredWidth(DETAIL_RIGHT_WIDTH_KEY, DETAIL_RIGHT_DEFAULT), DETAIL_RIGHT_MIN, DETAIL_RIGHT_MAX));
@@ -2491,6 +2497,29 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
     if (!shouldRedirectBookDetailToWizard(data ? { creationState: data.book.creationState, creation: data.creation } : null)) return;
     nav.toBookCreate?.(bookId);
   }, [bookId, data?.creation, nav]);
+
+  useEffect(() => {
+    closeArtifact();
+    setReaderMode("chapter");
+    setSelectedPlanChapter(null);
+    setHistoryChapter(null);
+    setScriptHistoryOpen(false);
+    setDirectorPlanHistoryOpen(false);
+    setAssetLibraryHistoryOpen(false);
+    setAuditHistoryChapter(null);
+    setPlanEditorChapter(null);
+    setPlanEditorSource("manual");
+    setChapterPlansSnapshot(null);
+    setChapterPlansRefreshKey(0);
+    setScriptWorkspaceDraft(null);
+    setProductionWorkspaceDraft(null);
+    setDirectorPlanDraft(null);
+    setAssetLibraryDraft(null);
+    setChecklistItems([]);
+    setChecklistTemplateId("short-video");
+    setChecklistInput("");
+    setChecklistNote("");
+  }, [bookId, closeArtifact]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3061,6 +3090,7 @@ export function BookDetail({ bookId, nav, theme, t, sse }: BookDetailProps) {
               bookId={bookId}
               t={t}
               sse={sse}
+              initialChapters={chapters}
               className="flex min-h-0 flex-1 flex-col"
               listClassName="h-full min-h-0"
               onOpenAuditHistory={handleOpenAuditHistory}

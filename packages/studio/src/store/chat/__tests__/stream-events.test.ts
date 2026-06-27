@@ -973,6 +973,102 @@ describe("attachSessionStreamListeners", () => {
     }
   });
 
+  it("merges fallback audit execution into later tool:start for the same run", () => {
+    const eventSource = new MockEventSource();
+    const state = createState();
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 93,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    eventSource.emit("audit:start", {
+      sessionId: "s1",
+      runId: "r1",
+      chapter: 6,
+      round: 1,
+      maxRounds: 2,
+      phase: "audit",
+    });
+    eventSource.emit("tool:start", {
+      sessionId: "s1",
+      runId: "r1",
+      id: "t93",
+      tool: "sub_agent",
+      args: { agent: "writer" },
+      stages: ["准备章节输入", "撰写章节草稿"],
+    });
+
+    const session = state.get().sessions.s1;
+    const last = session.messages[session.messages.length - 1];
+    const tools = last?.parts?.filter((part) => part.type === "tool") ?? [];
+    expect(tools).toHaveLength(1);
+    const tool = tools[0];
+    expect(tool?.type).toBe("tool");
+    if (tool?.type === "tool") {
+      expect(tool.execution.id).toBe("t93");
+      expect(tool.execution.agent).toBe("writer");
+      expect(tool.execution.autoReview).toMatchObject({
+        enabled: true,
+        phase: "audit",
+        round: 1,
+        maxRounds: 2,
+      });
+      expect(tool.execution.stages?.map((stage) => stage.status)).toEqual(["active", "pending"]);
+    }
+  });
+
+  it("preserves fallback logs when later tool:start replaces the placeholder execution", () => {
+    const eventSource = new MockEventSource();
+    const state = createState();
+
+    attachSessionStreamListeners({
+      sessionId: "s1",
+      runId: "r1",
+      streamTs: 94,
+      streamEs: eventSource as unknown as EventSource,
+      set: state.set as any,
+      get: state.get as any,
+    });
+
+    eventSource.emit("audit:start", {
+      sessionId: "s1",
+      runId: "r1",
+      chapter: 9,
+      round: 1,
+      maxRounds: 0,
+      phase: "audit",
+    });
+    eventSource.emit("log", {
+      sessionId: "s1",
+      runId: "r1",
+      message: "[writer] 阶段：准备章节输入",
+    });
+    eventSource.emit("tool:start", {
+      sessionId: "s1",
+      runId: "r1",
+      id: "t94",
+      tool: "sub_agent",
+      args: { agent: "writer" },
+      stages: ["准备章节输入", "撰写章节草稿"],
+    });
+
+    const session = state.get().sessions.s1;
+    const last = session.messages[session.messages.length - 1];
+    const tools = last?.parts?.filter((part) => part.type === "tool") ?? [];
+    expect(tools).toHaveLength(1);
+    const tool = tools[0];
+    expect(tool?.type).toBe("tool");
+    if (tool?.type === "tool") {
+      expect(tool.execution.id).toBe("t94");
+      expect(tool.execution.logs).toContain("[writer] 阶段：准备章节输入");
+    }
+  });
+
   it("appends persist check/repair logs to the latest tool even after tool completion", () => {
     const eventSource = new MockEventSource();
     const state = createState();

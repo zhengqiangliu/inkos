@@ -225,6 +225,7 @@ export interface SessionRuntime {
   readonly bookId: string | null;
   readonly title: string | null;
   readonly hasWizardStepMessage?: boolean;
+  readonly detailLoaded?: boolean;
   readonly messages: ReadonlyArray<Message>;
   readonly currentWizardStep?: import("@actalk/inkos-core").BookCreationWizardStep | null;
   readonly stream: EventSource | null;
